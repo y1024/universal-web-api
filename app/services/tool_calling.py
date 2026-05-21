@@ -15,6 +15,7 @@ import html
 import json
 import math
 import os
+import random
 import re
 import time
 import uuid
@@ -65,6 +66,49 @@ def _read_tool_calling_int(name: str, default: int, minimum: int, maximum: int) 
     except Exception:
         value = default
     return max(minimum, min(maximum, value))
+
+
+_ZERO_WIDTH_NOISE_CHARS = ("\u200b", "\u200c", "\u200d")
+
+
+def _get_tool_calling_prompt_padding_enabled() -> bool:
+    return _read_tool_calling_flag("TOOL_CALLING_PROMPT_PADDING_ENABLED", True)
+
+
+def _get_tool_calling_prompt_padding_obfuscation_enabled() -> bool:
+    return _read_tool_calling_flag("TOOL_CALLING_PROMPT_PADDING_OBFUSCATE", False)
+
+
+def _inject_zero_width_noise(text: str, min_insertions: int = 1, max_insertions: int = 3) -> str:
+    value = str(text or "")
+    if not value.strip():
+        return value
+
+    min_insertions = max(1, int(min_insertions or 1))
+    max_insertions = max(min_insertions, int(max_insertions or min_insertions))
+    target_insertions = max(min_insertions, min(max_insertions, max(1, len(value) // 24)))
+    positions = sorted(random.sample(range(len(value) + 1), k=min(target_insertions, len(value) + 1)))
+
+    parts: List[str] = []
+    last_index = 0
+    for position in positions:
+        parts.append(value[last_index:position])
+        parts.append(random.choice(_ZERO_WIDTH_NOISE_CHARS))
+        last_index = position
+    parts.append(value[last_index:])
+    return "".join(parts)
+
+
+def _decorate_prompt_lines(lines: List[str], obfuscate: bool) -> str:
+    cleaned_lines = [str(line).rstrip() for line in lines if str(line or "").strip()]
+    if not cleaned_lines:
+        return ""
+
+    if obfuscate:
+        random.shuffle(cleaned_lines)
+        cleaned_lines = [_inject_zero_width_noise(line) for line in cleaned_lines]
+
+    return "\n".join(cleaned_lines)
 
 
 def get_tool_calling_allow_media_postprocess() -> bool:
@@ -575,7 +619,21 @@ def _build_example_arguments_from_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _generate_tool_few_shot_examples(tools: List[Dict[str, Any]]) -> str:
+def _build_tool_system_prompt_prefill(obfuscate: bool) -> str:
+    return _decorate_prompt_lines(
+        [
+            "You are connected to an OpenAI-compatible tool-calling adapter.",
+            "You must decide whether to answer normally or request one or more tools.",
+            "Tool use may require multiple rounds. Do not treat the first [Tool Result] block as automatically sufficient.",
+            "For search, retrieval, or analysis tasks, iterate when useful: first locate candidates, then inspect details or context, then synthesize.",
+            "After an empty, ambiguous, partial, too broad, too narrow, error, hint, truncation, or over-limit result, prefer a narrower or adjacent follow-up tool call instead of a final answer.",
+            "Invalid tool calls may be rejected before execution. If that happens, carefully fix the tool name, missing fields, argument types, or tool-choice constraint and try again.",
+        ],
+        obfuscate,
+    )
+
+
+def _generate_tool_few_shot_examples(tools: List[Dict[str, Any]], obfuscate: bool = False) -> str:
     sample_tool = None
     for item in tools or []:
         if not isinstance(item, dict):
@@ -605,15 +663,26 @@ def _generate_tool_few_shot_examples(tools: List[Dict[str, Any]]) -> str:
         ],
     }
     final_example = "your final answer"
-    return (
-        "Concrete examples:\n"
-        "Preferred XML tool call example:\n"
-        f"{xml_tool_call_example}\n"
-        "Compatibility JSON tool call example:\n"
-        f"{json.dumps(tool_call_example, ensure_ascii=False, indent=2)}\n"
-        "Normal answer example:\n"
-        f"{final_example}\n"
-    )
+    example_blocks = [
+        ("Preferred XML tool call example:", xml_tool_call_example),
+        ("Compatibility JSON tool call example:", json.dumps(tool_call_example, ensure_ascii=False, indent=2)),
+        ("Normal answer example:", final_example),
+    ]
+
+    if obfuscate:
+        random.shuffle(example_blocks)
+
+    lines = [_inject_zero_width_noise("Concrete examples:") if obfuscate else "Concrete examples:"]
+    for label, body in example_blocks:
+        header = _inject_zero_width_noise(label) if obfuscate else label
+        body_text = _inject_zero_width_noise(body) if obfuscate and label == "Normal answer example:" else body
+        lines.append(header)
+        lines.append(body_text)
+        lines.append("")
+
+    while lines and not str(lines[-1]).strip():
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _render_xml_tool_call_example(name: str, arguments: Dict[str, Any]) -> str:
@@ -689,28 +758,12 @@ def _escape_xml_text(text: str) -> str:
     return html.escape(str(text or ""), quote=True)
 
 
-def _build_tool_system_prompt(
-    tools: List[Dict[str, Any]],
-    tool_choice: Any,
-    parallel_tool_calls: Optional[bool],
+def _build_tool_system_prompt_core(
+    choice_instruction: str,
+    parallel_instruction: str,
+    tool_defs: str,
 ) -> str:
-    choice_instruction = _describe_tool_choice(tool_choice)
-    parallel_instruction = (
-        "You may return more than one tool call in a single response."
-        if parallel_tool_calls is not False
-        else "Return at most one tool call in a single response."
-    )
-
-    tool_defs = json.dumps(tools or [], ensure_ascii=False, indent=2)
-    examples = _generate_tool_few_shot_examples(tools)
     return (
-        "You are connected to an OpenAI-compatible tool-calling adapter.\n"
-        "You must decide whether to answer normally or request one or more tools.\n"
-        "Tool use may require multiple rounds. Do not treat the first [Tool Result] block as automatically sufficient.\n"
-        "For search, retrieval, or analysis tasks, iterate when useful: first locate candidates, then inspect details or context, then synthesize.\n"
-        "After an empty, ambiguous, partial, too broad, too narrow, error, hint, truncation, or over-limit result, prefer a narrower or adjacent follow-up tool call instead of a final answer.\n"
-        "Invalid tool calls may be rejected before execution. If that happens, "
-        "carefully fix the tool name, missing fields, argument types, or tool-choice constraint and try again.\n"
         "When you call tools, prefer returning only one standalone XML block and nothing else.\n"
         "Preferred XML tool-call format:\n"
         f"<{_PREFERRED_XML_WRAPPER_TAG}>\n"
@@ -739,10 +792,41 @@ def _build_tool_system_prompt(
         "- Do not rush to conclusions after one tool call. If another available tool call can materially improve confidence, call it before answering.\n"
         f"- {choice_instruction}\n"
         f"- {parallel_instruction}\n"
-        f"{examples}"
         "AVAILABLE_TOOLS:\n"
         f"{tool_defs}"
     )
+
+
+def _build_tool_system_prompt(
+    tools: List[Dict[str, Any]],
+    tool_choice: Any,
+    parallel_tool_calls: Optional[bool],
+) -> str:
+    choice_instruction = _describe_tool_choice(tool_choice)
+    parallel_instruction = (
+        "You may return more than one tool call in a single response."
+        if parallel_tool_calls is not False
+        else "Return at most one tool call in a single response."
+    )
+
+    tool_defs = json.dumps(tools or [], ensure_ascii=False, indent=2)
+    include_prompt_padding = _get_tool_calling_prompt_padding_enabled()
+    obfuscate_prompt_padding = include_prompt_padding and _get_tool_calling_prompt_padding_obfuscation_enabled()
+
+    sections: List[str] = []
+    if include_prompt_padding:
+        prefill = _build_tool_system_prompt_prefill(obfuscate_prompt_padding)
+        if prefill:
+            sections.append(prefill)
+
+    sections.append(_build_tool_system_prompt_core(choice_instruction, parallel_instruction, tool_defs))
+
+    if include_prompt_padding:
+        examples = _generate_tool_few_shot_examples(tools, obfuscate=obfuscate_prompt_padding)
+        if examples:
+            sections.append(examples)
+
+    return "\n\n".join(section for section in sections if section)
 
 
 def _format_tool_result_message(name: str, tool_call_id: str, content: str) -> str:

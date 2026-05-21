@@ -232,6 +232,7 @@
 
                 <request-monitor-tab v-if="activeTab === 'monitor'"
                                      :records="requestHistory"
+                                     :detail-loading="requestHistoryDetailLoading"
                                      :system-stats="systemStats"
                                      :loading="requestHistoryLoading"
                                      :error="requestHistoryError"
@@ -273,7 +274,15 @@
                               @edit-definition="openEditDefinitionDialog"
                               @remove-definition="removeDefinition"
                               @toggle-definition="toggleDefinitionEnabled"
-                              @move-definition="moveDefinition">
+                              @move-definition="moveDefinition"
+                              :releases="releases"
+                              :releases-loading="releasesLoading"
+                              :releases-error="releasesError"
+                              :releases-current-version="releasesCurrentVersion"
+                              :switching-tag="switchingTag"
+                              @load-releases="loadReleases"
+                              @switch-to-version="switchToVersion"
+                              @show-changelog="showChangelog">
                 </settings-tab>
             </div>
         </main>
@@ -431,6 +440,33 @@
             </div>
         </div>
 
+        <!-- Changelog 弹窗 -->
+        <div v-if="showChangelogModal"
+             class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+             @click.self="showChangelogModal = false">
+            <div class="flex max-h-[70vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+                <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-slate-700">
+                    <h3 class="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                        📋 版本更新说明 ({{ changelogTag }})
+                    </h3>
+                    <button @click="showChangelogModal = false" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="flex-1 overflow-y-auto px-6 py-4 text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap font-sans leading-relaxed">
+                    {{ changelogContent }}
+                </div>
+                <div class="border-t border-slate-200 bg-slate-50 px-6 py-3 text-right dark:border-slate-700 dark:bg-slate-800/40">
+                    <button @click="showChangelogModal = false"
+                            class="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 shadow-sm active:scale-95">
+                        确定
+                    </button>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <!-- 加载组件 JS -->
@@ -463,6 +499,6 @@
     <script src="/static/js/components/CommandsTab.js?v=2.6.7"></script>
 
     <!-- 主应用逻辑 -->
-<script src="/static/js/dashboard.js?v=2.6.24"></script>
+<script src="/static/js/dashboard.js?v=2.6.26"></script>
 </body>
 </html>

@@ -426,6 +426,8 @@ curl "http://127.0.0.1:8199/tab/2/v1/chat/completions?preset_name=pro" ^
         <table>
             <tr><th>Setting</th><th>Where</th><th>What it controls</th></tr>
             <tr><td><strong>Retry strategy</strong></td><td>Settings → Environment Settings → Function Calling</td><td>Whether the repair round sends only minimal correction feedback or the original conversation plus feedback.</td></tr>
+            <tr><td><strong>Prompt padding obfuscation</strong></td><td>Settings → Environment Settings → Function Calling</td><td>Randomizes the extra prefill and tail prompt blocks and inserts a few zero-width characters.</td></tr>
+            <tr><td><strong>Prompt padding switch</strong></td><td>Settings → Environment Settings → Function Calling</td><td>Turns those extra prompt blocks on or off. When off, only the retry strategy prompt remains.</td></tr>
             <tr><td><strong>Internal repair retries</strong></td><td>Settings → Environment Settings → Function Calling</td><td>How many repair rounds are allowed after validation fails. Set it to 0 to disable internal repair.</td></tr>
             <tr><td><strong>Single Tool Result limit</strong></td><td>Settings → Environment Settings → Function Calling</td><td>Stops oversized tool output from being pushed back into the website model.</td></tr>
         </table>

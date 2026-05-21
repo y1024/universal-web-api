@@ -14,6 +14,7 @@ import os
 import time
 import uuid
 import re
+import math
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
@@ -173,10 +174,11 @@ class RequestManager:
                 data = json.load(f)
             records = data.get("records", data if isinstance(data, list) else [])
             if isinstance(records, list):
-                self._monitor_history = [
+                normalized_records = [
                     self._normalize_history_record(item) for item in records[-200:]
                     if isinstance(item, dict)
                 ]
+                self._monitor_history = self._sort_history_records(normalized_records)[-200:]
         except Exception as e:
             logger.debug(f"加载请求历史失败: {e}")
             self._monitor_history = []
@@ -285,6 +287,8 @@ class RequestManager:
                 "chars": len(prompt_text) + len(response_text),
             }
 
+        normalized["history_key"] = cls._make_history_key(normalized)
+
         return normalized
 
     @staticmethod
@@ -350,6 +354,46 @@ class RequestManager:
         non_ascii_chars = re.findall(r"[^\x00-\x7F\s]", text)
         punctuation = re.findall(r"[^\w\s]", text, flags=re.UNICODE)
         return max(1, int(len(ascii_words) * 1.25 + len(non_ascii_chars) * 0.8 + len(punctuation) * 0.25))
+
+    @staticmethod
+    def _coerce_timestamp(value: Any) -> float:
+        try:
+            timestamp = float(value)
+        except Exception:
+            return 0.0
+        if not math.isfinite(timestamp) or timestamp <= 0:
+            return 0.0
+        if timestamp > 1_000_000_000_000:
+            return timestamp / 1000.0
+        return timestamp
+
+    @classmethod
+    def _history_sort_value(cls, record: Dict[str, Any]) -> float:
+        if not isinstance(record, dict):
+            return 0.0
+        return (
+            cls._coerce_timestamp(record.get("finished_at"))
+            or cls._coerce_timestamp(record.get("started_at"))
+            or cls._coerce_timestamp(record.get("created_at"))
+        )
+
+    @classmethod
+    def _make_history_key(cls, record: Dict[str, Any]) -> str:
+        request_id = str(record.get("id") or "").strip() or "request"
+        created_at = cls._coerce_timestamp(record.get("created_at"))
+        finished_at = cls._coerce_timestamp(record.get("finished_at"))
+        return f"{request_id}:{created_at:.6f}:{finished_at:.6f}"
+
+    @classmethod
+    def _sort_history_records(cls, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(
+            records,
+            key=lambda item: (
+                cls._history_sort_value(item),
+                cls._coerce_timestamp(item.get("created_at")) if isinstance(item, dict) else 0.0,
+                str(item.get("history_key") or item.get("id") or "") if isinstance(item, dict) else "",
+            ),
+        )
 
     @staticmethod
     def _extract_response_text(payload: Any) -> str:
@@ -628,7 +672,7 @@ class RequestManager:
 
         with self._history_lock:
             self._monitor_history.append(record)
-            self._monitor_history = self._monitor_history[-200:]
+            self._monitor_history = self._sort_history_records(self._monitor_history)[-200:]
 
         threading.Thread(target=self._save_history, daemon=True).start()
 
@@ -636,9 +680,14 @@ class RequestManager:
     def _history_revision_unlocked(records: List[Dict[str, Any]]) -> str:
         if not records:
             return "0::0"
-        latest = records[-1] if isinstance(records[-1], dict) else {}
-        latest_time = latest.get("finished_at") or latest.get("created_at") or 0
-        return f"{len(records)}:{latest.get('id', '')}:{latest_time}"
+        latest = max(
+            (item for item in records if isinstance(item, dict)),
+            key=RequestManager._history_sort_value,
+            default={},
+        )
+        latest_time = RequestManager._history_sort_value(latest)
+        latest_key = latest.get("history_key") or RequestManager._make_history_key(latest)
+        return f"{len(records)}:{latest_key}:{latest_time}"
 
     @staticmethod
     def _history_preview_text(value: Any, max_chars: int = 220) -> str:
@@ -684,12 +733,12 @@ class RequestManager:
         except Exception:
             count = 200
         with self._history_lock:
-            history = [
+            history = self._sort_history_records([
                 dict(item)
                 for item in self._monitor_history[-count:]
                 if isinstance(item, dict)
-            ]
-            revision = self._history_revision_unlocked(self._monitor_history)
+            ])[-count:]
+            revision = self._history_revision_unlocked(history)
 
         records = list(reversed(history))
         if not include_detail:
@@ -711,9 +760,17 @@ class RequestManager:
             return None
 
         with self._history_lock:
-            for item in reversed(self._monitor_history):
-                if not isinstance(item, dict):
-                    continue
+            history = self._sort_history_records([
+                dict(item)
+                for item in self._monitor_history
+                if isinstance(item, dict)
+            ])
+
+            for item in reversed(history):
+                if str(item.get("history_key") or "").strip() == request_key:
+                    return dict(item)
+
+            for item in reversed(history):
                 if str(item.get("id") or "").strip() == request_key:
                     return dict(item)
         return None

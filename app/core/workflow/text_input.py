@@ -2002,8 +2002,6 @@ class TextInputHandler:
                 return
             logger.warning("[FILE_PASTE] 文件粘贴失败，降级到剪贴板文本粘贴")
         
-        logger.debug(f"[STEALTH] 使用剪贴板粘贴（无click），长度 {len(text)}")
-        
         clipboard_lock = get_clipboard_lock()
         
         settle_min = float(BrowserConstants.get('STEALTH_PASTE_SETTLE_MIN') or 0.12)
@@ -2023,8 +2021,6 @@ class TextInputHandler:
             if current_len > 0:
                 self._press_primary_combo('A', humanized=True)
                 self._smart_delay(0.08, 0.18)
-            else:
-                logger.debug("[STEALTH] 输入框为空，跳过 Ctrl+A")
             
             if self._check_cancelled():
                 return
@@ -2063,13 +2059,13 @@ class TextInputHandler:
 
             if not skip_verify:
                 self._stealth_verify_paste_light(ele, text)
-            else:
-                logger.debug_throttled(
-                    "stealth.skip_paste_verify",
-                    "[STEALTH] 跳过粘贴验证",
-                    interval_sec=15.0,
-                )
-        
+
+            logger.debug(
+                "[STEALTH_INPUT] 粘贴完成: "
+                f"mode=clipboard_no_click, text_len={len(text)}, "
+                f"before_len={current_len}, extra_verify={'done' if not skip_verify else 'skip'}"
+            )
+
         except WorkflowError:
             raise
         except Exception as e:
@@ -2094,8 +2090,6 @@ class TextInputHandler:
                 return
             logger.warning("[FILE_PASTE] 文件粘贴失败，降级到剪贴板文本粘贴")
         
-        logger.debug(f"[STEALTH] 使用剪贴板粘贴，长度 {len(text)}")
-    
         clipboard_lock = get_clipboard_lock()
         
         settle_min = float(BrowserConstants.get('STEALTH_PASTE_SETTLE_MIN') or 0.12)
@@ -2119,8 +2113,6 @@ class TextInputHandler:
             if current_len > 0:
                 self._press_primary_combo('A', humanized=True)
                 self._smart_delay(0.03, 0.08)
-            else:
-                logger.debug("[STEALTH] 输入框为空，跳过 Ctrl+A")
         
             if self._check_cancelled():
                 return
@@ -2160,13 +2152,13 @@ class TextInputHandler:
             # 5. 验证（可配置跳过，默认跳过以避免 JS 注入）
             if not skip_verify:
                 self._stealth_verify_paste_light(ele, text)
-            else:
-                logger.debug_throttled(
-                    "stealth.skip_paste_verify",
-                    "[STEALTH] 跳过粘贴验证（STEALTH_SKIP_PASTE_VERIFY=true）",
-                    interval_sec=15.0,
-                )
-    
+
+            logger.debug(
+                "[STEALTH_INPUT] 粘贴完成: "
+                f"mode=clipboard, text_len={len(text)}, "
+                f"before_len={current_len}, extra_verify={'done' if not skip_verify else 'skip'}"
+            )
+
         except WorkflowError:
             raise
         except Exception as e:

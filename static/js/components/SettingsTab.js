@@ -21,7 +21,13 @@ window.SettingsTab = {
         
         selectorDefinitions: { type: Array, required: true },
         definitionsChanged: { type: Boolean, default: false },
-        savingDefinitions: { type: Boolean, default: false }
+        savingDefinitions: { type: Boolean, default: false },
+
+        releases: { type: Array, required: true },
+        releasesLoading: { type: Boolean, default: false },
+        releasesError: { type: String, default: '' },
+        releasesCurrentVersion: { type: String, default: '' },
+        switchingTag: { type: String, default: null }
     },
     emits: [
         'save-env', 'reset-env', 'toggle-env-group',
@@ -29,12 +35,14 @@ window.SettingsTab = {
         'save-update-preserve', 'reset-update-preserve', 'toggle-update-preserve',
         'save-definitions', 'reset-definitions',
         'add-definition', 'edit-definition', 'remove-definition', 
-        'toggle-definition', 'move-definition'
+        'toggle-definition', 'move-definition',
+        'load-releases', 'switch-to-version', 'show-changelog'
     ],
     data() {
         return {
             selectorDefsCollapsed: true,
-            updatePreserveCollapsed: true
+            updatePreserveCollapsed: true,
+            versionCollapsed: false
         };
     },
     computed: {
@@ -63,6 +71,16 @@ window.SettingsTab = {
                 return 'bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
             }
             return 'bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
+        },
+        formatReleaseDate(isoStr) {
+            if (!isoStr) return '—';
+            try {
+                var d = new Date(isoStr);
+                var pad = function(n) { return String(n).padStart(2, '0'); };
+                return d.getFullYear() + '/' + pad(d.getMonth()+1) + '/' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+            } catch (e) {
+                return isoStr;
+            }
         }
     },
     template: `
@@ -198,6 +216,93 @@ window.SettingsTab = {
                                 </svg>
                                 添加新定义
                             </button>
+                        </div>
+                    </div>
+                </div>
+                
+
+                <!-- ========== 版本管理 ========== -->
+                <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700">
+                    <div class="p-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center cursor-pointer"
+                         @click="versionCollapsed = !versionCollapsed">
+                        <div>
+                            <h3 class="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                                <span class="text-xl">🔄</span> 版本管理
+                            </h3>
+                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">手动选择 GitHub 发布的版本进行切换/更新</p>
+                        </div>
+                        <div class="flex gap-2 items-center">
+                            <span class="text-xs px-2 py-1 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-700 rounded-full text-blue-700 dark:text-blue-300 font-mono font-medium">当前版本: v{{ releasesCurrentVersion || '加载中...' }}</span>
+                            <div class="h-6 w-px bg-gray-200 dark:bg-gray-600 mx-2"></div>
+                            <button @click.stop="$emit('load-releases')" title="刷新版本列表"
+                                    :disabled="releasesLoading"
+                                    class="p-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors flex items-center justify-center">
+                                <svg :class="['w-4 h-4', releasesLoading ? 'animate-spin' : '']" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/>
+                                </svg>
+                            </button>
+                            <button class="p-1.5 ml-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
+                                    v-html="versionCollapsed ? $icons.chevronDown : $icons.chevronUp">
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-show="!versionCollapsed" class="p-0">
+                        <div v-if="releasesLoading && !releases.length" class="p-8 text-center text-gray-500 dark:text-gray-400">
+                            <div class="animate-spin inline-block w-6 h-6 border-[3px] border-current border-t-transparent text-blue-600 rounded-full mb-2" role="status" aria-label="loading"></div>
+                            <div>正在加载版本列表...</div>
+                        </div>
+                        <div v-else-if="releasesError" class="p-8 text-center text-red-500">
+                            {{ releasesError }}
+                            <button @click="$emit('load-releases')" class="mt-2 block mx-auto px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded text-xs">重试</button>
+                        </div>
+                        <div v-else-if="!releases.length" class="p-8 text-center text-gray-500 dark:text-gray-400">
+                            暂无版本发布记录
+                        </div>
+                        <div v-else>
+                            <!-- 表头 -->
+                            <div class="grid grid-cols-12 gap-4 px-6 py-3 bg-gray-50 dark:bg-gray-900/50 text-xs font-semibold text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700">
+                                <div class="col-span-3">版本 (Tag)</div>
+                                <div class="col-span-4">发布时间</div>
+                                <div class="col-span-2 text-center">更新说明</div>
+                                <div class="col-span-3 text-center">操作</div>
+                            </div>
+
+                            <!-- 列表 -->
+                            <div class="divide-y divide-gray-100 dark:divide-gray-700">
+                                <div v-for="rel in releases" :key="rel.tag" 
+                                     class="grid grid-cols-12 gap-4 px-6 py-3.5 items-center hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                                    <div class="col-span-3 flex items-center gap-2">
+                                        <span class="font-mono font-bold text-gray-900 dark:text-white">{{ rel.tag }}</span>
+                                        <span v-if="rel.tag === 'v' + releasesCurrentVersion || rel.tag === releasesCurrentVersion || rel.is_current" class="px-2 py-0.5 text-[10px] text-green-700 bg-green-50 border border-green-200 rounded dark:bg-green-900/30 dark:text-green-300 dark:border-green-800">当前</span>
+                                    </div>
+                                    <div class="col-span-4 text-sm text-gray-500 dark:text-gray-400">
+                                        {{ formatReleaseDate(rel.published_at) }}
+                                    </div>
+                                    <div class="col-span-2 text-center">
+                                        <button @click="$emit('show-changelog', rel.tag, rel.body)"
+                                                class="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+                                            查看说明
+                                        </button>
+                                    </div>
+                                    <div class="col-span-3 text-center">
+                                        <span v-if="rel.tag === 'v' + releasesCurrentVersion || rel.tag === releasesCurrentVersion || rel.is_current" 
+                                              class="inline-block px-3 py-1 text-xs text-gray-400 bg-gray-100 dark:bg-gray-800 dark:text-gray-600 rounded-lg font-medium">
+                                            已是当前版本
+                                        </span>
+                                        <button v-else-if="switchingTag === rel.tag" disabled
+                                                class="px-3 py-1 text-xs text-white bg-blue-400 rounded-lg cursor-wait animate-pulse">
+                                            切换中...
+                                        </button>
+                                        <button v-else @click="$emit('switch-to-version', rel.tag)"
+                                                :disabled="!!switchingTag"
+                                                :class="['px-3 py-1 text-xs font-medium rounded-lg transition-colors',
+                                                         switchingTag ? 'bg-gray-100 text-gray-400 dark:bg-gray-800 dark:text-gray-600 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-sm']">
+                                            切换到此版本
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

@@ -220,6 +220,9 @@ class BrowserConstants:
         'STEALTH_SKIP_PASTE_VERIFY': True,
         'STEALTH_SEND_IMAGE_WAIT': 8.0,
         'STEALTH_SEND_IMAGE_RETRY_INTERVAL': 1.2,
+        'STEALTH_MOUSE_WARMUP_ENABLED': False,
+        'STEALTH_CLICK_STRATEGY': 'auto',
+        'STEALTH_DOM_CLICK_TARGETS': ['new_chat_btn', 'input_box', 'send_btn'],
         'PAGE_INTERACTION_THROTTLE_ENABLED': True,
         'PAGE_INTERACTION_MAX_CONCURRENT': 3,
         'PAGE_INTERACTION_MAX_WAIT': 20.0,
@@ -285,6 +288,9 @@ class BrowserConstants:
     STEALTH_SKIP_PASTE_VERIFY = True
     STEALTH_SEND_IMAGE_WAIT = 8.0
     STEALTH_SEND_IMAGE_RETRY_INTERVAL = 1.2
+    STEALTH_MOUSE_WARMUP_ENABLED = False
+    STEALTH_CLICK_STRATEGY = "auto"
+    STEALTH_DOM_CLICK_TARGETS = ["new_chat_btn", "input_box", "send_btn"]
     PAGE_INTERACTION_THROTTLE_ENABLED = True
     PAGE_INTERACTION_MAX_CONCURRENT = 3
     PAGE_INTERACTION_MAX_WAIT = 20.0
@@ -744,10 +750,26 @@ def _bool_phrase(raw_value: str, true_text: str, false_text: str) -> str:
 
 def _split_suppressed_suffix(text: str) -> tuple[str, int]:
     raw_text = str(text or "")
+    prefix_match = re.match(r"^(\[[^\]]+\])\s+\[折叠(\d+)\]\s+(.+)$", raw_text, re.S)
+    if prefix_match:
+        leading_tag, suppressed, rest = prefix_match.groups()
+        return f"{leading_tag} {rest}", int(suppressed or 0)
     match = re.match(r"^(.*) \(suppressed=(\d+)\)$", raw_text, re.S)
     if not match:
         return raw_text, 0
     return str(match.group(1) or ""), int(match.group(2) or 0)
+
+
+def _add_suppressed_marker(text: str, suppressed_count: int) -> str:
+    raw_text = str(text or "")
+    if suppressed_count <= 0 or not raw_text:
+        return raw_text
+    marker = f"[折叠{suppressed_count}]"
+    tag_match = re.match(r"^(\[[^\]]+\])\s*(.*)$", raw_text, re.S)
+    if tag_match:
+        leading_tag, rest = tag_match.groups()
+        return f"{leading_tag} {marker} {rest}".rstrip()
+    return f"{marker} {raw_text}"
 
 
 def _restore_suppressed_hint(text: str, suppressed_count: int) -> str:
@@ -1587,8 +1609,7 @@ class SecureLogger:
                 state["suppressed"] = int(state.get("suppressed", 0) or 0) + 1
 
         if should_log:
-            suffix = f" (suppressed={suppressed})" if suppressed > 0 else ""
-            self.debug(f"{msg}{suffix}")
+            self.debug(_add_suppressed_marker(msg, suppressed))
 
     def info(self, msg: str):
         self._emit(logging.INFO, 'INFO', msg)

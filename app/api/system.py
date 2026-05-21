@@ -229,6 +229,9 @@ DEFAULT_BROWSER_CONSTANTS: Dict[str, Any] = {
     "STEALTH_SKIP_PASTE_VERIFY": True,
     "STEALTH_SEND_IMAGE_WAIT": 8.0,
     "STEALTH_SEND_IMAGE_RETRY_INTERVAL": 1.2,
+    "STEALTH_MOUSE_WARMUP_ENABLED": False,
+    "STEALTH_CLICK_STRATEGY": "auto",
+    "STEALTH_DOM_CLICK_TARGETS": ["new_chat_btn", "input_box", "send_btn"],
     "DEFAULT_ELEMENT_TIMEOUT": 3,
     "FALLBACK_ELEMENT_TIMEOUT": 1,
     "ELEMENT_CACHE_MAX_AGE": 5.0,
@@ -1458,3 +1461,97 @@ async def get_request_history_detail(
     if not record:
         raise HTTPException(status_code=404, detail="请求历史不存在")
     return record
+
+
+# ================= 版本管理 API =================
+
+import threading as _threading
+
+_version_switch_lock = _threading.Lock()
+_version_switch_state: dict = {
+    "running": False,
+    "tag": None,
+    "success": None,
+    "error": None,
+}
+
+
+@router.get("/api/update/releases")
+async def get_releases(
+    repo: Optional[str] = None,
+    authenticated: bool = Depends(verify_auth),
+):
+    """获取 GitHub Release 列表（供控制面板手动选择版本）"""
+    try:
+        from updater import fetch_all_releases, get_current_version, normalize_version, DEFAULT_REPO
+        target_repo = repo or os.getenv("GITHUB_REPO", DEFAULT_REPO)
+        releases_raw = await asyncio.to_thread(fetch_all_releases, target_repo)
+        current_version = get_current_version()
+        result = []
+        for r in releases_raw:
+            tag = str(r.get("tag_name") or "").strip()
+            if not tag:
+                continue
+            result.append({
+                "tag": tag,
+                "published_at": r.get("published_at") or "",
+                "body": r.get("body") or "",
+                "zipball_url": r.get("zipball_url") or "",
+                "is_current": normalize_version(tag) == normalize_version(current_version),
+            })
+        return {"releases": result, "current_version": current_version}
+    except Exception as e:
+        logger.error(f"获取 Release 列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+
+
+@router.post("/api/update/switch")
+async def switch_version(
+    request: Request,
+    authenticated: bool = Depends(verify_auth),
+):
+    """切换到指定版本（在后台线程中执行，完成后触发服务重启）"""
+    global _version_switch_state
+
+    with _version_switch_lock:
+        if _version_switch_state.get("running"):
+            raise HTTPException(status_code=409, detail="已有版本切换任务正在运行，请稍候")
+
+    data = await request.json()
+    tag = str(data.get("tag") or "").strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="缺少 tag 参数")
+
+    def _run_switch():
+        global _version_switch_state
+        try:
+            from updater import update_to_version
+            success = update_to_version(tag)
+            with _version_switch_lock:
+                _version_switch_state = {"running": False, "tag": tag, "success": success, "error": None}
+            if success:
+                import time as _time
+                logger.warning(f"版本切换成功: {tag}，2 秒后重启服务")
+                _time.sleep(2.0)
+                import os as _os
+                _os._exit(3)
+        except Exception as exc:
+            logger.error(f"版本切换失败: {exc}")
+            with _version_switch_lock:
+                _version_switch_state = {"running": False, "tag": tag, "success": False, "error": str(exc)}
+
+    with _version_switch_lock:
+        _version_switch_state = {"running": True, "tag": tag, "success": None, "error": None}
+
+    t = _threading.Thread(target=_run_switch, daemon=True, name=f"version-switch-{tag}")
+    t.start()
+
+    logger.info(f"版本切换任务已启动: {tag}")
+    return {"status": "started", "tag": tag}
+
+
+@router.get("/api/update/status")
+async def get_version_switch_status(authenticated: bool = Depends(verify_auth)):
+    """查询当前版本切换任务状态"""
+    with _version_switch_lock:
+        return dict(_version_switch_state)

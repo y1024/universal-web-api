@@ -531,6 +531,8 @@ curl "http://127.0.0.1:8199/tab/2/v1/chat/completions?preset_name=pro" ^
             <table>
                 <tr><th>配置项</th><th>位置</th><th>作用</th></tr>
                 <tr><td><strong>重试策略</strong></td><td>设置 → 环境配置 → 函数调用</td><td>决定校验失败后，是只发最小修复上下文，还是把原始上下文一并发回模型。</td></tr>
+                <tr><td><strong>预填充乱序零宽</strong></td><td>设置 → 环境配置 → 函数调用</td><td>开启后，额外的预填充和尾部提示词会随机乱序，并插入少量零宽字符。</td></tr>
+                <tr><td><strong>注入预填充/尾部提示词</strong></td><td>设置 → 环境配置 → 函数调用</td><td>关闭后不再注入这些额外提示词，只保留重试策略相关提示词。</td></tr>
                 <tr><td><strong>内部修复重试次数</strong></td><td>设置 → 环境配置 → 函数调用</td><td>控制自动修复后再试多少轮；设为 0 相当于关闭内部修复。</td></tr>
                 <tr><td><strong>单条 Tool Result 上限</strong></td><td>设置 → 环境配置 → 函数调用</td><td>防止工具结果过长，直接把网页模型撑爆。</td></tr>
             </table>

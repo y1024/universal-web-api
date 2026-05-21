@@ -497,6 +497,18 @@ const ENV_CONFIG_SCHEMA = {
                 ],
                 default: 'focused_repair'
             },
+            TOOL_CALLING_PROMPT_PADDING_OBFUSCATE: {
+                label: '预填充乱序零宽',
+                desc: '开启后，函数调用的预填充和尾部提示词会随机乱序，并插入少量零宽字符。仅影响额外 padding，不改动工具定义；默认关闭。',
+                type: 'switch',
+                default: false
+            },
+            TOOL_CALLING_PROMPT_PADDING_ENABLED: {
+                label: '注入预填充/尾部提示词',
+                desc: '开启后，会继续注入函数调用的预填充与尾部提示词；关闭后仅保留重试策略相关提示词。默认开启。',
+                type: 'switch',
+                default: true
+            },
             TOOL_CALLING_INTERNAL_RETRY_MAX: {
                 label: '内部修复重试次数',
                 desc: '函数调用结果校验失败时，自动修复后再次重试的次数。0 表示关闭自动修复；默认 2；最大 5。',

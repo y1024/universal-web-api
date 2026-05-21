@@ -1189,9 +1189,9 @@ class NetworkMonitor:
                         last_activity_time = time.time()
                         logger.debug_throttled(
                             f"network.active_stream_growth.{id(self)}",
-                            "[NetworkMonitor] 活跃流响应仍在增长 "
-                            f"(source={next_source}, size={len(next_body)} chars)",
-                            interval_sec=3.0,
+                            "[NetworkMonitor] 流响应增长 "
+                            f"(source={next_source}, body={len(next_body)} chars)",
+                            interval_sec=10.0,
                         )
                         try:
                             parse_result = self.parser.parse_chunk(active_stream_body)
@@ -1260,11 +1260,11 @@ class NetworkMonitor:
                     )
                     logger.debug_throttled(
                         f"network.wait_first_content.{id(self)}",
-                        "[NetworkMonitor] 尚未拿到首个有效正文，延长首段等待 "
+                        "[NetworkMonitor] 等待首段正文 "
                         f"(idle={silence_duration:.1f}s, "
                         f"limit={effective_silence_threshold:.1f}s, "
                         f"body_len={len(active_stream_body or '')})",
-                        interval_sec=4.0,
+                        interval_sec=10.0,
                     )
 
                 if silence_duration > effective_silence_threshold:

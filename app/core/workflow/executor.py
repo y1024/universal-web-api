@@ -25,6 +25,7 @@ from app.core.config import (
     ElementNotFoundError,
     WorkflowError,
 )
+from app.core.page_lifecycle import install_visibility_emulation, restore_visibility_emulation
 from app.core.elements import ElementFinder
 from app.core.parsers import ParserRegistry
 from app.core.request_transport import (
@@ -343,11 +344,6 @@ class WorkflowExecutor:
                     stop_checker=should_stop_checker,
                     event_handler=self._handle_network_event
                 )
-                logger.debug(
-                    f"[Executor] 网络监听器已启用 "
-                    f"(parser={network_config.get('parser')}, "
-                    f"listen_pattern={effective_stream_config.get('network', {}).get('listen_pattern')!r})"
-                )
             except Exception as e:
                 logger.warning(f"[Executor] 网络监听器创建失败: {e}")
 
@@ -429,9 +425,6 @@ class WorkflowExecutor:
             selectors=self._selectors,
         )
         
-        if extractor:
-            logger.debug(f"WorkflowExecutor 使用提取器: {extractor.get_id()}")
-        
         if self._image_config.get("enabled"):
             logger.debug(f"[IMAGE] 图片提取已启用")
         
@@ -473,6 +466,177 @@ class WorkflowExecutor:
         if minimum is not None:
             result = max(int(minimum), result)
         return result
+
+    def _get_stealth_click_strategy(self) -> str:
+        raw = str(BrowserConstants.get("STEALTH_CLICK_STRATEGY") or "auto").strip().lower()
+        aliases = {
+            "dom": "dom_safe",
+            "js": "dom_safe",
+            "native": "dom_safe",
+            "background": "dom_safe",
+            "background_safe": "dom_safe",
+            "cdp": "cdp_mouse",
+            "mouse": "cdp_mouse",
+            "cdp_mouse": "cdp_mouse",
+            "human": "cdp_mouse",
+            "auto": "auto",
+        }
+        return aliases.get(raw, "auto")
+
+    @staticmethod
+    def _normalize_string_set(value: Any) -> set:
+        if isinstance(value, (list, tuple, set)):
+            return {
+                str(item or "").strip()
+                for item in value
+                if str(item or "").strip()
+            }
+        if isinstance(value, str):
+            return {
+                item.strip()
+                for item in value.replace(";", ",").split(",")
+                if item.strip()
+            }
+        return set()
+
+    def _get_stealth_dom_click_targets(self) -> set:
+        targets = self._normalize_string_set(BrowserConstants.get("STEALTH_DOM_CLICK_TARGETS"))
+        if not targets:
+            targets = {"new_chat_btn", "input_box", "send_btn"}
+        return targets
+
+    def _should_use_stealth_dom_click(self, target_key: str = "") -> bool:
+        if not self.stealth_mode:
+            return False
+
+        strategy = self._get_stealth_click_strategy()
+        if strategy == "dom_safe":
+            return True
+        if strategy == "cdp_mouse":
+            return False
+
+        target = str(target_key or "").strip()
+        return bool(target and target in self._get_stealth_dom_click_targets())
+
+    def _should_run_stealth_warmup(self, action: str = "", target_key: str = "") -> bool:
+        if not self.stealth_mode:
+            return False
+        if not self._coerce_bool(BrowserConstants.get("STEALTH_MOUSE_WARMUP_ENABLED"), False):
+            return False
+        if str(action or "").strip().upper() == "CLICK" and self._should_use_stealth_dom_click(target_key):
+            return False
+        return True
+
+    def _maybe_warmup_page_for_stealth(self, action: str = "", target_key: str = ""):
+        if not self.stealth_mode or getattr(self, "_page_warmed_up", False):
+            return
+
+        if not self._should_run_stealth_warmup(action, target_key):
+            self._page_warmed_up = True
+            logger.debug(
+                "[STEALTH] 跳过鼠标预热: "
+                f"action={str(action or '-').upper()}, target={target_key or '-'}, "
+                f"click_strategy={self._get_stealth_click_strategy()}"
+            )
+            return
+
+        self._warmup_page_for_stealth()
+        self._page_warmed_up = True
+
+    def _stealth_dom_click_element(self, ele, target_key: str = "", selector: str = "") -> bool:
+        """
+        Background-safe low-entropy click path.
+
+        CDP Input mouse events can stall when Chrome keeps a tab in the
+        background input/compositor pipeline. For routine selector targets we
+        can avoid stealing foreground focus by invoking the page-side click
+        directly and preserving the rest of the low-entropy workflow.
+        """
+        if self._check_cancelled():
+            return False
+
+        started_at = time.perf_counter()
+        target_label = target_key or "-"
+        selector_label = self._compact_log_value(selector, 100)
+
+        try:
+            self._smart_delay(0.02, 0.06)
+            result = ele.run_js(
+                """
+                try {
+                    const el = this;
+                    if (!el || !el.isConnected) {
+                        return { ok: false, reason: 'not_connected' };
+                    }
+
+                    try {
+                        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+                    } catch (error) {}
+
+                    try {
+                        if (typeof el.focus === 'function') {
+                            el.focus({ preventScroll: true });
+                        }
+                    } catch (error) {}
+
+                    let clicked = false;
+                    if (typeof el.click === 'function') {
+                        el.click();
+                        clicked = true;
+                    } else {
+                        const options = {
+                            bubbles: true,
+                            cancelable: true,
+                            view: window,
+                            button: 0,
+                            buttons: 1
+                        };
+                        for (const type of ['mousedown', 'mouseup', 'click']) {
+                            el.dispatchEvent(new MouseEvent(type, options));
+                        }
+                        clicked = true;
+                    }
+
+                    const active = document.activeElement === el
+                        || (el.contains && el.contains(document.activeElement));
+                    return {
+                        ok: clicked,
+                        active,
+                        tag: (el.tagName || '').toLowerCase(),
+                        href: el.getAttribute ? (el.getAttribute('href') || '') : ''
+                    };
+                } catch (error) {
+                    return {
+                        ok: false,
+                        reason: String(error && error.message ? error.message : error || '')
+                    };
+                }
+                """
+            )
+        except Exception as e:
+            logger.warning(
+                "[STEALTH_CLICK] 后台安全 DOM 点击异常: "
+                f"target={target_label}, selector={selector_label}, error={self._compact_log_value(e, 180)}"
+            )
+            return False
+
+        ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
+        elapsed = time.perf_counter() - started_at
+        if ok:
+            self._mouse_pos = None
+            logger.debug(
+                "[STEALTH_CLICK] 后台安全 DOM 点击完成: "
+                f"target={target_label}, total={elapsed:.2f}s, "
+                f"active={bool((result or {}).get('active')) if isinstance(result, dict) else '-'}, "
+                f"strategy={self._get_stealth_click_strategy()}"
+            )
+            return True
+
+        logger.warning(
+            "[STEALTH_CLICK] 后台安全 DOM 点击失败: "
+            f"target={target_label}, selector={selector_label}, result={self._compact_log_value(result, 180)}"
+        )
+        return False
 
     def _get_request_transport_mode(self) -> str:
         return str(self._request_transport.get("mode") or get_default_request_transport_config().get("mode") or "workflow").strip().lower()
@@ -982,6 +1146,15 @@ class WorkflowExecutor:
             )
 
         try:
+            install_visibility_emulation(self.tab, owner=self.session, reason="workflow_start")
+        except Exception as e:
+            logger.debug_throttled(
+                "workflow.stealth_visibility.start",
+                f"[STEALTH] 工作流级可见性模拟启用失败（忽略）: error={e}",
+                interval_sec=10.0,
+            )
+
+        try:
             self.tab.run_cdp("Page.setWebLifecycleState", state="active")
         except Exception as e:
             logger.debug_throttled(
@@ -992,6 +1165,7 @@ class WorkflowExecutor:
 
     def _end_stealth_workflow_scope(self):
         if not self._workflow_focus_emulation_active:
+            restore_visibility_emulation(self.tab, owner=self.session, reason="workflow_end")
             return
 
         try:
@@ -1000,6 +1174,7 @@ class WorkflowExecutor:
             pass
         finally:
             self._workflow_focus_emulation_active = False
+            restore_visibility_emulation(self.tab, owner=self.session, reason="workflow_end")
 
     @contextmanager
     def _wake_page_for_interaction(self, label: str):
@@ -1068,6 +1243,15 @@ class WorkflowExecutor:
                         f"[STEALTH] 焦点模拟启用失败（忽略）: target={label}, error={e}",
                         interval_sec=10.0,
                     )
+
+            try:
+                install_visibility_emulation(self.tab, owner=self.session, reason=f"interaction:{label}")
+            except Exception as e:
+                logger.debug_throttled(
+                    f"interaction.stealth_visibility.{label}",
+                    f"[STEALTH] 可见性模拟启用失败（忽略）: target={label}, error={e}",
+                    interval_sec=10.0,
+                )
 
             try:
                 self.tab.run_cdp("Page.setWebLifecycleState", state="active")
@@ -1693,7 +1877,6 @@ class WorkflowExecutor:
             logger.debug(f"步骤 {action} 跳过（已取消）")
             return
         
-        logger.debug(f"执行: {action} -> {target_key}")
         self._context = context
         if action in ("STREAM_WAIT", "STREAM_OUTPUT"):
             self._last_stream_media_state = {}
@@ -1760,9 +1943,7 @@ class WorkflowExecutor:
             
             elif action == "CLICK":
                 # ===== 隐身模式：首次交互前执行人类行为预热 =====
-                if self.stealth_mode and not getattr(self, '_page_warmed_up', False):
-                    self._warmup_page_for_stealth()
-                    self._page_warmed_up = True
+                self._maybe_warmup_page_for_stealth(action, target_key)
                 
                 if target_key == "send_btn":
                     # 🆕 发送前启动网络监听（如果已配置）
@@ -1787,16 +1968,12 @@ class WorkflowExecutor:
                     self._execute_click(selector, target_key, optional)
 
             elif action == "COORD_CLICK":
-                if self.stealth_mode and not getattr(self, '_page_warmed_up', False):
-                    self._warmup_page_for_stealth()
-                    self._page_warmed_up = True
+                self._maybe_warmup_page_for_stealth(action, target_key)
 
                 self._execute_coord_click(value, optional)
 
             elif action == "COORD_SCROLL":
-                if self.stealth_mode and not getattr(self, '_page_warmed_up', False):
-                    self._warmup_page_for_stealth()
-                    self._page_warmed_up = True
+                self._maybe_warmup_page_for_stealth(action, target_key)
 
                 self._execute_coord_scroll(value, optional)
             
@@ -2102,6 +2279,41 @@ class WorkflowExecutor:
 
         return normalized
 
+    @staticmethod
+    def _compact_log_value(value: Any, max_len: int = 120) -> str:
+        text = str(value or "").replace("\r", "\\r").replace("\n", "\\n").strip()
+        if not text:
+            return "-"
+        if len(text) > max_len:
+            return f"{text[:max(0, max_len - 3)]}..."
+        return text
+
+    def _describe_element_for_log(self, ele) -> str:
+        if ele is None:
+            return "element=None"
+
+        parts = []
+        tag = str(getattr(ele, "tag", "") or "").strip()
+        backend_id = getattr(ele, "_backend_id", None)
+        if tag:
+            parts.append(f"tag={tag}")
+        if backend_id is not None:
+            parts.append(f"backend={backend_id}")
+
+        try:
+            rect = getattr(ele, "rect", None)
+            location = getattr(rect, "location", None)
+            size = getattr(rect, "size", None)
+            if location and size:
+                parts.append(
+                    f"rect=({int(location[0])},{int(location[1])},"
+                    f"{int(size[0])},{int(size[1])})"
+                )
+        except Exception:
+            pass
+
+        return " ".join(parts) if parts else f"type={type(ele).__name__}"
+
     def _execute_click(self, selector: str, target_key: str, optional: bool):
         """执行点击操作（v5.7 隐身模式人类化点击）"""
         if self._check_cancelled():
@@ -2123,7 +2335,11 @@ class WorkflowExecutor:
                     ele = self._wait_for_element_interactable(ele, selector, target_key)
 
                     if self.stealth_mode:
-                        self._stealth_click_element(ele)
+                        if self._should_use_stealth_dom_click(target_key):
+                            if not self._stealth_dom_click_element(ele, target_key=target_key, selector=selector):
+                                raise WorkflowError("stealth_dom_click_failed")
+                        else:
+                            self._stealth_click_element(ele, target_key=target_key, selector=selector)
                     else:
                         if self._check_cancelled():
                             return
@@ -2139,11 +2355,15 @@ class WorkflowExecutor:
 
             except Exception as click_err:
                 last_error = click_err
-                logger.debug(f"点击异常: {click_err}")
+                logger.warning(
+                    "[CLICK] 点击失败: "
+                    f"target={target_key or '-'}, attempt={attempt + 1}/2, "
+                    f"stealth={bool(self.stealth_mode)}, optional={bool(optional)}, "
+                    f"will_retry={bool(attempt == 0 and target_key != 'send_btn')}, "
+                    f"selector={self._compact_log_value(selector, 100)}, "
+                    f"error={self._compact_log_value(click_err, 180)}"
+                )
                 if attempt == 0 and target_key != "send_btn":
-                    logger.warning(
-                        f"[CLICK] {target_key or selector} 点击失败，等待后重试一次: {click_err}"
-                    )
                     time.sleep(0.12)
                     continue
                 break
@@ -2450,7 +2670,7 @@ class WorkflowExecutor:
             check_cancelled=self._check_cancelled
         )
     
-    def _stealth_click_element(self, ele):
+    def _stealth_click_element(self, ele, target_key: str = "", selector: str = ""):
         """
         隐身模式人类化点击（v5.9 — 彻底消灭 ele.click() 降级路径）
         
@@ -2463,10 +2683,18 @@ class WorkflowExecutor:
             return
 
         click_started_at = time.perf_counter()
+        target_label = target_key or "-"
+        selector_label = self._compact_log_value(selector, 100)
+        element_label = self._describe_element_for_log(ele)
         
         # 1. 获取元素坐标（多重尝试）
         target = self._get_element_viewport_pos(ele)
         if target is None:
+            logger.error(
+                "[STEALTH_CLICK] 坐标获取失败: "
+                f"target={target_label}, selector={selector_label}, "
+                f"mouse={self._mouse_pos or '-'}, element={element_label}"
+            )
             raise Exception("[STEALTH] 无法通过原生链路获取元素坐标，拒绝注入 JS 与 ele.click() 降级")
         target_ready_at = time.perf_counter()
         
@@ -2526,7 +2754,12 @@ class WorkflowExecutor:
         
         if not success:
             # 🔴 CDP 点击失败也不降级到 ele.click()，而是重试一次
-            logger.warning("[STEALTH] CDP 精确点击失败，重试一次...")
+            logger.warning(
+                "[STEALTH_CLICK] CDP 点击失败，准备重试: "
+                f"target={target_label}, click=({click_x},{click_y}), "
+                f"target_center=({target[0]},{target[1]}), "
+                f"element={element_label}"
+            )
             time.sleep(random.uniform(0.04, 0.10))
             success = cdp_precise_click(
                 tab=self.tab,
@@ -2535,7 +2768,21 @@ class WorkflowExecutor:
                 check_cancelled=self._check_cancelled
             )
             if not success:
-                raise Exception("[STEALTH] CDP 精确点击两次均失败，拒绝降级到 ele.click()")
+                failed_at = time.perf_counter()
+                logger.error(
+                    "[STEALTH_CLICK] CDP 点击两次失败: "
+                    f"target={target_label}, selector={selector_label}, "
+                    f"click=({click_x},{click_y}), target_center=({target[0]},{target[1]}), "
+                    f"coord={target_ready_at - click_started_at:.2f}s, "
+                    f"move={move_finished_at - target_ready_at:.2f}s, "
+                    f"click={failed_at - move_finished_at:.2f}s, "
+                    f"total={failed_at - click_started_at:.2f}s, "
+                    f"element={element_label}"
+                )
+                raise Exception(
+                    "[STEALTH] CDP 精确点击两次均失败 "
+                    f"(target={target_label}, click=({click_x},{click_y}))"
+                )
         
         # 更新鼠标位置
         self._mouse_pos = (click_x, click_y)
@@ -2554,7 +2801,11 @@ class WorkflowExecutor:
                 f"target=({target[0]}, {target[1]}), click=({click_x}, {click_y}))"
             )
         
-        logger.debug(f"[STEALTH] 人类化点击完成: ({click_x}, {click_y})")
+        logger.debug(
+            "[STEALTH_CLICK] 完成: "
+            f"target={target_label}, click=({click_x},{click_y}), "
+            f"target_center=({target[0]},{target[1]}), total={total_elapsed:.2f}s"
+        )
     
     # ================= 可靠发送 =================
 
@@ -4070,8 +4321,8 @@ class WorkflowExecutor:
         仅建立一个合理的鼠标起点，避免首个动作过于突兀，
         不再为了“拟人”加入明显的停顿和扫视。
         """
-        logger.debug("[STEALTH] 执行页面预热")
-        
+        warmup_started_at = time.perf_counter()
+
         try:
             from app.utils.human_mouse import _dispatch_mouse_move
             
@@ -4112,8 +4363,12 @@ class WorkflowExecutor:
 
             self._idle_wait(random.uniform(0.05, 0.12))
             
-            logger.debug(f"[STEALTH] 页面预热完成（{move_count} 次移动）")
-            
+            logger.debug(
+                "[STEALTH] 页面预热完成: "
+                f"moves={move_count}, origin=({init_x},{init_y}), "
+                f"elapsed={time.perf_counter() - warmup_started_at:.2f}s"
+            )
+
         except Exception as e:
             logger.debug(f"[STEALTH] 页面预热异常（可忽略）: {e}")
     
@@ -4147,7 +4402,11 @@ class WorkflowExecutor:
             self._text_handler.set_active_input_context(selector=selector, target_key=target_key)
 
             if self.stealth_mode:
-                self._stealth_click_element(ele)
+                if self._should_use_stealth_dom_click(target_key):
+                    if not self._stealth_dom_click_element(ele, target_key=target_key, selector=selector):
+                        raise WorkflowError("stealth_dom_click_failed")
+                else:
+                    self._stealth_click_element(ele, target_key=target_key, selector=selector)
                 time.sleep(random.uniform(0.04, 0.10))
                 active_input = self._resolve_active_text_input()
                 if active_input is not None:
@@ -4176,7 +4435,6 @@ class WorkflowExecutor:
             extra_delay = min(0.22, (len(text) / 12000.0) * random.uniform(0.04, 0.08))
             total_review = min(base_delay + extra_delay, 0.45)
 
-            logger.debug(f"[STEALTH] 粘贴后阅读延迟 {total_review:.1f}s (文本长度={len(text)})")
             self._idle_wait(total_review)
 
 

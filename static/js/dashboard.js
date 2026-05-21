@@ -717,6 +717,18 @@ const ENV_CONFIG_SCHEMA = {
                 ],
                 default: 'focused_repair'
             },
+            TOOL_CALLING_PROMPT_PADDING_OBFUSCATE: {
+                label: '预填充乱序零宽',
+                desc: '开启后，函数调用的预填充和尾部提示词会随机乱序，并插入少量零宽字符。仅影响额外 padding，不改动工具定义；默认关闭。',
+                type: 'switch',
+                default: false
+            },
+            TOOL_CALLING_PROMPT_PADDING_ENABLED: {
+                label: '注入预填充/尾部提示词',
+                desc: '开启后，会继续注入函数调用的预填充与尾部提示词；关闭后仅保留重试策略相关提示词。默认开启。',
+                type: 'switch',
+                default: true
+            },
             TOOL_CALLING_INTERNAL_RETRY_MAX: {
                 label: '内部修复重试次数',
                 desc: '函数调用结果校验失败时，自动修复后再次重试的次数。0 表示关闭自动修复；默认 2；最大 5。',
@@ -903,8 +915,20 @@ const app = createApp({
             },
             editingDefinitionIndex: null,
 
+            // ========== 版本管理 ==========
+            releases: [],
+            releasesLoading: false,
+            releasesError: '',
+            releasesCurrentVersion: '',
+            switchingTag: null,           // 正在切换的 tag
+            switchStatusPolling: null,    // 轮询定时器
+            showChangelogModal: false,
+            changelogContent: '',
+            changelogTag: '',
+
         }
     },
+
 
     computed: {
         filteredSites() {
@@ -2003,6 +2027,74 @@ const app = createApp({
             }
         },
 
+        normalizeBrowserConstantsForEditor(rawConfig = {}) {
+            const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+            const normalized = {};
+
+            for (const group of Object.values(BROWSER_CONSTANTS_SCHEMA)) {
+                for (const [key, field] of Object.entries(group.items || {})) {
+                    normalized[key] = field.default;
+                }
+            }
+
+            for (const key of Object.keys(normalized)) {
+                if (key.startsWith('TAB_POOL_')) {
+                    continue;
+                }
+                if (Object.prototype.hasOwnProperty.call(raw, key)) {
+                    normalized[key] = raw[key];
+                }
+            }
+
+            const tabPool = raw.tab_pool && typeof raw.tab_pool === 'object' ? raw.tab_pool : {};
+            normalized.TAB_POOL_MAX_TABS = raw.TAB_POOL_MAX_TABS ?? tabPool.max_tabs ?? normalized.TAB_POOL_MAX_TABS;
+            normalized.TAB_POOL_MIN_TABS = raw.TAB_POOL_MIN_TABS ?? tabPool.min_tabs ?? normalized.TAB_POOL_MIN_TABS;
+            normalized.TAB_POOL_IDLE_TIMEOUT = raw.TAB_POOL_IDLE_TIMEOUT ?? tabPool.idle_timeout ?? normalized.TAB_POOL_IDLE_TIMEOUT;
+            normalized.TAB_POOL_ACQUIRE_TIMEOUT = raw.TAB_POOL_ACQUIRE_TIMEOUT ?? tabPool.acquire_timeout ?? normalized.TAB_POOL_ACQUIRE_TIMEOUT;
+            normalized.TAB_POOL_STUCK_TIMEOUT = raw.TAB_POOL_STUCK_TIMEOUT ?? tabPool.stuck_timeout ?? normalized.TAB_POOL_STUCK_TIMEOUT;
+
+            return normalized;
+        },
+
+        serializeBrowserConstants(editorConfig = {}, rawBase = {}) {
+            const base = rawBase && typeof rawBase === 'object'
+                ? JSON.parse(JSON.stringify(rawBase))
+                : {};
+            const merged = this.normalizeBrowserConstantsForEditor(editorConfig);
+            const obsoleteKeys = [
+                'DEFAULT_PORT',
+                'STREAM_RERENDER_WAIT',
+                'STREAM_MIN_VALID_LENGTH',
+                'STREAM_INITIAL_ELEMENT_WAIT',
+                'STREAM_MAX_ABNORMAL_COUNT',
+                'STREAM_MAX_ELEMENT_MISSING',
+                'STREAM_CONTENT_SHRINK_THRESHOLD'
+            ];
+
+            for (const key of obsoleteKeys) {
+                delete base[key];
+            }
+
+            for (const key of Object.keys(merged)) {
+                if (key.startsWith('TAB_POOL_')) {
+                    continue;
+                }
+                base[key] = merged[key];
+            }
+
+            const existingTabPool = base.tab_pool && typeof base.tab_pool === 'object' ? base.tab_pool : {};
+            base.tab_pool = {
+                ...existingTabPool,
+                max_tabs: merged.TAB_POOL_MAX_TABS,
+                min_tabs: merged.TAB_POOL_MIN_TABS,
+                idle_timeout: merged.TAB_POOL_IDLE_TIMEOUT,
+                acquire_timeout: merged.TAB_POOL_ACQUIRE_TIMEOUT,
+                stuck_timeout: merged.TAB_POOL_STUCK_TIMEOUT
+            };
+
+            return base;
+        },
+
         async importSettingsBackup(payload) {
             if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
                 throw new Error('备份文件格式无效');
@@ -2316,6 +2408,90 @@ const app = createApp({
             this.notify('已恢复到上次保存的更新白名单', 'info');
         },
 
+        // ========== 版本管理方法 ==========
+
+        async loadReleases() {
+            this.releasesLoading = true;
+            this.releasesError = '';
+            try {
+                const data = await this.apiRequest('/api/update/releases');
+                this.releases = Array.isArray(data.releases) ? data.releases : [];
+                this.releasesCurrentVersion = data.current_version || '';
+            } catch (error) {
+                this.releasesError = '加载失败: ' + error.message;
+                this.releases = [];
+            } finally {
+                this.releasesLoading = false;
+            }
+        },
+
+        async switchToVersion(tag) {
+            if (this.switchingTag) {
+                this.notify('已有版本切换任务正在运行，请稍候', 'warning');
+                return;
+            }
+            if (!confirm('确定要切换到 ' + tag + ' 吗？\n切换完成后服务将自动重启，页面需要手动刷新。')) {
+                return;
+            }
+            this.switchingTag = tag;
+            try {
+                await this.apiRequest('/api/update/switch', {
+                    method: 'POST',
+                    body: JSON.stringify({ tag: tag })
+                });
+                this.notify('版本切换任务已启动：' + tag + '，下载中...', 'info');
+                this.startSwitchStatusPolling();
+            } catch (error) {
+                this.notify('启动版本切换失败: ' + error.message, 'error');
+                this.switchingTag = null;
+            }
+        },
+
+        startSwitchStatusPolling() {
+            this.stopSwitchStatusPolling();
+            this.switchStatusPolling = setInterval(async () => {
+                try {
+                    const status = await this.apiRequest('/api/update/status');
+                    if (!status.running) {
+                        this.stopSwitchStatusPolling();
+                        if (status.success === true) {
+                            this.notify('版本 ' + status.tag + ' 切换成功，服务正在重启，请稍后刷新页面', 'success');
+                        } else if (status.success === false) {
+                            var errMsg = status.error ? '：' + status.error : '';
+                            this.notify('版本 ' + status.tag + ' 切换失败' + errMsg, 'error');
+                            this.switchingTag = null;
+                        }
+                    }
+                } catch (e) {
+                    // 服务重启中，连接可能断开
+                }
+            }, 2000);
+        },
+
+        stopSwitchStatusPolling() {
+            if (this.switchStatusPolling) {
+                clearInterval(this.switchStatusPolling);
+                this.switchStatusPolling = null;
+            }
+        },
+
+        showChangelog(tag, body) {
+            this.changelogTag = tag;
+            this.changelogContent = body || '（无更新说明）';
+            this.showChangelogModal = true;
+        },
+
+        formatReleaseDate(isoStr) {
+            if (!isoStr) return '—';
+            try {
+                var d = new Date(isoStr);
+                var pad = function(n) { return String(n).padStart(2, '0'); };
+                return d.getFullYear() + '/' + pad(d.getMonth()+1) + '/' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+            } catch (e) {
+                return isoStr;
+            }
+        },
+
         // ========== 元素定义管理方法 ==========
 
         async loadSelectorDefinitions() {
@@ -2485,7 +2661,8 @@ const app = createApp({
                     this.loadEnvConfig(),
                     this.loadBrowserConstants(),
                     this.loadUpdatePreserveSettings(),
-                    this.loadSelectorDefinitions()
+                    this.loadSelectorDefinitions(),
+                    this.loadReleases()
                 ]);
                 return;
             }
@@ -2512,11 +2689,11 @@ const app = createApp({
                     const detailCache = new Map(
                         this.requestHistory
                             .filter(item => item && item.detail_loaded && item.id)
-                            .map(item => [String(item.id), item])
+                            .map(item => [String(item.history_key || item.id), item])
                     );
                     const records = Array.isArray(data.records) ? data.records : [];
                     this.requestHistory = records.map(item => {
-                        const cached = detailCache.get(String(item && item.id || ''));
+                        const cached = detailCache.get(String(item && (item.history_key || item.id) || ''));
                         return cached ? { ...item, ...cached } : item;
                     });
                     this.requestHistoryRevision = revision;
@@ -2538,7 +2715,11 @@ const app = createApp({
                 return null;
             }
 
-            const existingIndex = this.requestHistory.findIndex(item => String(item && item.id || '') === id);
+            const matchesRequestHistoryId = (item) => {
+                if (!item) return false;
+                return String(item.history_key || '').trim() === id || String(item.id || '').trim() === id;
+            };
+            const existingIndex = this.requestHistory.findIndex(matchesRequestHistoryId);
             if (existingIndex >= 0 && this.requestHistory[existingIndex].detail_loaded) {
                 return this.requestHistory[existingIndex];
             }
@@ -2551,7 +2732,19 @@ const app = createApp({
                 const detail = await this.apiRequest('/api/system/request-history/' + encodeURIComponent(id), {
                     timeoutMs: 5000
                 });
-                const index = this.requestHistory.findIndex(item => String(item && item.id || '') === id);
+                const detailKey = String(detail && detail.history_key || '').trim();
+                const detailId = String(detail && detail.id || '').trim();
+                const index = this.requestHistory.findIndex(item => {
+                    if (!item) return false;
+                    return String(item.history_key || '').trim() === (detailKey || id)
+                        || String(item.history_key || '').trim() === id
+                        || (
+                            !detailKey
+                            && detailId
+                            && String(item.id || '').trim() === detailId
+                        )
+                        || String(item.id || '').trim() === id;
+                });
                 if (index >= 0) {
                     const updated = {
                         ...this.requestHistory[index],

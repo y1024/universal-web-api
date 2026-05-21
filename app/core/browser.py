@@ -260,7 +260,7 @@ class BrowserCore:
     def _extract_text_from_content(self, content) -> str:
         """
         从消息内容中提取纯文本，图片用占位符替代
-        
+
         支持格式：
         - 纯字符串: "你好" → "你好"
         - 多模态列表: [{"type":"text","text":"描述"},{"type":"image_url",...}] → "描述 [图片1]"
@@ -268,40 +268,22 @@ class BrowserCore:
         - 类列表对象: tuple/其他可迭代 → 转换为 list 处理
         """
         content_type = type(content).__name__
-        content_preview = ""
-        try:
-            content_str_temp = str(content)
-            content_len = len(content_str_temp)
-            content_preview = (
-                repr(content_str_temp[:120])
-                if content_len > 120
-                else repr(content_str_temp)
-            )
-        except Exception:
-            content_len = -1
-            content_preview = "[无法预览]"
-        
-        logger.debug(
-            f"[CONTENT_PARSE] 开始解析: type={content_type}, "
-            f"raw_len={content_len}, preview={content_preview}"
-        )
-        
+
         if content is None:
-            logger.debug("[CONTENT_PARSE] 内容为 None，返回空字符串")
             return ""
-        
+
         if isinstance(content, str):
             stripped = content.strip()
             if stripped.startswith('[') and stripped.endswith(']'):
                 parsed = None
                 parse_method = ""
-                
+
                 try:
                     parsed = json.loads(stripped)
                     parse_method = "json"
                 except (json.JSONDecodeError, TypeError):
                     pass
-                
+
                 if parsed is None:
                     try:
                         import ast
@@ -309,23 +291,23 @@ class BrowserCore:
                         parse_method = "literal_eval"
                     except (ValueError, SyntaxError):
                         pass
-                
+
                 if parsed and isinstance(parsed, list) and len(parsed) > 0:
                     first_item = parsed[0] if parsed else {}
                     if isinstance(first_item, dict) and 'type' in first_item:
                         logger.debug(
-                            "[CONTENT_PARSE] 识别为字符串化多模态内容，递归解析 "
-                            f"(parser={parse_method or 'unknown'}, items={len(parsed)})"
+                            "[CONTENT_PARSE] 字符串化多模态: "
+                            f"parser={parse_method or 'unknown'}, "
+                            f"items={len(parsed)}, raw_len={len(content)}"
                         )
                         return self._extract_text_from_content(parsed)
-            
+
             if content.startswith('data:image') and 'base64,' in content and len(content) > 1000:
                 logger.warning(f"[CONTENT_PARSE] ⚠️ 检测到 base64 图片数据！长度={len(content)}，已替换为占位符")
                 return "[图片内容]"
-            
-            logger.debug(f"[CONTENT_PARSE] 纯字符串返回: len={len(content)}")
+
             return content
-        
+
         is_list_like = isinstance(content, (list, tuple))
         if not is_list_like:
             try:
@@ -347,47 +329,26 @@ class BrowserCore:
             image_count = 0
             skipped_count = 0
             unknown_types = []
-            samples = []
-            
-            for idx, item in enumerate(content):
+
+            for item in content:
                 if not isinstance(item, dict):
                     skipped_count += 1
-                    if len(samples) < 3:
-                        samples.append(f"skip[{idx}]={type(item).__name__}")
                     continue
-                
+
                 item_type = str(item.get("type", "") or "").strip()
-                
+
                 if item_type == "text":
                     text_content = str(item.get("text", "") or "")
                     text_parts.append(text_content)
                     text_item_count += 1
-                    if len(samples) < 3:
-                        preview = (
-                            repr(text_content[:40])
-                            if len(text_content) > 40
-                            else repr(text_content)
-                        )
-                        samples.append(f"text[{idx}]={preview}")
-                
+
                 elif item_type == "image_url":
                     image_count += 1
                     text_parts.append(f"[图片{image_count}]")
-                    image_url_obj = item.get("image_url", {})
-                    url_text = (
-                        str(image_url_obj.get("url", ""))
-                        if isinstance(image_url_obj, dict)
-                        else str(image_url_obj)
-                    )
-                    url_preview = "[data_uri]" if "base64" in url_text[:50] else url_text[:50]
-                    if len(samples) < 3:
-                        samples.append(f"image[{idx}]={url_preview}")
-                
+
                 else:
                     unknown_types.append(item_type or "<empty>")
-                    if len(samples) < 3:
-                        samples.append(f"unknown[{idx}]={item_type or '<empty>'}")
-            
+
             result = " ".join(text_parts)
             extras = []
             if skipped_count:
@@ -395,31 +356,75 @@ class BrowserCore:
             if unknown_types:
                 unknown_preview = ", ".join(sorted(set(unknown_types))[:3])
                 extras.append(f"unknown={len(unknown_types)}[{unknown_preview}]")
-            sample_summary = "; ".join(samples) if samples else "none"
             extra_text = f", {', '.join(extras)}" if extras else ""
             logger.debug(
-                "[CONTENT_PARSE] 多模态解析完成: "
-                f"text_items={text_item_count}, images={image_count}, "
-                f"result_len={len(result)}, samples={sample_summary}{extra_text}"
+                "[CONTENT_PARSE] 多模态结果: "
+                f"items={len(content)}, text_items={text_item_count}, "
+                f"images={image_count}, result_len={len(result)}{extra_text}"
             )
             return result
-        
+
         logger.warning(f"[CONTENT_PARSE] ⚠️ 未知内容类型: {content_type}，返回占位符")
         return "[内容格式不支持]"
+
+    @staticmethod
+    def _format_log_counts(counts: Dict[str, int]) -> str:
+        if not counts:
+            return "-"
+        return ",".join(f"{key}:{counts[key]}" for key in sorted(counts))
+
+    @staticmethod
+    def _compact_log_value(value: Any, max_len: int = 96) -> str:
+        text = str(value or "").replace("\r", "\\r").replace("\n", "\\n").strip()
+        if not text:
+            return "-"
+        if len(text) > max_len:
+            return f"{text[:max(0, max_len - 3)]}..."
+        return text
+
+    @staticmethod
+    def _emit_request_block(emitted_blocks: set[int], block_no: int, title: str, detail: str = "") -> None:
+        if block_no in emitted_blocks:
+            return
+        emitted_blocks.add(block_no)
+        detail_text = f" | {detail}" if detail else ""
+        logger.debug(f"[请求块 {block_no}/4] ---------- {title}{detail_text} ----------")
 
     def _build_prompt_from_messages(self, messages: List[Dict]) -> str:
         """从消息列表构建发送给网页的文本"""
         prompt_parts = []
-        
+        role_counts: Dict[str, int] = {}
+        type_counts: Dict[str, int] = {}
+        used_messages = 0
+        total_text_len = 0
+        image_placeholders = 0
+
         for m in messages:
             role = m.get('role', 'user')
             content = m.get('content', '')
+            role_key = str(role or "unknown")
+            type_key = type(content).__name__
+            role_counts[role_key] = role_counts.get(role_key, 0) + 1
+            type_counts[type_key] = type_counts.get(type_key, 0) + 1
+
             text = self._extract_text_from_content(content)
-            
+
             if text:
+                used_messages += 1
+                total_text_len += len(text)
+                image_placeholders += text.count("[图片")
                 prompt_parts.append(f"{role}: {text}")
-        
-        return "\n\n".join(prompt_parts)
+
+        prompt = "\n\n".join(prompt_parts)
+        logger.debug(
+            "[CONTENT_PARSE] 消息汇总: "
+            f"messages={len(messages)}, used={used_messages}, "
+            f"prompt_len={len(prompt)}, text_len={total_text_len}, "
+            f"roles={self._format_log_counts(role_counts)}, "
+            f"types={self._format_log_counts(type_counts)}, "
+            f"images={image_placeholders}"
+        )
+        return prompt
 
     def _build_prompt_padding_line(self, config: Dict[str, Any]) -> str:
         marker_text = str(config.get("marker_text") or "").strip()
@@ -1767,6 +1772,13 @@ class BrowserCore:
         stream_config = site_config.get("stream_config", {}) or {}
         file_paste_config = site_config.get("file_paste", {}) or {}
         prompt_padding_config = site_config.get("prompt_padding", {}) or {}
+        request_blocks: set[int] = set()
+        self._emit_request_block(
+            request_blocks,
+            1,
+            "准备",
+            f"domain={domain}, preset={resolved_preset_name}, workflow={len(workflow)}",
+        )
 
         audio_capture_preload_enabled = (
             bool(modalities.get("audio"))
@@ -1958,6 +1970,7 @@ class BrowserCore:
         try:
             with executor.workflow_execution_scope():
                 step_index = 0
+                workflow_total = len(workflow)
                 while step_index < len(workflow):
                     step = workflow[step_index]
                     if command_engine is not None:
@@ -2019,12 +2032,63 @@ class BrowserCore:
                         continue
 
                     selector = selectors.get(target_key, '')
+                    if action_upper in {"STREAM_WAIT", "STREAM_OUTPUT", "PAGE_FETCH"}:
+                        self._emit_request_block(
+                            request_blocks,
+                            3,
+                            "响应",
+                            "网络/DOM 监听",
+                        )
+                    else:
+                        self._emit_request_block(
+                            request_blocks,
+                            2,
+                            "交互",
+                            "页面动作/输入/发送",
+                        )
+
+                    step_started_at = time.perf_counter()
+                    step_no = step_index + 1
+                    step_tag = f"[STEP {step_no}]"
+                    selector_preview = self._compact_log_value(selector, 100)
+                    step_extra_parts = [
+                        f"total={workflow_total}",
+                        f"optional={bool(optional)}",
+                        f"stealth={bool(stealth_mode)}",
+                    ]
+                    if action_upper == "FILL_INPUT":
+                        step_extra_parts.append(f"prompt_len={len(str(context.get('prompt') or ''))}")
+                        step_extra_parts.append(f"images={len(context.get('images') or [])}")
+                    elif action_upper == "WAIT":
+                        step_extra_parts.append(f"wait={param_value if param_value is not None else 0.5}")
+                    elif action_upper == "JS_EXEC":
+                        step_extra_parts.append(f"value_len={len(str(param_value or ''))}")
+                    elif action_upper in {"CLICK", "COORD_CLICK", "COORD_SCROLL", "KEY_PRESS"}:
+                        step_extra_parts.append(f"value_len={len(str(param_value or ''))}")
+
+                    logger.debug(
+                        f"{step_tag} 开始: "
+                        f"action={action_upper or action or '-'}, "
+                        f"target={target_key or '-'}, selector={selector_preview}, "
+                        f"{', '.join(step_extra_parts)}"
+                    )
 
                     if not selector and action not in ("WAIT", "KEY_PRESS", "COORD_CLICK", "COORD_SCROLL", "JS_EXEC", "READONLY_HINT", "PAGE_FETCH"):
                         if optional:
+                            logger.debug(
+                                f"{step_tag} 跳过: "
+                                f"action={action_upper or action or '-'}, "
+                                f"target={target_key or '-'}, reason=missing_selector_optional"
+                            )
                             step_index += 1
                             continue
                         else:
+                            logger.error(
+                                f"{step_tag} 失败: "
+                                f"action={action_upper or action or '-'}, "
+                                f"target={target_key or '-'}, elapsed=0.00s, "
+                                "error=missing_selector"
+                            )
                             yield self.formatter.pack_error(
                                 f"缺少配置: {target_key}",
                                 code="missing_selector"
@@ -2032,6 +2096,8 @@ class BrowserCore:
                             break
 
                     try:
+                        chunk_count = 0
+                        delta_chars = 0
                         for chunk in executor.execute_step(
                             action=action,
                             selector=selector,
@@ -2040,12 +2106,20 @@ class BrowserCore:
                             optional=optional,
                             context=context
                         ):
+                            chunk_count += 1
                             delta_content = self._extract_stream_delta_content(chunk)
                             if delta_content:
+                                delta_chars += len(delta_content)
                                 streamed_text_parts.append(delta_content)
                             yield chunk
 
-                        logger.debug(f"[PROBE] execute_step 完成: action={action}, target={target_key}")
+                        step_elapsed = time.perf_counter() - step_started_at
+                        logger.debug(
+                            f"{step_tag} 完成: "
+                            f"action={action_upper or action or '-'}, "
+                            f"target={target_key or '-'}, elapsed={step_elapsed:.2f}s, "
+                            f"chunks={chunk_count}, stream_chars={delta_chars}"
+                        )
 
                         if effective_stop_checker():
                             logger.info(f"[{session.id}] 步骤完成后检测到取消，提前结束工作流")
@@ -2076,12 +2150,26 @@ class BrowserCore:
                             conversation_activity_marked = True
                         step_index += 1
 
-                    except (ElementNotFoundError, WorkflowError):
+                    except (ElementNotFoundError, WorkflowError) as e:
+                        step_elapsed = time.perf_counter() - step_started_at
+                        logger.warning(
+                            f"{step_tag} 中断: "
+                            f"action={action_upper or action or '-'}, "
+                            f"target={target_key or '-'}, elapsed={step_elapsed:.2f}s, "
+                            f"error={self._compact_log_value(e, 180)}"
+                        )
                         break
                     except Exception as e:
+                        step_elapsed = time.perf_counter() - step_started_at
                         if effective_stop_checker():
                             logger.info(f"[{session.id}] 取消后忽略步骤异常: {e}")
                             break
+                        logger.error(
+                            f"{step_tag} 失败: "
+                            f"action={action_upper or action or '-'}, "
+                            f"target={target_key or '-'}, elapsed={step_elapsed:.2f}s, "
+                            f"optional={bool(optional)}, error={self._compact_log_value(e, 180)}"
+                        )
                         if not optional:
                             yield self.formatter.pack_error(f"执行中断: {str(e)}")
                             break
@@ -2109,14 +2197,20 @@ class BrowserCore:
                     logger.info(f"[{session.id}] 工作流收尾阶段已执行挂起命令")
 
             # 多模态提取
-            logger.debug(f"[PROBE] Workflow 循环结束，image_enabled={image_extraction_enabled}, should_stop={effective_stop_checker()}")
+            self._emit_request_block(
+                request_blocks,
+                4,
+                "收尾",
+                f"image_enabled={image_extraction_enabled}, stop={effective_stop_checker()}",
+            )
+            logger.debug(f"[WORKFLOW] 主循环结束: image_enabled={image_extraction_enabled}, should_stop={effective_stop_checker()}")
             if (
                 allow_media_postprocess
                 and image_extraction_enabled
                 and not effective_stop_checker()
                 and not workflow_aborted
             ):
-                logger.debug("[PROBE] 进入多模态提取分支")
+                logger.debug("[WORKFLOW] 进入多模态提取分支")
                 try:
                     media_items = self._extract_media_after_stream(
                         tab=tab,

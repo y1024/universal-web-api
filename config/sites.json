@@ -715,6 +715,12 @@
             }
           },
           {
+            "action": "KEY_PRESS",
+            "target": "ctrl+shift+o",
+            "optional": false,
+            "value": null
+          },
+          {
             "action": "CLICK",
             "target": "new_chat_btn",
             "optional": false,

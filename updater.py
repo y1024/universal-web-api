@@ -864,7 +864,119 @@ def check_and_update(repo: str = None, force: bool = False, preserve: list = Non
             except:
                 pass
 
+def fetch_all_releases(repo: str, per_page: int = 30) -> list:
+    """获取所有 Release 列表"""
+    api_url = f"{GITHUB_API_BASE}/{repo}/releases?per_page={per_page}"
+    log_info(f"请求 GitHub Release 列表: {api_url}")
+    data = http_request_with_retry(
+        api_url,
+        headers={'Accept': 'application/vnd.github.v3+json'}
+    )
+    if data:
+        try:
+            releases = json.loads(data.decode('utf-8'))
+            if isinstance(releases, list):
+                return releases
+        except json.JSONDecodeError as e:
+            log_error(f"JSON 解析失败: {e}")
+    return []
+
+
+def fetch_release_by_tag(repo: str, tag: str) -> Optional[dict]:
+    """按 tag 名称获取特定 Release 信息"""
+    api_url = f"{GITHUB_API_BASE}/{repo}/releases/tags/{tag}"
+    log_info(f"请求 Release by tag: {api_url}")
+    data = http_request_with_retry(
+        api_url,
+        headers={'Accept': 'application/vnd.github.v3+json'}
+    )
+    if data:
+        try:
+            return json.loads(data.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            log_error(f"JSON 解析失败: {e}")
+    return None
+
+
+def update_to_version(tag: str, repo: str = None, preserve: list = None) -> bool:
+    """切换到指定版本（通过 tag 名称）"""
+    project_dir = Path(__file__).parent.resolve()
+
+    if repo is None:
+        repo = os.getenv('GITHUB_REPO', DEFAULT_REPO)
+
+    if preserve is None:
+        preserve_str = os.getenv('UPDATE_PRESERVE', '')
+        if preserve_str:
+            preserve = build_effective_preserve_patterns(
+                [p.strip() for p in preserve_str.split(',')]
+            )
+        else:
+            preserve = build_effective_preserve_patterns(
+                load_update_preserve_settings().get("selected_patterns", DEFAULT_PRESERVE.copy())
+            )
+
+    print()
+    print("=" * 55)
+    print(f"  切换到版本: {tag}")
+    print("=" * 55)
+    print()
+
+    current_version = get_current_version()
+    log_info(f"当前版本: v{current_version}")
+    log_info(f"目标版本: {tag}")
+
+    release = fetch_release_by_tag(repo, tag)
+    if not release:
+        log_error(f"无法获取版本 {tag} 的 Release 信息")
+        return False
+
+    download_url, source_type = get_download_url_from_release(release, repo)
+    if not download_url:
+        log_error("无法获取下载链接")
+        return False
+
+    log_info(f"下载来源: {source_type}")
+    log_info("开始下载...")
+    print()
+
+    download_dir = project_dir / ".update_temp"
+    download_dir.mkdir(exist_ok=True)
+    zip_path = download_dir / "update.zip"
+
+    try:
+        if not download_file_robust(download_url, zip_path):
+            log_error("下载失败")
+            return False
+
+        print()
+        backup_current(project_dir)
+
+        if not extract_and_update(zip_path, project_dir, preserve):
+            return False
+
+        # 写入目标版本号
+        target_version = normalize_version(tag)
+        update_version_file(project_dir, target_version)
+
+        print()
+        print("=" * 55)
+        print(colored(f"  ✓ 已成功切换到 {tag}", Colors.GREEN))
+        print("=" * 55)
+        print()
+
+        return True
+
+    finally:
+        if download_dir.exists():
+            try:
+                shutil.rmtree(download_dir)
+            except Exception:
+                pass
+
+
 def main():
+
     """命令行入口"""
     import argparse
     

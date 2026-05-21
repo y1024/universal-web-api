@@ -2,6 +2,7 @@ window.RequestMonitorTab = {
     name: 'RequestMonitorTab',
     props: {
         records: { type: Array, default: () => [] },
+        detailLoading: { type: Object, default: () => ({}) },
         systemStats: {
             type: Object,
             default: () => ({ memory_mb: 0, disk_status: '未知', total_requests: 0 })
@@ -23,7 +24,11 @@ window.RequestMonitorTab = {
             const items = Array.isArray(this.records)
                 ? this.records.map((record, index) => this.toRecordView(record, index))
                 : []
-            const sorted = items.sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0))
+            const sorted = items.sort((a, b) => {
+                const delta = this.recordSortTimestamp(b) - this.recordSortTimestamp(a)
+                if (delta !== 0) return delta
+                return String(b.__historyKey || '').localeCompare(String(a.__historyKey || ''))
+            })
             const domains = new Map()
             let success = 0
             sorted.forEach(item => {
@@ -88,7 +93,12 @@ window.RequestMonitorTab = {
                 this.visibleCount = Math.max(20, this.sortedRecords.length)
             }
             if (this.selectedRecord && this.selectedRecord.id) {
-                const current = this.sortedRecords.find(item => item.id === this.selectedRecord.id)
+                const selectedKey = String(this.selectedRecord.__historyKey || this.selectedRecord.history_key || '').trim()
+                const current = this.sortedRecords.find(item => {
+                    const itemKey = String(item.__historyKey || item.history_key || '').trim()
+                    if (selectedKey && itemKey) return itemKey === selectedKey
+                    return item.id === this.selectedRecord.id
+                })
                 if (current) {
                     this.selectedRecord = current
                 }
@@ -101,9 +111,11 @@ window.RequestMonitorTab = {
             const domain = String(source.target_domain || source.route_domain || '未知域名').trim() || '未知域名'
             const summarySource = source.summary || source.response_preview || source.response || source.error_message
             const success = !!source.success
+            const historyKey = this.recordKey(source, index)
             return {
                 ...source,
-                id: source.id || ('record-' + index),
+                id: source.id || historyKey,
+                __historyKey: historyKey,
                 __domain: domain,
                 __statusText: this.statusText(source),
                 __statusIcon: success ? '🟢' : '🔴',
@@ -117,6 +129,45 @@ window.RequestMonitorTab = {
                 __tabLabel: this.tabLabel(source)
             }
         },
+        recordKey(record, index) {
+            const source = record && typeof record === 'object' ? record : {}
+            const key = String(source.history_key || '').trim()
+            if (key) return key
+            const id = String(source.id || '').trim() || ('record-' + index)
+            return [
+                id,
+                this.normalizeTimestamp(source.created_at),
+                this.normalizeTimestamp(source.finished_at)
+            ].join(':')
+        },
+        normalizeTimestamp(value) {
+            if (typeof value === 'number') {
+                if (!Number.isFinite(value) || value <= 0) return 0
+                return value > 1000000000000 ? value / 1000 : value
+            }
+            const text = String(value || '').trim()
+            if (!text) return 0
+            const numeric = Number(text)
+            if (Number.isFinite(numeric) && numeric > 0) {
+                return numeric > 1000000000000 ? numeric / 1000 : numeric
+            }
+            const parsed = Date.parse(text)
+            return Number.isNaN(parsed) ? 0 : parsed / 1000
+        },
+        recordSortTimestamp(record) {
+            if (!record) return 0
+            return this.normalizeTimestamp(record.finished_at)
+                || this.normalizeTimestamp(record.started_at)
+                || this.normalizeTimestamp(record.created_at)
+        },
+        isRecordDetailLoading(record) {
+            const keys = [
+                record && record.__historyKey,
+                record && record.history_key,
+                record && record.id
+            ].map(value => String(value || '').trim()).filter(Boolean)
+            return keys.some(key => !!this.detailLoading[key])
+        },
         refresh() {
             this.$emit('refresh')
         },
@@ -128,7 +179,7 @@ window.RequestMonitorTab = {
             this.showErrorStack = false
             this.expandedTextBlocks = {}
             if (record && record.id && record.has_detail && !record.detail_loaded) {
-                this.$emit('load-detail', record.id)
+                this.$emit('load-detail', record.history_key || record.id || record.__historyKey)
             }
         },
         closeRecord() {
@@ -225,7 +276,14 @@ window.RequestMonitorTab = {
             const lengths = record && record.detail_text_lengths ? record.detail_text_lengths : {}
             return this.getDetailText(record, key).length > 6000 || Number(lengths[key] || 0) > 6000
         },
+        expandTextButtonLabel(record, key) {
+            if (this.isRecordDetailLoading(record)) return '加载中...'
+            return this.isTextBlockExpanded(key) ? '收起' : '展开全文'
+        },
         toggleTextBlock(key) {
+            if (this.isRecordDetailLoading(this.selectedRecord)) {
+                return
+            }
             this.expandedTextBlocks = {
                 ...this.expandedTextBlocks,
                 [key]: !this.expandedTextBlocks[key]
@@ -343,7 +401,7 @@ window.RequestMonitorTab = {
 
                     <div class="space-y-2 p-3">
                         <button v-for="record in visibleRecords"
-                                :key="record.id"
+                                :key="record.__historyKey"
                                 @click="openRecord(record)"
                                 :class="['w-full rounded-2xl border px-3 py-3 text-left shadow-sm transition', record.__statusClasses]">
                             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -454,8 +512,9 @@ window.RequestMonitorTab = {
                                     <div class="flex items-center gap-2">
                                         <button v-if="shouldShowExpandTextButton(selectedRecord, 'prompt')"
                                                 @click="toggleTextBlock('prompt')"
+                                                :disabled="isRecordDetailLoading(selectedRecord)"
                                                 class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-500 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">
-                                            {{ isTextBlockExpanded('prompt') ? '收起' : '展开全文' }}
+                                            {{ expandTextButtonLabel(selectedRecord, 'prompt') }}
                                         </button>
                                         <span class="cursor-help rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-400 dark:bg-slate-800 dark:text-slate-500" title="展示已过滤图片数据后的 Prompt 文本。">?</span>
                                     </div>
@@ -471,8 +530,9 @@ window.RequestMonitorTab = {
                                     <div class="flex items-center gap-2">
                                         <button v-if="shouldShowExpandTextButton(selectedRecord, 'response')"
                                                 @click="toggleTextBlock('response')"
+                                                :disabled="isRecordDetailLoading(selectedRecord)"
                                                 class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-500 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">
-                                            {{ isTextBlockExpanded('response') ? '收起' : '展开全文' }}
+                                            {{ expandTextButtonLabel(selectedRecord, 'response') }}
                                         </button>
                                         <span class="cursor-help rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-400 dark:bg-slate-800 dark:text-slate-500" title="展示已过滤图片数据后的响应正文。">?</span>
                                     </div>

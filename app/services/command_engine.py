@@ -28,6 +28,7 @@ except ImportError:
     HAS_REQUESTS = False
 
 from app.core.config import command_log_context, get_logger
+from app.core.page_lifecycle import install_visibility_emulation, restore_visibility_emulation
 from app.services.command_defs import ACTION_TYPES, TRIGGER_TYPES, CommandFlowAbort, _new_command_id, get_default_command
 from app.services.command_engine_actions import CommandEngineActionsMixin
 from app.services.command_engine_results import CommandEngineResultsMixin
@@ -209,6 +210,18 @@ class CommandEngine(CommandEngineRuntimeMixin, CommandEngineResultsMixin, Comman
         """Best-effort focus emulation without stealing OS/browser foreground focus."""
         try:
             session.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=bool(enabled))
+            if enabled:
+                install_visibility_emulation(
+                    session.tab,
+                    owner=session,
+                    reason="command_focus_emulation",
+                )
+            else:
+                restore_visibility_emulation(
+                    session.tab,
+                    owner=session,
+                    reason="command_focus_emulation_end",
+                )
         except Exception as e:
             logger.debug(f"[CMD] 焦点模拟设置失败（忽略）: enabled={enabled}, 错误={e}")
 
@@ -223,6 +236,10 @@ class CommandEngine(CommandEngineRuntimeMixin, CommandEngineResultsMixin, Comman
         try:
             session.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=True)
             focus_emulation_set = True
+        except Exception:
+            pass
+        try:
+            install_visibility_emulation(session.tab, owner=session, reason=reason or "wake_tab")
         except Exception:
             pass
         try:
