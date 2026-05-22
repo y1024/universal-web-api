@@ -102,9 +102,9 @@ class TabSession:
     last_conversation_activity_at: float = 0.0
     last_conversation_domain: Optional[str] = None
     last_conversation_preset_name: Optional[str] = None
-    
+
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    
+
     def is_available(self) -> bool:
         return self.status == TabStatus.IDLE
 
@@ -120,16 +120,16 @@ class TabSession:
         with self._lock:
             self.transient_disconnect_until = 0.0
             self.transient_disconnect_reason = None
-    
+
     def is_healthy(self) -> bool:
         """检查标签页是否健康（增强版 + 无效协议过滤）"""
         if self.status == TabStatus.CLOSED:
             return False
-    
+
         try:
             url = self.tab.url
             return not _should_skip_pool_url(url)
-        
+
         except Exception:
             return False
 
@@ -148,7 +148,7 @@ class TabSession:
     def debug_summary(self) -> str:
         with self._lock:
             return self._debug_summary_unlocked()
-    
+
     def acquire(self, task_id: str) -> bool:
         with self._lock:
             if self.status != TabStatus.IDLE:
@@ -159,6 +159,8 @@ class TabSession:
             prev_request_count = self.request_count
             self.status = TabStatus.BUSY
             self.current_task_id = task_id
+            setattr(self, "_last_cancel_request_task_id", None)
+            setattr(self, "_last_cancel_request_reason", None)
             self.last_used_at = time.time()
             self.request_count += 1
             logger.debug(
@@ -178,6 +180,8 @@ class TabSession:
             prev_task = str(self.current_task_id or "").strip()
             self.status = TabStatus.BUSY
             self.current_task_id = task_id
+            setattr(self, "_last_cancel_request_task_id", None)
+            setattr(self, "_last_cancel_request_reason", None)
             self.last_used_at = time.time()
             logger.debug(
                 f"[{self.id}] 会话占用: mode=command, idx=#{self.persistent_index or '-'}, "
@@ -186,7 +190,7 @@ class TabSession:
                 f"req_count={self.request_count}"
             )
             return True
-    
+
     def release(
         self,
         clear_page: bool = False,
@@ -208,7 +212,7 @@ class TabSession:
             setattr(self, "_command_vars", {})
             self.last_used_at = time.time()
             new_request_count = self.request_count
-            
+
             if clear_page:
                 try:
                     self.tab.get("about:blank")
@@ -228,7 +232,7 @@ class TabSession:
             f"rollback_request_count={rollback_request_count}, "
             f"req_count={prev_request_count}->{new_request_count}"
         )
-        
+
         # Trigger command checks outside the lock to avoid blocking
         try:
             from app.services.command_engine import command_engine
@@ -236,7 +240,7 @@ class TabSession:
                 command_engine.check_triggers(self)
         except Exception as e:
             logger.debug(f"命令触发检查异常: {e}")
-    
+
     def force_release(self, clear_page: bool = False, check_triggers: bool = False):
         """Force release tab lock and optionally refresh current page."""
         with self._lock:
@@ -310,7 +314,7 @@ class TabSession:
         except Exception as e:
             logger.warning(f"[{self.id}] 激活失败: {e}")
             return False
-    
+
     def mark_error(self, reason: str = None):
         with self._lock:
             self.status = TabStatus.ERROR
@@ -408,7 +412,7 @@ class TabSession:
                 force_new=force_new,
             ).get("will_start_new_conversation", True)
         )
-    
+
     def get_info(self) -> Dict:
         busy_duration = None
         if self.status == TabStatus.BUSY:
@@ -416,7 +420,7 @@ class TabSession:
 
         current_url = self._safe_get_url()
         current_domain = self._refresh_current_domain(current_url)
-        
+
         return {
             "id": self.id,
             "persistent_index": self.persistent_index,
@@ -435,7 +439,7 @@ class TabSession:
             "last_conversation_domain": self.last_conversation_domain,
             "last_conversation_preset_name": self.last_conversation_preset_name,
         }
-    
+
     def _refresh_current_domain(self, url: str = "") -> str:
         current_url = str(url or "").strip()
         try:
@@ -508,6 +512,7 @@ class _GlobalNetworkInterceptionManager:
         self._retry_delay = max(0.2, float(retry_delay or 1.0))
         self._workers: Dict[str, _GlobalNetworkWorker] = {}
         self._lock = threading.RLock()
+        self._stop_join_timeout = max(0.5, self._wait_timeout + 0.2)
 
     @staticmethod
     def _extract_event(response: Any) -> Dict[str, Any]:
@@ -545,12 +550,89 @@ class _GlobalNetworkInterceptionManager:
         }
 
     @staticmethod
-    def _safe_stop_listen(tab: Any):
+    def _is_expected_stop_error(error: Any) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        expected_markers = (
+            "监听未启动或已停止",
+            "target closed",
+            "invalid session",
+            "no such window",
+            "not connected",
+            "connection refused",
+            "disconnected",
+        )
+        if "nonetype" in text and "is_running" in text:
+            return True
+        return any(marker in text for marker in expected_markers)
+
+    @staticmethod
+    def _force_reset_listen_state(tab: Any) -> bool:
+        listener = getattr(tab, "listen", None)
+        if listener is None:
+            return True
+
+        ok = True
+        for attr, value in (
+            ("listening", False),
+            ("_network_enabled", False),
+            ("_driver", None),
+        ):
+            try:
+                if hasattr(listener, attr):
+                    setattr(listener, attr, value)
+            except Exception:
+                ok = False
+
         try:
-            if hasattr(tab, "listen") and getattr(tab.listen, "listening", False):
-                tab.listen.stop()
+            clear = getattr(listener, "clear", None)
+            if callable(clear):
+                clear()
         except Exception:
-            pass
+            ok = False
+
+        return ok
+
+    @staticmethod
+    def _listener_is_marked_active(listener: Any) -> bool:
+        try:
+            return bool(getattr(listener, "listening", False))
+        except Exception:
+            return False
+
+    @classmethod
+    def _safe_stop_listen(cls, tab: Any) -> bool:
+        listener = getattr(tab, "listen", None)
+        if listener is None:
+            return True
+
+        try:
+            if cls._listener_is_marked_active(listener):
+                listener.stop()
+        except Exception as e:
+            reset_ok = cls._force_reset_listen_state(tab)
+            log = logger.debug if cls._is_expected_stop_error(e) else logger.warning
+            log(f"[GlobalNet] listen.stop failed; forced_reset={reset_ok}: {e}")
+            return reset_ok and not cls._listener_is_marked_active(listener)
+
+        try:
+            if cls._listener_is_marked_active(listener):
+                reset_ok = cls._force_reset_listen_state(tab)
+                if cls._listener_is_marked_active(listener):
+                    logger.warning(
+                        f"[GlobalNet] listen.stop returned but listener is still active "
+                        f"(forced_reset={reset_ok})"
+                    )
+                    return False
+                logger.debug("[GlobalNet] listener state reset after stop")
+        except Exception as e:
+            reset_ok = cls._force_reset_listen_state(tab)
+            log = logger.debug if cls._is_expected_stop_error(e) else logger.warning
+            log(f"[GlobalNet] listen state check failed; forced_reset={reset_ok}: {e}")
+            return reset_ok
+
+        return True
 
     def _should_cleanup_worker_listener(
         self,
@@ -591,32 +673,45 @@ class _GlobalNetworkInterceptionManager:
             thread.start()
             logger.debug(f"[GlobalNet] 启动监听: {session.id} pattern={self._listen_pattern!r}")
 
-    def stop_for_session(self, session_id: str, reason: str = ""):
+    def stop_for_session(self, session_id: str, reason: str = "", join: bool = False) -> bool:
         if not session_id:
-            return
+            return True
 
         worker = None
         with self._lock:
             worker = self._workers.pop(session_id, None)
         if not worker:
-            return
+            return True
 
         worker.stop_event.set()
 
         session = self._get_session(session_id)
+        stop_ok = True
         if session is not None:
-            self._safe_stop_listen(session.tab)
+            stop_ok = self._safe_stop_listen(session.tab)
+
+        should_join = bool(join or not stop_ok)
+        if should_join and worker.thread.is_alive() and worker.thread is not threading.current_thread():
+            worker.thread.join(timeout=self._stop_join_timeout)
+            if worker.thread.is_alive():
+                logger.warning(
+                    f"[GlobalNet] worker did not stop promptly: {session_id} "
+                    f"(reason={reason or '-'}, stop_listen_ok={stop_ok}, "
+                    f"requested_join={join})"
+                )
+                return False
 
         if reason:
             logger.debug(f"[GlobalNet] 停止监听: {session_id} ({reason})")
         else:
             logger.debug(f"[GlobalNet] 停止监听: {session_id}")
+        return True
 
     def shutdown(self):
         with self._lock:
             session_ids = list(self._workers.keys())
         for session_id in session_ids:
-            self.stop_for_session(session_id, reason="shutdown")
+            self.stop_for_session(session_id, reason="shutdown", join=True)
         logger.info("[GlobalNet] 全局网络监听已关闭")
 
     def _worker_loop(self, session_id: str, stop_event: threading.Event):
@@ -642,7 +737,7 @@ class _GlobalNetworkInterceptionManager:
                         listening = True
                     except Exception as e:
                         logger.debug(f"[GlobalNet] 启动监听失败: {session_id}, err={e}")
-                        time.sleep(self._retry_delay)
+                        stop_event.wait(self._retry_delay)
                         continue
 
                 try:
@@ -657,11 +752,14 @@ class _GlobalNetworkInterceptionManager:
                         logger.debug(f"[GlobalNet] wait 异常: {session_id}, err={e}")
                     listening = False
                     self._safe_stop_listen(tab)
-                    time.sleep(self._retry_delay)
+                    stop_event.wait(self._retry_delay)
                     continue
 
                 if response is None or response is False:
                     continue
+
+                if stop_event.is_set() or self._is_shutdown():
+                    break
 
                 event = self._extract_event(response)
                 self._dispatch_event(session, event)
@@ -673,11 +771,11 @@ class _GlobalNetworkInterceptionManager:
 
 class TabPoolManager:
     """标签页池管理器"""
-    
+
     DOMAIN_ABBR_MAP = {
         "chatgpt": "gpt",
         "openai": "gpt",
-        "gemini": "gemini", 
+        "gemini": "gemini",
         "aistudio": "aistudio",
         "claude": "claude",
         "anthropic": "claude",
@@ -688,10 +786,10 @@ class TabPoolManager:
         "lmarena": "lmarena",
         "chat": "chat",
     }
-    
+
     # 卡死超时时间（秒）
     STUCK_TIMEOUT = 180
-    
+
     # 新标签页扫描间隔（秒）
     SCAN_INTERVAL = 10
     QUERY_SCAN_MIN_INTERVAL_SEC = 1.0
@@ -721,7 +819,7 @@ class TabPoolManager:
         if normalized == "round_robin":
             return "round_robin"
         return "first_idle"
-    
+
     def __init__(
         self,
         browser_page,
@@ -739,19 +837,19 @@ class TabPoolManager:
         self.acquire_timeout = acquire_timeout
         self.stuck_timeout = max(1.0, float(stuck_timeout))
         self.allocation_mode = self._normalize_allocation_mode(allocation_mode)
-        
+
         self._tabs: Dict[str, TabSession] = {}
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
-        
+
         self._initialized = False
         self._shutdown = False
         self._tab_counter = 0
-        
+
         self._last_scan_time: float = 0
         self._get_tabs_retry_after: float = 0.0
         self._last_get_tabs_warning_at: float = 0.0
-        
+
         # 记录已知的标签页底层 ID（用于检测新标签页）
         self._known_tab_ids: set = set()
         # 🆕 记录当前活动的标签页 ID（避免重复激活）
@@ -763,7 +861,7 @@ class TabPoolManager:
         self._index_waiters: Dict[int, deque[str]] = {}
         self._route_waiters: Dict[str, deque[str]] = {}
         self._waiter_counter = 0
-        
+
         # 🆕 持久化编号系统
         self._next_persistent_index: int = 1  # 下一个可分配的编号
         self._raw_id_to_persistent: Dict[str, int] = {}  # raw_tab_id → persistent_index
@@ -998,6 +1096,9 @@ class TabPoolManager:
         if not replacement_tab:
             return False
 
+        if not self._stop_global_monitor_for_session(session.id, reason="target_rebind", wait=True):
+            logger.warning(f"[{session.id}] skip isolated target refresh because monitor did not stop")
+            return False
         session.tab = replacement_tab
         session.clear_transient_disconnect()
         try:
@@ -1325,10 +1426,10 @@ class TabPoolManager:
             return
         self._global_network_monitor.start_for_session(session)
 
-    def _stop_global_monitor_for_session(self, session_id: str, reason: str = ""):
+    def _stop_global_monitor_for_session(self, session_id: str, reason: str = "", wait: bool = False) -> bool:
         if not self._global_network_monitor:
-            return
-        self._global_network_monitor.stop_for_session(session_id, reason=reason)
+            return True
+        return bool(self._global_network_monitor.stop_for_session(session_id, reason=reason, join=wait))
 
     def suspend_global_network_monitor(self, tab_id: str, reason: str = "manual"):
         with self._lock:
@@ -1343,22 +1444,22 @@ class TabPoolManager:
                 return
             self._start_global_monitor_for_session(session)
             logger.debug(f"[GlobalNet] 恢复监听: {tab_id} ({reason})")
-        
+
     def _get_domain_abbr(self, url: str) -> str:
         try:
             if not url or "://" not in url:
                 return "tab"
-            
+
             domain = url.split("//")[-1].split("/")[0].lower()
             clean_domain = domain.replace("www.", "")
-            
+
             for key, abbr in self.DOMAIN_ABBR_MAP.items():
                 if key in clean_domain:
                     return abbr
-            
+
             first_part = clean_domain.split(".")[0]
             return first_part[:10]
-            
+
         except Exception:
             return "tab"
 
@@ -1394,7 +1495,7 @@ class TabPoolManager:
             return browser.get_tab(raw_tab_id)
         except Exception:
             return None
-    
+
     def _wrap_tab(
         self,
         tab,
@@ -1404,34 +1505,34 @@ class TabPoolManager:
         is_isolated_context: bool = False,
     ) -> TabSession:
         self._tab_counter += 1
-        
+
         url = ""
         try:
             url = tab.url or ""
         except:
             pass
-        
+
         abbr = self._get_domain_abbr(url)
         tab_id = f"{abbr}_{self._tab_counter}"
-        
+
         session = TabSession(
             id=tab_id,
             tab=tab,
             browser_context_id=browser_context_id,
             is_isolated_context=bool(is_isolated_context),
         )
-        
+
         try:
             session.current_domain = extract_remote_site_domain(url)
         except:
             pass
-        
+
         # 记录底层标签页 ID
         if raw_tab_id:
             self._known_tab_ids.add(raw_tab_id)
             if session.is_isolated_context:
                 self._register_isolated_context(raw_tab_id, browser_context_id)
-            
+
             # 🆕 分配持久化编号
             if raw_tab_id not in self._raw_id_to_persistent:
                 persistent_idx = self._next_persistent_index
@@ -1439,13 +1540,35 @@ class TabPoolManager:
                 self._raw_id_to_persistent[raw_tab_id] = persistent_idx
             else:
                 persistent_idx = self._raw_id_to_persistent[raw_tab_id]
-            
+
             session.persistent_index = persistent_idx
             self._persistent_to_session_id[persistent_idx] = session.id
             logger.debug(f"标签页 {session.id} 分配编号 #{persistent_idx}")
-        
+
         return session
-    
+
+    def _on_session_removed(self, session_id: str):
+        """Notify command engine after a pool session is removed without blocking pool locks."""
+        session_key = str(session_id or "").strip()
+        if not session_key:
+            return
+
+        def _evict():
+            try:
+                from app.services.command_engine import command_engine
+
+                if hasattr(command_engine, "evict_session"):
+                    command_engine.evict_session(session_key)
+            except Exception as e:
+                logger.debug(f"[TabPool] evict session {session_key} failed: {e}")
+
+        thread = threading.Thread(
+            target=_evict,
+            daemon=True,
+            name=f"tab-evict-{session_key}",
+        )
+        thread.start()
+
     def _should_scan(self) -> bool:
         """检查是否需要扫描新标签页"""
         return time.time() - self._last_scan_time >= self.SCAN_INTERVAL
@@ -1455,7 +1578,7 @@ class TabPoolManager:
         if not self._tabs:
             return True
         return time.time() - self._last_scan_time >= self.QUERY_SCAN_MIN_INTERVAL_SEC
-    
+
     def _scan_new_tabs(self):
         """扫描并添加新标签页（已持有锁）"""
         try:
@@ -1507,17 +1630,17 @@ class TabPoolManager:
                 for raw_id in session_raw_by_id.values()
                 if raw_id in current_tab_set
             }
-            
+
             # ===== 第一步：清理已关闭的标签页 =====
             # 找出池中存在、但浏览器中已消失的标签页
             sessions_to_remove = []
             for session_id, session in self._tabs.items():
                 # 查找该 session 对应的 raw_tab_id
                 raw_id = session_raw_by_id.get(session_id)
-                
+
                 if raw_id is not None and raw_id not in current_tab_set:
                     sessions_to_remove.append((session_id, raw_id, session))
-            
+
             for session_id, raw_id, session in sessions_to_remove:
                 replacement_raw_id = None
                 replacement_tab = None
@@ -1535,7 +1658,11 @@ class TabPoolManager:
                         break
 
                 if replacement_raw_id and replacement_tab:
-                    self._stop_global_monitor_for_session(session_id, reason="target_rebind")
+                    monitor_stopped = self._stop_global_monitor_for_session(
+                        session_id,
+                        reason="target_rebind",
+                        wait=True,
+                    )
                     p_idx = self._raw_id_to_persistent.pop(raw_id, None)
                     if p_idx is not None:
                         self._raw_id_to_persistent[replacement_raw_id] = p_idx
@@ -1551,8 +1678,13 @@ class TabPoolManager:
                     except Exception:
                         pass
                     reserved_raw_ids.add(replacement_raw_id)
-                    if session.status == TabStatus.IDLE:
+                    if session.status == TabStatus.IDLE and monitor_stopped:
                         self._start_global_monitor_for_session(session)
+                    elif session.status == TabStatus.IDLE:
+                        logger.warning(
+                            f"[{session_id}] global monitor not restarted after rebind "
+                            f"because previous worker is still stopping"
+                        )
                     logger.info(
                         f"[{session_id}] rebound isolated context target: {raw_id} -> {replacement_raw_id}"
                     )
@@ -1578,8 +1710,9 @@ class TabPoolManager:
                 else:
                     logger.info(f"[{session_id}] 标签页已关闭，从池中移除")
                     del self._tabs[session_id]
+                    self._on_session_removed(session_id)
                 self._stop_global_monitor_for_session(session_id, reason="tab_closed")
-                
+
                 # 清理映射
                 self._known_tab_ids.discard(raw_id)
                 p_idx = self._raw_id_to_persistent.pop(raw_id, None)
@@ -1594,7 +1727,7 @@ class TabPoolManager:
 
             # 顺手清理已切换到本地页/无效页的空闲标签，避免继续展示和参与调度。
             self._cleanup_unhealthy_tabs()
-             
+
             # ===== 第二步：构建"已在池中的 tab 对象"集合 =====
             tabs_in_pool = set()
             for rid in self._raw_id_to_persistent:
@@ -1602,7 +1735,7 @@ class TabPoolManager:
                 sid = self._persistent_to_session_id.get(pidx)
                 if sid and sid in self._tabs:
                     tabs_in_pool.add(rid)
-            
+
             # ===== 第三步：扫描新标签页 =====
             new_count = 0
             for tab_ref in current_tabs:
@@ -1612,26 +1745,26 @@ class TabPoolManager:
                 raw_tab = self._get_tab_ref_id(tab_ref)
                 if not raw_tab:
                     continue
-                
+
                 # 已在池中，跳过
                 if raw_tab in tabs_in_pool:
                     continue
-                
+
                 try:
                     tab = self._resolve_tab_from_ref(tab_ref)
                     if not tab:
                         continue
-                    
+
                     url = ""
                     try:
                         url = tab.url or ""
                     except Exception:
                         pass
-                    
+
                     # 本地页、浏览器内部页、空白页都不纳入标签页池。
                     if _should_skip_pool_url(url):
                         continue
-                    
+
                     isolation_result = self._ensure_cookie_isolation_for_new_tab(tab, raw_tab, url)
                     tab = isolation_result["tab"]
                     raw_tab = isolation_result["raw_tab_id"]
@@ -1648,41 +1781,41 @@ class TabPoolManager:
                     self._start_global_monitor_for_session(session)
                     new_count += 1
                     changed = True
-                    
+
                     display_url = url[:60] + "..." if len(url) > 60 else url
                     logger.debug(f"🆕 发现新标签页: {session.id} -> {display_url}")
-                    
+
                 except Exception as e:
                     logger.debug(f"处理标签页出错: {e}")
                     continue
-            
+
             self._last_scan_time = time.time()
             if changed:
                 self._condition.notify_all()
-            
+
             if new_count > 0:
                 logger.info(f"扫描完成: +{new_count} 个，当前共 {len(self._tabs)} 个标签页")
-                
+
         except Exception as e:
             logger.warning(f"扫描标签页失败: {e}")
-    
+
     def initialize(self):
         """初始化标签页池"""
         with self._lock:
             if self._initialized:
                 return
-            
+
             raw_target_count = 0
             try:
                 browser = self._get_browser_handle()
                 existing_tabs = self._list_current_tab_refs()
                 raw_target_count = len(existing_tabs)
                 logger.debug(f"[TabPool] 检测到 {raw_target_count} 个浏览器 page target")
-                
+
                 for tab_ref in existing_tabs:
                     if len(self._tabs) >= self.max_tabs:
                         break
-                    
+
                     try:
                         raw_tab = self._get_tab_ref_id(tab_ref)
                         if not raw_tab:
@@ -1691,17 +1824,17 @@ class TabPoolManager:
                         tab = self._resolve_tab_from_ref(tab_ref)
                         if not tab:
                             continue
-                        
+
                         url = ""
                         try:
                             url = tab.url or ""
                         except Exception:
                             pass
-                        
+
                         # 初始化时直接跳过本地页和浏览器内部页。
                         if _should_skip_pool_url(url):
                             continue
-                        
+
                         isolation_result = self._ensure_cookie_isolation_for_new_tab(tab, raw_tab, url)
                         tab = isolation_result["tab"]
                         raw_tab = isolation_result["raw_tab_id"]
@@ -1715,22 +1848,22 @@ class TabPoolManager:
                             is_isolated_context=isolation_result.get("is_isolated_context", False),
                         )
                         self._tabs[session.id] = session
-                        
+
                         display_url = url[:60] + "..." if len(url) > 60 else url
                         logger.info(f"TabPool: {session.id} -> {display_url}")
                     except Exception as e:
                         logger.debug(f"处理标签页出错: {e}")
                         continue
-                        
+
             except Exception as e:
                 logger.warning(f"扫描标签页失败: {e}")
-            
+
             # 重置所有状态为 IDLE
             for session in self._tabs.values():
                 session.status = TabStatus.IDLE
                 session.current_task_id = None
                 self._start_global_monitor_for_session(session)
-            
+
             self._initialized = True
             self._last_scan_time = time.time()
             ignored_count = max(0, raw_target_count - len(self._tabs))
@@ -1738,16 +1871,16 @@ class TabPoolManager:
                 f"TabPool 就绪: {len(self._tabs)} 个远程网页"
                 + (f"（已忽略 {ignored_count} 个内部/无效 target）" if ignored_count else "")
             )
-            
+
     def _check_stuck_tabs(self):
         """检查并释放卡死的标签页"""
         now = time.time()
         released_any = False
-        
+
         for session in self._tabs.values():
             if session.status == TabStatus.BUSY:
                 busy_duration = now - session.last_used_at
-                
+
                 if busy_duration > self.stuck_timeout:
                     task_id = session.current_task_id or ""
                     cancelled = False
@@ -1794,8 +1927,19 @@ class TabPoolManager:
         if not task_id:
             return False
 
+        if getattr(session, "_last_cancel_request_task_id", None) == task_id:
+            logger.debug(
+                f"[{session.id}] duplicate cancel skipped "
+                f"(task={task_id}, reason={reason}, "
+                f"previous_reason={getattr(session, '_last_cancel_request_reason', '-')}, "
+                f"detail={detail or '-'})"
+            )
+            return False
+
         try:
             setattr(session, "_workflow_stop_reason", reason)
+            setattr(session, "_last_cancel_request_task_id", task_id)
+            setattr(session, "_last_cancel_request_reason", reason)
         except Exception:
             pass
 
@@ -1812,67 +1956,77 @@ class TabPoolManager:
             f"(task={task_id}, reason={reason}, cancelled={cancelled}, detail={detail or '-'})"
         )
         return cancelled
-    
+
     def _cleanup_unhealthy_tabs(self):
         """清理不健康的空闲标签页和错误状态的标签页"""
         to_remove = []
-    
-        for tab_id, session in self._tabs.items():
-            if session.is_isolated_context and session.is_healthy():
-                session.clear_transient_disconnect()
 
-            # 清理 ERROR 状态的标签页（包括强制释放失败的）
-            if session.status == TabStatus.ERROR:
+        for tab_id, session in list(self._tabs.items()):
+            try:
+                if session.is_isolated_context and session.is_healthy():
+                    session.clear_transient_disconnect()
+
+                # 清理 ERROR 状态的标签页（包括强制释放失败的）
+                if session.status == TabStatus.ERROR:
+                    to_remove.append(tab_id)
+                # 清理空闲但不健康的标签页
+                elif session.status == TabStatus.IDLE and not session.is_healthy():
+                    if session.is_isolated_context:
+                        if session.is_in_transient_disconnect():
+                            continue
+                        if self._arm_isolated_rebind_grace(
+                            session,
+                            reason="health_probe_failed",
+                            detail="health probe failed",
+                        ):
+                            continue
+                    to_remove.append(tab_id)
+            except Exception as e:
+                logger.warning(f"[TabPool] cleanup check failed for tab {tab_id}: {e}")
                 to_remove.append(tab_id)
-            # 清理空闲但不健康的标签页
-            elif session.status == TabStatus.IDLE and not session.is_healthy():
-                if session.is_isolated_context:
-                    if session.is_in_transient_disconnect():
-                        continue
-                    if self._arm_isolated_rebind_grace(
-                        session,
-                        reason="health_probe_failed",
-                        detail="health probe failed",
-                    ):
-                        continue
-                to_remove.append(tab_id)
-    
+
         for tab_id in to_remove:
-            session = self._tabs[tab_id]
-            self._cancel_active_request_for_session(
-                session,
-                "tab_unhealthy",
-                detail=f"status={getattr(getattr(session, 'status', None), 'value', 'unknown')}",
-            )
-            logger.warning(f"[{tab_id}] 不健康或错误状态，从池中移除")
-            self._stop_global_monitor_for_session(tab_id, reason="unhealthy")
-            
-            # 清理映射表，允许相同 raw_tab_id 被重新扫描
-            raw_ids_to_remove = [
-                raw_id for raw_id, p_idx in self._raw_id_to_persistent.items()
-                if self._persistent_to_session_id.get(p_idx) == tab_id
-            ]
-            for raw_id in raw_ids_to_remove:
-                self._known_tab_ids.discard(raw_id)
-                del self._raw_id_to_persistent[raw_id]
-                browser_context_id = self._isolated_context_by_raw_id.pop(raw_id, None)
-                if browser_context_id:
-                    self._mark_orphaned_isolated_context(browser_context_id)
-            
-            # 清理持久编号映射
-            p_idx = session.persistent_index
-            if p_idx and self._persistent_to_session_id.get(p_idx) == tab_id:
-                del self._persistent_to_session_id[p_idx]
-            
-            # 清理活动标签页记录
-            if self._active_session_id == tab_id:
-                self._active_session_id = None
-            
-            del self._tabs[tab_id]
+            try:
+                session = self._tabs.get(tab_id)
+                if not session:
+                    continue
+                self._cancel_active_request_for_session(
+                    session,
+                    "tab_unhealthy",
+                    detail=f"status={getattr(getattr(session, 'status', None), 'value', 'unknown')}",
+                )
+                logger.warning(f"[{tab_id}] 不健康或错误状态，从池中移除")
+                self._stop_global_monitor_for_session(tab_id, reason="unhealthy")
+
+                # 清理映射表，允许相同 raw_tab_id 被重新扫描
+                raw_ids_to_remove = [
+                    raw_id for raw_id, p_idx in list(self._raw_id_to_persistent.items())
+                    if self._persistent_to_session_id.get(p_idx) == tab_id
+                ]
+                for raw_id in raw_ids_to_remove:
+                    self._known_tab_ids.discard(raw_id)
+                    self._raw_id_to_persistent.pop(raw_id, None)
+                    browser_context_id = self._isolated_context_by_raw_id.pop(raw_id, None)
+                    if browser_context_id:
+                        self._mark_orphaned_isolated_context(browser_context_id)
+
+                # 清理持久编号映射
+                p_idx = session.persistent_index
+                if p_idx and self._persistent_to_session_id.get(p_idx) == tab_id:
+                    self._persistent_to_session_id.pop(p_idx, None)
+
+                # 清理活动标签页记录
+                if self._active_session_id == tab_id:
+                    self._active_session_id = None
+
+                self._tabs.pop(tab_id, None)
+                self._on_session_removed(tab_id)
+            except Exception as e:
+                logger.warning(f"[TabPool] cleanup remove failed for tab {tab_id}: {e}")
 
         if to_remove:
             self._condition.notify_all()
-    
+
     def _should_defer_to_command(self, session: TabSession, task_id: str) -> bool:
         """Whether request acquisition should defer to high-priority pending/running commands."""
         task = str(task_id or "").strip().lower()
@@ -1956,86 +2110,10 @@ class TabPoolManager:
             f"busy_for={busy_for}, holder={self._describe_session(session)}"
         )
 
-    def acquire(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
-        """获取一个可用的标签页（增强版）"""
-        timeout = timeout or self.acquire_timeout
-        deadline = time.time() + timeout
-        logged_waiting = False
-        first_iteration = True
 
-        with self._condition:
-            while True:
-                if self._shutdown:
-                    return None
-                
-                # 首次进入或定期扫描新标签页
-                if first_iteration or self._should_scan():
-                    self._scan_new_tabs()
-                    first_iteration = False
-                
-                # 检查卡死的标签页
-                self._check_stuck_tabs()
-                
-                # 清理不健康的空闲标签页
-                self._cleanup_unhealthy_tabs()
-                
-                # 寻找空闲且健康的标签页
-                for session in self._tabs.values():
-                    if session.status == TabStatus.IDLE:
-                        # 检查健康状态
-                        if not session.is_healthy():
-                            logger.warning(f"[{session.id}] 标签页不健康，跳过")
-                            continue
-                        
-                        if self._should_defer_to_command(session, task_id):
-                            logger.debug(f"[{session.id}] defer acquire to high-priority command")
-                            continue
-
-                        if session.acquire(task_id):
-                            # 忙碌前先暂停该标签页全局监听，避免和工作流监听冲突
-                            self._stop_global_monitor_for_session(session.id, reason="acquire")
-                            # 可选：自动激活标签页（默认关闭，避免抢占用户焦点）
-                            if self._auto_activate_on_acquire and session.id != self._active_session_id:
-                                session.activate()
-                                self._active_session_id = session.id
-                            
-                            # task_id 已在上下文中，无需重复
-                            if logged_waiting:
-                                logger.debug(f"等待结束 → {session.id}")
-                            else:
-                                logger.debug(f"TabPool → {session.id}")
-                            return session
-                
-                # 检查超时
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    busy_info = [
-                        f"{s.id}({s.current_task_id})" 
-                        for s in self._tabs.values() 
-                        if s.status == TabStatus.BUSY
-                    ]
-                    unhealthy_count = sum(
-                        1 for s in self._tabs.values() 
-                        if s.status == TabStatus.IDLE and not s.is_healthy()
-                    )
-                    logger.warning(
-                        f"获取标签页超时 (忙碌: {', '.join(busy_info) or 'none'}, "
-                        f"不健康: {unhealthy_count})"
-                    )
-                    return None
-                
-                # 等待
-                if not logged_waiting:
-                    busy_tabs = [s.id for s in self._tabs.values() if s.status == TabStatus.BUSY]
-                    if busy_tabs:
-                        logger.debug(f"排队等待 (忙碌: {', '.join(busy_tabs)})")
-                    logged_waiting = True
-                
-                self._condition.wait(timeout=min(remaining, 1.0))
-    
     async def acquire_async(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
         return await asyncio.to_thread(self.acquire, task_id, timeout)
-    
+
     def release(
         self,
         tab_id: str,
@@ -2080,7 +2158,7 @@ class TabPoolManager:
                     f"check_triggers={check_triggers}, rollback_request_count={rollback_request_count}, "
                     f"before={before_snapshot}, after={self._describe_session(session)})"
                 )
-    
+
     def force_release_all(self):
         """强制释放所有标签页（调试用）"""
         with self._condition:
@@ -2094,40 +2172,40 @@ class TabPoolManager:
             self._condition.notify_all()
             logger.info(f"强制释放 {count} 个标签页")
             return count
-    
+
     def refresh_tabs(self) -> Dict:
         """手动刷新标签页列表（供外部调用）"""
         with self._condition:
             old_count = len(self._tabs)
             old_ids = set(self._tabs.keys())
-            
+
             # 强制扫描（不受时间间隔限制）
             self._last_scan_time = 0
             self._scan_new_tabs()
-            
+
             # 同时清理不健康的标签页
             self._cleanup_unhealthy_tabs()
-            
+
             new_ids = set(self._tabs.keys())
             added = new_ids - old_ids
             removed = old_ids - new_ids
-            
+
             if added or removed:
                 self._condition.notify_all()
                 logger.info(f"刷新完成: +{len(added)} -{len(removed)} = {len(self._tabs)} 个标签页")
-            
+
             return {
                 "added": len(added),
                 "removed": len(removed),
                 "total": len(self._tabs)
             }
-    
+
     @asynccontextmanager
     async def get_tab(self, task_id: str, timeout: float = None):
         session = await self.acquire_async(task_id, timeout)
         if session is None:
             raise TimeoutError(f"获取标签页超时 (task: {task_id})")
-        
+
         try:
             yield session
         except Exception as e:
@@ -2163,6 +2241,9 @@ class TabPoolManager:
 
                 if self._should_scan():
                     self._scan_new_tabs()
+
+                self._check_stuck_tabs()
+                self._cleanup_unhealthy_tabs()
 
                 persistent_index = self._raw_id_to_persistent.get(raw_tab_id)
                 if not persistent_index:
@@ -2225,79 +2306,7 @@ class TabPoolManager:
                 )
                 self._condition.wait(timeout=min(remaining, 1.0))
 
-    def acquire_by_index(self, persistent_index: int, task_id: str, timeout: float = None) -> Optional[TabSession]:
-        """
-        根据持久化编号获取指定标签页
-        
-        Args:
-            persistent_index: 持久化编号（1, 2, 3...）
-            task_id: 任务 ID
-            timeout: 超时时间
-            
-        Returns:
-            TabSession 或 None（如果编号无效或标签页不可用）
-        """
-        timeout = timeout or self.acquire_timeout
-        deadline = time.time() + timeout
-        
-        with self._condition:
-            while True:
-                if self._shutdown:
-                    return None
-                
-                # 定期扫描新标签页
-                if self._should_scan():
-                    self._scan_new_tabs()
-                
-                # 查找对应的 session
-                session_id = self._persistent_to_session_id.get(persistent_index)
-                if not session_id:
-                    logger.warning(f"持久编号 #{persistent_index} 不存在")
-                    return None
-                
-                session = self._tabs.get(session_id)
-                if not session:
-                    logger.warning(f"标签页 {session_id} (#{persistent_index}) 已被移除")
-                    return None
-                
-                # 检查健康状态
-                if not session.is_healthy():
-                    logger.warning(f"[{session.id}] 标签页不健康")
-                    return None
-                
-                # 尝试获取
-                if self._should_defer_to_command(session, task_id):
-                    logger.debug(f"[{session.id}] defer by index acquire to high-priority command")
-                    remaining = deadline - time.time()
-                    if remaining <= 0:
-                        return None
-                    self._condition.wait(timeout=min(remaining, 0.5))
-                    continue
 
-                if session.status == TabStatus.IDLE:
-                    if session.acquire(task_id):
-                        # 忙碌前先暂停该标签页全局监听，避免和工作流监听冲突
-                        self._stop_global_monitor_for_session(session.id, reason="acquire_by_index")
-                        # 可选：自动激活标签页（默认关闭，避免抢占用户焦点）
-                        if self._auto_activate_on_acquire and session.id != self._active_session_id:
-                            session.activate()
-                            self._active_session_id = session.id
-                        logger.debug(f"TabPool → {session.id} (#{persistent_index})")
-                        return session
-                
-                # 标签页忙碌，等待
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    logger.warning(f"获取标签页 #{persistent_index} 超时（当前状态: {session.status.value}）")
-                    return None
-                
-                logger.debug_throttled(
-                    f"tab_pool.wait_index.{persistent_index}",
-                    f"等待标签页 #{persistent_index} 释放...",
-                    interval_sec=5.0,
-                )
-                self._condition.wait(timeout=min(remaining, 1.0))
-    
     async def acquire_by_index_async(self, persistent_index: int, task_id: str, timeout: float = None) -> Optional[TabSession]:
         """异步版本的按编号获取"""
         return await asyncio.to_thread(self.acquire_by_index, persistent_index, task_id, timeout)
@@ -2317,67 +2326,6 @@ class TabPoolManager:
         matches.sort(key=lambda item: item.persistent_index or 0)
         return matches
 
-    def acquire_by_route_domain(self, route_domain: str, task_id: str, timeout: float = None) -> Optional[TabSession]:
-        """根据域名路由获取匹配的标签页。"""
-        target = normalize_route_domain(route_domain)
-        if not target:
-            logger.warning("域名路由为空，无法获取标签页")
-            return None
-
-        timeout = timeout or self.acquire_timeout
-        deadline = time.time() + timeout
-
-        with self._condition:
-            while True:
-                if self._shutdown:
-                    return None
-
-                if self._should_scan():
-                    self._scan_new_tabs()
-
-                self._check_stuck_tabs()
-                self._cleanup_unhealthy_tabs()
-
-                matching_sessions = self._get_sessions_for_route_domain(target)
-                if not matching_sessions:
-                    logger.warning(f"域名路由 '{target}' 没有匹配的标签页")
-                    return None
-
-                for session in matching_sessions:
-                    if not session.is_healthy():
-                        continue
-
-                    if self._should_defer_to_command(session, task_id):
-                        logger.debug(f"[{session.id}] defer by route-domain acquire to high-priority command")
-                        continue
-
-                    if session.status == TabStatus.IDLE and session.acquire(task_id):
-                        self._stop_global_monitor_for_session(session.id, reason="acquire_by_route_domain")
-                        if self._auto_activate_on_acquire and session.id != self._active_session_id:
-                            session.activate()
-                            self._active_session_id = session.id
-                        logger.debug(
-                            f"TabPool → {session.id} (route_domain={target}, idx=#{session.persistent_index})"
-                        )
-                        return session
-
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    busy_info = [
-                        f"{session.id}(#{session.persistent_index}:{session.status.value})"
-                        for session in matching_sessions
-                    ]
-                    logger.warning(
-                        f"获取域名路由 '{target}' 超时（匹配标签页: {', '.join(busy_info) or 'none'}）"
-                    )
-                    return None
-
-                logger.debug_throttled(
-                    f"tab_pool.wait_route.{target}",
-                    f"等待域名路由 '{target}' 的标签页释放...",
-                    interval_sec=5.0,
-                )
-                self._condition.wait(timeout=min(remaining, 1.0))
 
     async def acquire_by_route_domain_async(
         self,
@@ -2388,284 +2336,8 @@ class TabPoolManager:
         """异步版本的按域名路由获取。"""
         return await asyncio.to_thread(self.acquire_by_route_domain, route_domain, task_id, timeout)
 
-    def acquire(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
-        """Fair queued acquire for generic request routing."""
-        timeout = timeout or self.acquire_timeout
-        deadline = time.time() + timeout
-        logged_waiting = False
-        first_iteration = True
 
-        with self._condition:
-            waiter_token = self._next_waiter_token(task_id)
-            self._acquire_waiters.append(waiter_token)
-            try:
-                while True:
-                    if self._shutdown:
-                        return None
 
-                    if first_iteration or self._should_scan():
-                        self._scan_new_tabs()
-                        first_iteration = False
-
-                    self._check_stuck_tabs()
-                    self._cleanup_unhealthy_tabs()
-
-                    if not self._is_waiter_turn(self._acquire_waiters, waiter_token):
-                        remaining = deadline - time.time()
-                        if remaining <= 0:
-                            busy_info = [
-                                f"{s.id}({s.current_task_id})"
-                                for s in self._tabs.values()
-                                if s.status == TabStatus.BUSY
-                            ]
-                            unhealthy_count = sum(
-                                1 for s in self._tabs.values()
-                                if s.status == TabStatus.IDLE and not s.is_healthy()
-                            )
-                            logger.warning(
-                                f"获取标签页超时 (忙碌: {', '.join(busy_info) or 'none'}, "
-                                f"不健康: {unhealthy_count})"
-                            )
-                            return None
-
-                        if not logged_waiting:
-                            busy_tabs = [s.id for s in self._tabs.values() if s.status == TabStatus.BUSY]
-                            ahead = self._count_waiters_ahead(self._acquire_waiters, waiter_token)
-                            if busy_tabs:
-                                logger.debug(f"排队等待 (忙碌: {', '.join(busy_tabs)})")
-                            elif ahead > 0:
-                                logger.debug(f"排队等待 (前面还有 {ahead} 个请求)")
-                            logged_waiting = True
-
-                        self._condition.wait(timeout=min(remaining, 1.0))
-                        continue
-
-                    for session in self._tabs.values():
-                        if session.status != TabStatus.IDLE:
-                            continue
-                        if not session.is_healthy():
-                            logger.warning(f"[{session.id}] 标签页不健康，跳过")
-                            continue
-                        if self._should_defer_to_command(session, task_id):
-                            logger.debug(f"[{session.id}] defer acquire to high-priority command")
-                            continue
-                        if session.acquire(task_id):
-                            self._stop_global_monitor_for_session(session.id, reason="acquire")
-                            if self._auto_activate_on_acquire and session.id != self._active_session_id:
-                                session.activate()
-                                self._active_session_id = session.id
-
-                            self._unregister_waiter(self._acquire_waiters, waiter_token)
-
-                            if logged_waiting:
-                                logger.debug(f"等待结束 → {session.id}")
-                            else:
-                                logger.debug(f"TabPool → {session.id}")
-                            return session
-
-                    remaining = deadline - time.time()
-                    if remaining <= 0:
-                        busy_info = [
-                            f"{s.id}({s.current_task_id})"
-                            for s in self._tabs.values()
-                            if s.status == TabStatus.BUSY
-                        ]
-                        unhealthy_count = sum(
-                            1 for s in self._tabs.values()
-                            if s.status == TabStatus.IDLE and not s.is_healthy()
-                        )
-                        logger.warning(
-                            f"获取标签页超时 (忙碌: {', '.join(busy_info) or 'none'}, "
-                            f"不健康: {unhealthy_count})"
-                        )
-                        return None
-
-                    if not logged_waiting:
-                        busy_tabs = [s.id for s in self._tabs.values() if s.status == TabStatus.BUSY]
-                        if busy_tabs:
-                            logger.debug(f"排队等待 (忙碌: {', '.join(busy_tabs)})")
-                        logged_waiting = True
-
-                    self._condition.wait(timeout=min(remaining, 1.0))
-            finally:
-                self._unregister_waiter(self._acquire_waiters, waiter_token)
-
-    def acquire_by_index(self, persistent_index: int, task_id: str, timeout: float = None) -> Optional[TabSession]:
-        """Fair queued acquire for a fixed persistent tab index."""
-        timeout = timeout or self.acquire_timeout
-        deadline = time.time() + timeout
-
-        with self._condition:
-            waiters = self._index_waiters.setdefault(persistent_index, deque())
-            waiter_token = self._next_waiter_token(task_id)
-            waiters.append(waiter_token)
-            try:
-                while True:
-                    if self._shutdown:
-                        return None
-
-                    if self._should_scan():
-                        self._scan_new_tabs()
-
-                    if not self._is_waiter_turn(waiters, waiter_token):
-                        remaining = deadline - time.time()
-                        if remaining <= 0:
-                            logger.warning(f"获取标签页 #{persistent_index} 超时")
-                            return None
-                        logger.debug_throttled(
-                            f"tab_pool.wait_index.{persistent_index}",
-                            f"等待标签页 #{persistent_index} 释放...",
-                            interval_sec=5.0,
-                        )
-                        self._condition.wait(timeout=min(remaining, 1.0))
-                        continue
-
-                    session_id = self._persistent_to_session_id.get(persistent_index)
-                    if not session_id:
-                        logger.warning(f"持久编号 #{persistent_index} 不存在")
-                        return None
-
-                    session = self._tabs.get(session_id)
-                    if not session:
-                        logger.warning(f"标签页 {session_id} (#{persistent_index}) 已被移除")
-                        return None
-
-                    if not session.is_healthy():
-                        logger.warning(f"[{session.id}] 标签页不健康")
-                        return None
-
-                    if self._should_defer_to_command(session, task_id):
-                        logger.debug(f"[{session.id}] defer by index acquire to high-priority command")
-                        remaining = deadline - time.time()
-                        if remaining <= 0:
-                            return None
-                        self._condition.wait(timeout=min(remaining, 0.5))
-                        continue
-
-                    if session.status == TabStatus.IDLE and session.acquire(task_id):
-                        self._stop_global_monitor_for_session(session.id, reason="acquire_by_index")
-                        if self._auto_activate_on_acquire and session.id != self._active_session_id:
-                            session.activate()
-                            self._active_session_id = session.id
-
-                        self._unregister_waiter(
-                            waiters,
-                            waiter_token,
-                            owner_map=self._index_waiters,
-                            owner_key=persistent_index,
-                        )
-                        logger.debug(f"TabPool → {session.id} (#{persistent_index})")
-                        return session
-
-                    remaining = deadline - time.time()
-                    if remaining <= 0:
-                        logger.warning(f"获取标签页 #{persistent_index} 超时（当前状态: {session.status.value}）")
-                        return None
-
-                    logger.debug_throttled(
-                        f"tab_pool.wait_index.{persistent_index}",
-                        f"等待标签页 #{persistent_index} 释放...",
-                        interval_sec=5.0,
-                    )
-                    self._condition.wait(timeout=min(remaining, 1.0))
-            finally:
-                self._unregister_waiter(
-                    waiters,
-                    waiter_token,
-                    owner_map=self._index_waiters,
-                    owner_key=persistent_index,
-                )
-
-    def acquire_by_route_domain(self, route_domain: str, task_id: str, timeout: float = None) -> Optional[TabSession]:
-        """Fair queued acquire for tabs matching the same route domain."""
-        target = normalize_route_domain(route_domain)
-        if not target:
-            logger.warning("鍩熷悕璺敱涓虹┖锛屾棤娉曡幏鍙栨爣绛鹃〉")
-            return None
-
-        timeout = timeout or self.acquire_timeout
-        deadline = time.time() + timeout
-
-        with self._condition:
-            waiters = self._route_waiters.setdefault(target, deque())
-            waiter_token = self._next_waiter_token(task_id)
-            waiters.append(waiter_token)
-            try:
-                while True:
-                    if self._shutdown:
-                        return None
-
-                    if self._should_scan():
-                        self._scan_new_tabs()
-
-                    self._check_stuck_tabs()
-                    self._cleanup_unhealthy_tabs()
-
-                    if not self._is_waiter_turn(waiters, waiter_token):
-                        remaining = deadline - time.time()
-                        if remaining <= 0:
-                            logger.warning(f"鑾峰彇鍩熷悕璺敱 '{target}' 瓒呮椂")
-                            return None
-                        logger.debug_throttled(
-                            f"tab_pool.wait_route.{target}",
-                            f"绛夊緟鍩熷悕璺敱 '{target}' 鐨勬爣绛鹃〉閲婃斁...",
-                            interval_sec=5.0,
-                        )
-                        self._condition.wait(timeout=min(remaining, 1.0))
-                        continue
-
-                    matching_sessions = self._get_sessions_for_route_domain(target)
-                    if not matching_sessions:
-                        logger.warning(f"鍩熷悕璺敱 '{target}' 娌℃湁鍖归厤鐨勬爣绛鹃〉")
-                        return None
-
-                    for session in matching_sessions:
-                        if not session.is_healthy():
-                            continue
-                        if self._should_defer_to_command(session, task_id):
-                            logger.debug(f"[{session.id}] defer by route-domain acquire to high-priority command")
-                            continue
-                        if session.status == TabStatus.IDLE and session.acquire(task_id):
-                            self._stop_global_monitor_for_session(session.id, reason="acquire_by_route_domain")
-                            if self._auto_activate_on_acquire and session.id != self._active_session_id:
-                                session.activate()
-                                self._active_session_id = session.id
-
-                            self._unregister_waiter(
-                                waiters,
-                                waiter_token,
-                                owner_map=self._route_waiters,
-                                owner_key=target,
-                            )
-                            logger.debug(
-                                f"TabPool → {session.id} (route_domain={target}, idx=#{session.persistent_index})"
-                            )
-                            return session
-
-                    remaining = deadline - time.time()
-                    if remaining <= 0:
-                        busy_info = [
-                            f"{session.id}(#{session.persistent_index}:{session.status.value})"
-                            for session in matching_sessions
-                        ]
-                        logger.warning(
-                            f"获取域名路由 '{target}' 超时（匹配标签页: {', '.join(busy_info) or 'none'}）"
-                        )
-                        return None
-
-                    logger.debug_throttled(
-                        f"tab_pool.wait_route.{target}",
-                        f"等待域名路由 '{target}' 的标签页释放...",
-                        interval_sec=5.0,
-                    )
-                    self._condition.wait(timeout=min(remaining, 1.0))
-            finally:
-                self._unregister_waiter(
-                    waiters,
-                    waiter_token,
-                    owner_map=self._route_waiters,
-                    owner_key=target,
-                )
 
     def acquire(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
         """ASCII-safe fair acquire for generic request routing."""
@@ -3066,13 +2738,13 @@ class TabPoolManager:
             if cancel_error:
                 result["cancel_error"] = cancel_error
             return result
-    
+
     def get_tabs_with_index(self) -> List[Dict]:
         """获取所有标签页及其持久编号（供 API 调用）"""
         with self._lock:
             if self._should_scan_for_query():
                 self._scan_new_tabs()
-            
+
             result = []
             for session in self._tabs.values():
                 info = session.get_info()
@@ -3083,21 +2755,21 @@ class TabPoolManager:
                 info["domain_route_prefix"] = domain_route_prefix
                 info["route_prefix"] = domain_route_prefix or tab_route_prefix
                 result.append(info)
-            
+
             # 按编号排序
             result.sort(key=lambda x: x.get("persistent_index", 0))
             return result
 
     # ================= 预设管理 =================
-    
+
     def set_tab_preset(self, persistent_index: int, preset_name: str) -> bool:
         """
         为指定标签页设置预设
-        
+
         Args:
             persistent_index: 标签页持久化编号
             preset_name: 预设名称（None 或空字符串表示恢复为跟随站点默认预设）
-        
+
         Returns:
             是否成功
         """
@@ -3106,34 +2778,34 @@ class TabPoolManager:
             if not session_id:
                 logger.warning(f"标签页 #{persistent_index} 不存在")
                 return False
-            
+
             session = self._tabs.get(session_id)
             if not session:
                 logger.warning(f"标签页 {session_id} 已被移除")
                 return False
-            
+
             old_preset = session.preset_name
             session.preset_name = preset_name if preset_name else None
             if old_preset != session.preset_name:
                 session.reset_conversation_state()
-            
+
             logger.debug(
                 f"[{session.id}] 预设切换: "
                 f"'{old_preset or '跟随站点默认预设'}' → '{preset_name or '跟随站点默认预设'}'"
             )
             return True
-    
+
     def get_tab_preset(self, persistent_index: int) -> Optional[str]:
         """获取指定标签页的当前预设名称"""
         with self._lock:
             session_id = self._persistent_to_session_id.get(persistent_index)
             if not session_id:
                 return None
-            
+
             session = self._tabs.get(session_id)
             if not session:
                 return None
-            
+
             return session.preset_name
 
     # ================= 状态查询 =================
@@ -3141,7 +2813,7 @@ class TabPoolManager:
     def get_status(self) -> Dict:
         with self._lock:
             tabs_info = [s.get_info() for s in self._tabs.values()]
-            
+
             return {
                 "total": len(self._tabs),
                 "idle": sum(1 for s in self._tabs.values() if s.status == TabStatus.IDLE),
@@ -3167,7 +2839,7 @@ class TabPoolManager:
         """Return a shallow snapshot of all current tab sessions."""
         with self._lock:
             return list(self._tabs.values())
-    
+
     def shutdown(self):
         with self._lock:
             self._shutdown = True

@@ -123,6 +123,61 @@ class CommandEngine(CommandEngineRuntimeMixin, CommandEngineResultsMixin, Comman
         logger.debug("命令引擎已初始化")
         self._start_periodic_scheduler()
 
+    def evict_session(self, session_id: str):
+        """Evict runtime caches and pending state associated with a removed tab session."""
+        session_key = str(session_id or "").strip()
+        if not session_key:
+            return
+
+        logger.info(f"逐出会话缓存: {session_key}")
+        with self._lock:
+            keys_to_remove = [
+                key
+                for key in self._trigger_states
+                if isinstance(key, tuple) and len(key) > 1 and key[1] == session_key
+            ]
+            for key in keys_to_remove:
+                self._trigger_states.pop(key, None)
+
+            meta_keys_to_remove = [
+                key
+                for key in self._pending_async_trigger_meta
+                if isinstance(key, tuple) and len(key) > 1 and key[1] == session_key
+            ]
+            for key in meta_keys_to_remove:
+                self._pending_async_trigger_meta.pop(key, None)
+
+            result_keys_to_remove = [
+                key
+                for key in self._command_results
+                if isinstance(key, tuple) and len(key) > 1 and key[1] == session_key
+            ]
+            for key in result_keys_to_remove:
+                self._command_results.pop(key, None)
+
+            exec_keys_to_remove = [
+                key
+                for key in self._executing
+                if isinstance(key, tuple) and len(key) > 1 and key[1] == session_key
+            ]
+            for key in exec_keys_to_remove:
+                self._executing.discard(key)
+
+            run_keys_to_remove = [
+                key
+                for key in self._periodic_next_run
+                if isinstance(key, tuple) and len(key) > 1 and key[1] == session_key
+            ]
+            for key in run_keys_to_remove:
+                self._periodic_next_run.pop(key, None)
+
+            self._command_result_events.pop(session_key, None)
+            self._network_events.pop(session_key, None)
+            self._pending_high_by_session.pop(session_key, None)
+            self._running_high_by_session.pop(session_key, None)
+            self._last_keepalive_by_session.pop(session_key, None)
+            self._observer_keywords_by_session.pop(session_key, None)
+
     # ================= 延迟依赖 =================
 
     def _get_config_engine(self):
