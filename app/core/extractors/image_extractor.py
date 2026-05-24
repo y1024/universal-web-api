@@ -33,6 +33,8 @@ def get_default_image_extraction_config() -> Dict:
         "audio_selector": "audio, audio source",
         "video_selector": "video, video source",
         "container_selector": None,
+        "final_target_strategy": "container",
+        "allow_container_fallback": True,
         "debounce_seconds": 2.0,
         "wait_for_load": True,
         "load_timeout_seconds": 5.0,
@@ -98,70 +100,80 @@ class ImageExtractor:
             downloadBlobs = true,
             maxBytes = 10485760,
             srcAllowPatterns = [],
-            mode = "all"
+            mode = "all",
+            allowContainerFallback = true
         } = opts || {};
 
         // ===== 1. 确定根元素 =====
-        // 🔧 修复：优先使用传入的元素（this），避免 containerSelector 重新定位到错误元素
-        const candidateRoots = [];
-        const pushRoot = (value) => {
+        // 优先只在传入元素（当前回复节点）内查找；只有查不到时才回退到容器/整页。
+        const primaryRoots = [];
+        const fallbackRoots = [];
+        const pushRoot = (bucket, value) => {
             if (!value) return;
             const nodeType = Number(value.nodeType || 0);
             if (nodeType !== 1 && nodeType !== 9) return;
-            if (!candidateRoots.includes(value)) {
-                candidateRoots.push(value);
+            if (!bucket.includes(value)) {
+                bucket.push(value);
             }
         };
 
         if (this && (this.nodeType === 1 || this.nodeType === 9)) {
-            // 传入了有效的 DOM 元素，直接使用
-            pushRoot(this);
+            pushRoot(primaryRoots, this);
         }
 
         if (containerSelector) {
-            // 回退：使用 containerSelector 查找
             try {
                 const scopedRoots = Array.from(document.querySelectorAll(containerSelector));
                 for (const scopedRoot of scopedRoots) {
-                    pushRoot(scopedRoot);
+                    pushRoot(fallbackRoots, scopedRoot);
                 }
             } catch {}
         } else {
-            // 最终回退：使用 document
-            pushRoot(document);
+            pushRoot(fallbackRoots, document);
         }
 
-        if (candidateRoots.length === 0) {
+        if (primaryRoots.length === 0 && fallbackRoots.length === 0) {
             return { images: [], warnings: ["container_not_found"] };
         }
 
         // ===== 2. 查找所有图片元素 =====
-        const nodes = [];
-        const seenNodes = new Set();
-        const pushNode = (value) => {
-            if (!(value instanceof Element)) return;
-            if (seenNodes.has(value)) return;
-            seenNodes.add(value);
-            nodes.push(value);
+        const collectNodes = (roots) => {
+            const scopedNodes = [];
+            const seenNodes = new Set();
+            const pushNode = (value) => {
+                if (!(value instanceof Element)) return;
+                if (seenNodes.has(value)) return;
+                seenNodes.add(value);
+                scopedNodes.push(value);
+            };
+
+            for (const root of roots) {
+                try {
+                    if (root instanceof Element && typeof root.matches === "function" && root.matches(selector)) {
+                        pushNode(root);
+                    }
+                } catch {}
+
+                try {
+                    const rootNodes = root.querySelectorAll ? Array.from(root.querySelectorAll(selector)) : [];
+                    for (const node of rootNodes) {
+                        pushNode(node);
+                    }
+                } catch {}
+            }
+
+            return scopedNodes;
         };
 
-        for (const root of candidateRoots) {
-            try {
-                if (root instanceof Element && typeof root.matches === "function" && root.matches(selector)) {
-                    pushNode(root);
-                }
-            } catch {}
-
-            try {
-                const scopedNodes = root.querySelectorAll ? Array.from(root.querySelectorAll(selector)) : [];
-                for (const node of scopedNodes) {
-                    pushNode(node);
-                }
-            } catch {}
+        let scopeUsed = "primary";
+        let nodes = collectNodes(primaryRoots);
+        if (nodes.length === 0 && allowContainerFallback) {
+            scopeUsed = "fallback";
+            nodes = collectNodes(fallbackRoots);
         }
-        
+
         if (nodes.length === 0) {
-            return { images: [], warnings: [] };
+            return { images: [], warnings: [], scope: scopeUsed, nodeCount: 0 };
         }
 
         // ===== 辅助函数 =====
@@ -402,7 +414,7 @@ class ImageExtractor:
             }
         }
 
-        return { images: out, warnings: warnings };
+        return { images: out, warnings: warnings, scope: scopeUsed, nodeCount: nodes.length };
     }).call(this, arguments[0]);
     """
 
@@ -457,7 +469,8 @@ class ImageExtractor:
             "downloadBlobs": final_config.get("download_blobs", True),
             "maxBytes": final_config.get("max_size_mb", 10) * 1024 * 1024,
             "srcAllowPatterns": final_config.get("src_allow_patterns", []) or [],
-            "mode": final_config.get("mode", "all")
+            "mode": final_config.get("mode", "all"),
+            "allowContainerFallback": bool(final_config.get("allow_container_fallback", True))
         }
         
         logger.debug(
@@ -475,6 +488,8 @@ class ImageExtractor:
             
             raw_images = result.get("images", [])
             warnings = result.get("warnings", [])
+            scope = result.get("scope", "-")
+            node_count = result.get("nodeCount", "-")
             
             # 记录警告（不中断流程）
             for w in warnings:
@@ -484,7 +499,7 @@ class ImageExtractor:
             images = self._normalize_and_dedupe(raw_images)
             
             # 日志摘要
-            logger.debug(f" 提取完成: {len(images)} 张图片")
+            logger.debug(f" 提取完成: {len(images)} 张图片 (scope={scope}, nodes={node_count})")
             for img in images[:5]:  # 最多记录前 5 张
                 self._log_image_summary(img)
             if len(images) > 5:

@@ -20,6 +20,7 @@ from app.services.tool_calling_common import (
     _PREFERRED_XML_WRAPPER_TAG,
     _describe_tool_choice,
     _format_tool_result_message,
+    _get_max_tool_argument_chars,
     _get_max_tool_argument_depth,
     _get_max_tool_argument_nodes,
     _serialize_content,
@@ -155,14 +156,21 @@ def _inspect_tool_response(
                     "message": "At least one tool call was required, but the assistant answered without any tool_calls.",
                 }
             )
-        malformed_reason = _detect_malformed_tool_payload(raw_text)
-        if malformed_reason:
-            errors.append(
-                {
-                    "code": "malformed_tool_payload",
-                    "message": malformed_reason,
-                }
-            )
+        parsed_mode = str(parsed.get("mode", "") or "").strip().lower()
+        parsed_content = "" if parsed.get("content") is None else str(parsed.get("content"))
+        raw_stripped = str(raw_text or "").strip()
+        is_structured_final_payload = (
+            parsed_mode == "final" and parsed_content != raw_stripped
+        )
+        if not is_structured_final_payload:
+            malformed_reason = _detect_malformed_tool_payload(raw_text)
+            if malformed_reason:
+                errors.append(
+                    {
+                        "code": "malformed_tool_payload",
+                        "message": malformed_reason,
+                    }
+                )
         return {
             "errors": errors,
             "accepted_tool_calls": accepted_tool_calls,

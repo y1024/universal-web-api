@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-05-23
+
+fix:
+- 工具调用校验模块补全参数长度限制辅助函数导入，修复 `_get_max_tool_argument_chars` 缺失导致的 `tool_calling_failed`。
+- 工具调用 XML 解析模块补全 adapter / legacy 标签常量导入，修复 `_PREFERRED_XML_WRAPPER_TAG` 等缺失名称导致的运行时崩溃。
+- 工具调用提示词模块补全 `Tuple` 类型导入，避免运行时解析类型注解时触发 `NameError`。
+- 工具调用 JSON 解析与校验逻辑现在会正确接受 `{"content":"...","tool_calls":[]}` 这类结构化最终回复，不再误判为畸形工具载荷并进入多轮内部重试。
+
 ## 2026-05-22
 
 fix:

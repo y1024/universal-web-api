@@ -1576,6 +1576,14 @@ class ConfigEngine:
         if "container_selector" in config:
             val = config["container_selector"]
             result["container_selector"] = str(val).strip() if val else None
+
+        if "final_target_strategy" in config:
+            val = str(config["final_target_strategy"] or "").strip().lower()
+            if val in ("container", "latest_reply", "latest_visual_reply"):
+                result["final_target_strategy"] = val
+
+        if "allow_container_fallback" in config:
+            result["allow_container_fallback"] = bool(config["allow_container_fallback"])
         
         if "debounce_seconds" in config:
             try:

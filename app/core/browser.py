@@ -2496,7 +2496,83 @@ class BrowserCore:
                     return list(fallback_stream_media_items)
                 return []
             
-            last_element = elements[-1]
+            def _select_target_element(candidates):
+                if not candidates:
+                    return None
+
+                strategy = str(image_config.get("final_target_strategy", "container") or "container").strip().lower()
+                if strategy not in ("latest_reply", "latest_visual_reply"):
+                    return candidates[-1]
+
+                selector = str(image_config.get("selector") or "img").strip() or "img"
+
+                def _has_media(candidate) -> bool:
+                    try:
+                        return bool(
+                            candidate.run_js(
+                                """
+                                const selector = String(arguments[0] || "img");
+                                try {
+                                    if (this instanceof Element && typeof this.matches === "function" && this.matches(selector)) {
+                                        return true;
+                                    }
+                                } catch {}
+                                try {
+                                    return !!(this.querySelector && this.querySelector(selector));
+                                } catch {
+                                    return false;
+                                }
+                                """,
+                                selector,
+                            )
+                        )
+                    except Exception:
+                        return False
+
+                if strategy == "latest_visual_reply":
+                    scored_candidates = []
+                    for index, candidate in enumerate(candidates):
+                        has_media = _has_media(candidate)
+                        try:
+                            rect = candidate.run_js(
+                                """
+                                const rect = this.getBoundingClientRect();
+                                return {
+                                    bottom: Number(rect && rect.bottom || 0) + Number(window.scrollY || 0),
+                                    left: Number(rect && rect.left || 0) + Number(window.scrollX || 0),
+                                    width: Number(rect && rect.width || 0),
+                                    height: Number(rect && rect.height || 0),
+                                };
+                                """
+                            ) or {}
+                            bottom = float(rect.get("bottom") or 0)
+                            left = float(rect.get("left") or 0)
+                            area = float(rect.get("width") or 0) * float(rect.get("height") or 0)
+                        except Exception:
+                            bottom = 0.0
+                            left = 0.0
+                            area = 0.0
+                        scored_candidates.append((bottom, -left, area, -index, index, has_media, candidate))
+
+                    if scored_candidates:
+                        scored_candidates.sort(key=lambda item: item[:4], reverse=True)
+                        best = scored_candidates[0]
+                        logger.debug(
+                            "[latest_visual_reply] 选中视觉最新媒体容器: "
+                            f"index={best[4]}, has_media={best[5]}, "
+                            f"bottom={best[0]:.1f}, left={-best[1]:.1f}, total={len(candidates)}"
+                        )
+                        return best[6]
+
+                for candidate in reversed(candidates):
+                    if _has_media(candidate):
+                        return candidate
+
+                return candidates[-1]
+
+            last_element = _select_target_element(elements)
+            if last_element is None:
+                return []
 
             def _extract_media_once(target_element):
                 if hasattr(extractor, 'extract_media'):
@@ -2579,6 +2655,14 @@ class BrowserCore:
 
             pending_audio_hint = self._is_pending_media_text(combined_pending_text, image_config, "audio")
             pending_video_hint = self._is_pending_media_text(combined_pending_text, image_config, "video")
+            latest_visual_image_pending = (
+                str(image_config.get("final_target_strategy", "") or "").strip().lower() == "latest_visual_reply"
+                and bool(modalities.get("image"))
+                and not image_items
+                and not only_audio_mode
+            )
+            if latest_visual_image_pending:
+                logger.debug("视觉最新回复容器暂未发现图片，进入延迟图片渲染等待")
 
             if pending_media_items:
                 pending_audio_hint = pending_audio_hint or any(
@@ -2593,7 +2677,11 @@ class BrowserCore:
                 )
 
             pending_kinds = set()
-            if (has_generated_image_hint or (media_state_pending and media_state_type == "image")) and not image_items:
+            if (
+                has_generated_image_hint
+                or latest_visual_image_pending
+                or (media_state_pending and media_state_type == "image")
+            ) and not image_items:
                 pending_kinds.add("image")
             if media_state_pending and media_state_type == "audio" and not (audio_items or video_items):
                 pending_kinds.add("audio")
@@ -2630,7 +2718,10 @@ class BrowserCore:
                     elements, container_mode = _find_candidate_elements(timeout=0.5)
                     if not elements:
                         continue
-                    last_element = elements[-1]
+                    selected = _select_target_element(elements)
+                    if selected is None:
+                        continue
+                    last_element = selected
                     media_items = _extract_media_once(last_element)
                     ready_media_items = _apply_stream_media_fallback(
                         self._filter_ready_media_items(media_items, image_config)
@@ -2684,7 +2775,10 @@ class BrowserCore:
                     if not elements:
                         continue
 
-                    last_element = elements[-1]
+                    selected = _select_target_element(elements)
+                    if selected is None:
+                        continue
+                    last_element = selected
                     media_items = _extract_media_once(last_element)
                     ready_media_items = _apply_stream_media_fallback(
                         self._filter_ready_media_items(media_items, image_config)
@@ -3153,12 +3247,12 @@ class BrowserCore:
 
         img_eles = []
         try:
-            if selector and selector != "img":
-                img_eles = tab.eles(f"css:{selector}", timeout=0.5)
-                logger.debug(f"图片定位：使用 '{selector}'，找到 {len(img_eles) if img_eles else 0} 个")
-            else:
-                img_eles = last_element.eles("css:img", timeout=0.5)
-                logger.debug(f"图片定位：使用默认选择器，找到 {len(img_eles) if img_eles else 0} 个")
+            scoped_selector = selector or "img"
+            img_eles = last_element.eles(f"css:{scoped_selector}", timeout=0.5)
+            logger.debug(
+                f"图片定位：在当前回复内使用 '{scoped_selector}'，"
+                f"找到 {len(img_eles) if img_eles else 0} 个"
+            )
         except Exception as e:
             logger.warning(f"图片定位失败，将仅尝试直连下载: {e}")
             img_eles = []

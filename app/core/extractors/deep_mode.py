@@ -500,11 +500,8 @@ class DeepBrowserExtractor(BaseExtractor):
             return []
         
         
-        # 复用 find_content_node 定位内容区域
-        target_ele = self.find_content_node(element)
-        
         return image_extractor.extract(
-            target_ele,
+            element,
             config=config,
             container_selector_fallback=container_selector_fallback
         )
@@ -521,9 +518,8 @@ class DeepBrowserExtractor(BaseExtractor):
 
         from app.core.extractors.media_extractor import media_extractor
 
-        target_ele = self.find_content_node(element)
         return media_extractor.extract(
-            target_ele,
+            element,
             config=config,
             container_selector_fallback=container_selector_fallback
         )

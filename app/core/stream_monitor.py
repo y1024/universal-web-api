@@ -223,6 +223,63 @@ class StreamMonitor:
             sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
         return sanitized
 
+    def _get_final_target_strategy(self) -> str:
+        return str(
+            self._image_config.get("final_target_strategy", "container") or "container"
+        ).strip().lower()
+
+    def _select_candidate_element(self, elements, prefer_anchor: Optional[str] = None):
+        if not elements:
+            return None, None
+
+        strategy = self._get_final_target_strategy()
+
+        if prefer_anchor and strategy != "latest_visual_reply":
+            for ele in reversed(elements):
+                try:
+                    anchor = self.extractor.get_anchor(ele)
+                except Exception:
+                    anchor = ""
+                if anchor == prefer_anchor:
+                    return ele, anchor
+
+        if strategy != "latest_visual_reply":
+            target = elements[-1]
+            return target, self.extractor.get_anchor(target)
+
+        scored = []
+        for index, ele in enumerate(elements):
+            try:
+                score = ele.run_js(
+                    """
+                    const rect = this.getBoundingClientRect();
+                    return {
+                        top: Number(rect && rect.top || 0) + Number(window.scrollY || 0),
+                        bottom: Number(rect && rect.bottom || 0) + Number(window.scrollY || 0),
+                        left: Number(rect && rect.left || 0) + Number(window.scrollX || 0),
+                        width: Number(rect && rect.width || 0),
+                        height: Number(rect && rect.height || 0),
+                    };
+                    """
+                ) or {}
+                bottom = float(score.get("bottom") or 0)
+                left = float(score.get("left") or 0)
+                area = float(score.get("width") or 0) * float(score.get("height") or 0)
+            except Exception:
+                bottom = 0.0
+                left = 0.0
+                area = 0.0
+            scored.append((bottom, -left, area, -index, index, ele))
+
+        scored.sort(key=lambda item: item[:4], reverse=True)
+        best = scored[0]
+        logger.debug(
+            "[latest_visual_reply] 选中视觉最新回复容器: "
+            f"index={best[4]}, bottom={best[0]:.1f}, left={-best[1]:.1f}, total={len(elements)}"
+        )
+        target = best[5]
+        return target, self.extractor.get_anchor(target)
+
     def monitor(self, selector: str, user_input: str = "",
                 completion_id: Optional[str] = None) -> Generator[str, None, None]:
         logger.debug("流式监听启动")
@@ -367,13 +424,15 @@ class StreamMonitor:
             if not eles:
                 return result
 
-            last_ele = eles[-1]
+            last_ele, last_anchor = self._select_candidate_element(eles)
+            if last_ele is None:
+                return result
             text = self.extractor.extract_text(last_ele)
 
             result['groups_count'] = len(eles)
             result['text'] = text or ""
             result['text_len'] = len(result['text'])
-            result['anchor'] = self.extractor.get_anchor(last_ele)
+            result['anchor'] = last_anchor
 
             # 🆕 图片检测（轻量级，只计数）
             try:
@@ -411,20 +470,10 @@ class StreamMonitor:
 
             result['groups_count'] = len(eles)
 
-            target = None
-            target_anchor = None
-
-            if prefer_anchor:
-                for ele in reversed(eles):
-                    a = self.extractor.get_anchor(ele)
-                    if a == prefer_anchor:
-                        target = ele
-                        target_anchor = a
-                        break
+            target, target_anchor = self._select_candidate_element(eles, prefer_anchor)
 
             if target is None:
-                target = eles[-1]
-                target_anchor = self.extractor.get_anchor(target)
+                target, target_anchor = self._select_candidate_element(eles)
                 
                 last_text = self.extractor.extract_text(target)
                 if (not last_text or not last_text.strip()) and len(eles) >= 2:
@@ -460,7 +509,11 @@ class StreamMonitor:
             if not eles:
                 return ""
             
-            last_text = self.extractor.extract_text(eles[-1])
+            target, _ = self._select_candidate_element(eles)
+            if target is None:
+                return ""
+
+            last_text = self.extractor.extract_text(target)
             if last_text and last_text.strip():
                 return last_text.strip()
             
@@ -871,15 +924,31 @@ class StreamMonitor:
         
         result_container = {"images": []}
         extraction_error = {"error": None}
-        
+
         def extract_with_timeout():
             """在独立线程中执行提取"""
             try:
                 eles = self.finder.find_all(selector, timeout=1)
                 if not eles:
                     return
-                
-                target = eles[-1]
+
+                strategy = self._get_final_target_strategy()
+                target = None
+
+                if strategy == "latest_reply" and ctx.output_target_anchor:
+                    for ele in reversed(eles):
+                        try:
+                            anchor = self.extractor.get_anchor(ele)
+                        except Exception:
+                            anchor = ""
+                        if anchor and anchor == ctx.output_target_anchor:
+                            target = ele
+                            break
+
+                if target is None:
+                    target, _ = self._select_candidate_element(eles)
+                    if target is None:
+                        return
                 
                 # 使用提取器的 extract_images 方法
                 if hasattr(self.extractor, 'extract_images'):

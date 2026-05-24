@@ -145,6 +145,7 @@
           "audio_selector": "audio, audio source",
           "video_selector": "video, video source",
           "container_selector": null,
+          "final_target_strategy": "latest_reply",
           "debounce_seconds": 2,
           "wait_for_load": true,
           "load_timeout_seconds": 5,
@@ -194,7 +195,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 129999,
-          "hint_text": "完全专注于文件内容",
+          "hint_text": "文件内容为需要回复的上下文，按上下文回复",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
           "post_upload_settle": 5,
@@ -918,7 +919,7 @@
           "input_box": "rich-textarea .ql-editor[contenteditable=\"true\"][role=\"textbox\"]",
           "send_btn": "button[aria-label=\"发送\"]",
           "result_container": ".markdown-main-panel",
-          "new_chat_btn": "a[aria-label=\"发起新对话\"]",
+          "new_chat_btn": "//span[text()='发起新对话']",
           "message_wrapper": null,
           "generating_indicator": ".blue-circle.stop-icon mat-icon[data-mat-icon-name=\"stop\"]",
           "点击模型选择": "//button[@data-test-id='bard-mode-menu-button']",
@@ -2360,13 +2361,13 @@
           "audio_selector": "audio, audio source",
           "video_selector": "video, video source",
           "container_selector": null,
-          "debounce_seconds": 2,
+          "debounce_seconds": 2.0,
           "wait_for_load": true,
-          "load_timeout_seconds": 5,
+          "load_timeout_seconds": 5.0,
           "download_blobs": true,
           "max_size_mb": 10,
           "src_allow_patterns": [],
-          "mode": "all",
+          "mode": "first",
           "audio_capture_enabled": true,
           "audio_capture_mute_playback": true,
           "audio_capture_preload_enabled": true,
@@ -2383,9 +2384,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12,
-          "audio_capture_min_wait_seconds": 2,
-          "audio_capture_hard_max_wait_seconds": 45,
+          "audio_capture_max_wait_seconds": 12.0,
+          "audio_capture_min_wait_seconds": 2.0,
+          "audio_capture_hard_max_wait_seconds": 45.0,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -2668,12 +2669,6 @@
         },
         "workflow": [
           {
-            "action": "JS_EXEC",
-            "target": "",
-            "optional": false,
-            "value": "window.location.assign('https://arena.ai/text/side-by-side');"
-          },
-          {
             "action": "WAIT",
             "target": "",
             "optional": false,
@@ -2724,16 +2719,18 @@
           }
         },
         "image_extraction": {
-          "enabled": false,
+          "enabled": true,
           "modalities": {
-            "image": false,
+            "image": true,
             "audio": false,
             "video": false
           },
-          "selector": "img",
+          "selector": "img.transition-opacity.duration-500.opacity-100.aspect-square.object-cover",
           "audio_selector": "audio, audio source",
           "video_selector": "video, video source",
           "container_selector": null,
+          "final_target_strategy": "latest_visual_reply",
+          "allow_container_fallback": false,
           "debounce_seconds": 2,
           "wait_for_load": true,
           "load_timeout_seconds": 5,
@@ -2741,6 +2738,146 @@
           "max_size_mb": 10,
           "src_allow_patterns": [],
           "mode": "all",
+          "audio_capture_enabled": true,
+          "audio_capture_mute_playback": true,
+          "audio_capture_preload_enabled": true,
+          "audio_capture_reload_before_workflow": false,
+          "audio_capture_preserve_graph": true,
+          "audio_capture_terminal_settle_seconds": 0.35,
+          "audio_trigger_selector": "",
+          "audio_trigger_labels": [
+            "朗读",
+            "语音朗读",
+            "收听",
+            "read aloud",
+            "listen",
+            "tts",
+            "voice"
+          ],
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
+          "audio_capture_estimated_chars_per_second": 4.8,
+          "audio_capture_wait_padding_seconds": 1.2,
+          "audio_network_capture": {
+            "enabled": false,
+            "timeout_seconds": 2.5,
+            "transport": "page_websocket_probe",
+            "url_patterns": [
+              "voicegenie",
+              "speech",
+              "audio",
+              "tts"
+            ],
+            "extractor": "voicegenie_ogg_pages",
+            "settle_seconds": 0.35
+          },
+          "audio_capture_poll_seconds": 0.25,
+          "audio_capture_silence_seconds": 1.2,
+          "audio_capture_activity_threshold": 0.006,
+          "audio_capture_activity_silence_seconds": 0.65
+        },
+        "file_paste": {
+          "enabled": false,
+          "threshold": 50000,
+          "hint_text": "完全专注于文件内容",
+          "reacquire_input_after_upload": false,
+          "post_upload_input_selector": "",
+          "post_upload_settle": 0,
+          "upload_signal_timeout": 2.5,
+          "upload_signal_grace": 3,
+          "state_probe": {
+            "enabled": false,
+            "code": ""
+          }
+        },
+        "prompt_padding": {
+          "enabled": false,
+          "marker_text": "测试号，无实际意义",
+          "segments_per_side": 12
+        }
+      },
+      "主预设-图片模式": {
+        "selectors": {
+          "input_box": "textarea[name=\"message\"]",
+          "send_btn": "button[type=\"submit\"]",
+          "result_container": "main ol > div.w-full:not(.flex) .flex.flex-col.gap-3",
+          "new_chat_btn": "a[href*=\"/image\"], a[data-sidebar=\"menu-button\"][href*=\"/image\"]",
+          "message_wrapper": null,
+          "generating_indicator": null
+        },
+        "workflow": [
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 2
+          },
+          {
+            "action": "FILL_INPUT",
+            "target": "input_box",
+            "optional": false,
+            "value": null
+          },
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 0.5
+          },
+          {
+            "action": "CLICK",
+            "target": "send_btn",
+            "optional": false,
+            "value": null
+          },
+          {
+            "action": "JS_EXEC",
+            "target": "",
+            "optional": true,
+            "value": "return (async () => { const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); const norm = (v) => String(v || '').replace(/\\s+/g, ' ').trim().toLowerCase(); const isVisible = (el) => { if (!el) return false; const rect = el.getBoundingClientRect(); const style = window.getComputedStyle(el); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'; }; const popupVisible = () => Array.from(document.querySelectorAll('button, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"], [role=\"dialog\"], [data-radix-popper-content-wrapper]')).some((el) => { if (!isVisible(el)) return false; const text = norm(el.innerText || el.value || el.getAttribute('aria-label')); return text.includes('terms of use') && text.includes('privacy policy') && text.includes('agree'); }); const findAgreeButton = () => Array.from(document.querySelectorAll('button, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"]')).find((el) => { if (!isVisible(el) || el.disabled) return false; const text = norm(el.innerText || el.value || el.getAttribute('aria-label')); return text === 'agree' || text.includes('agree'); }); const appearanceDeadline = Date.now() + 2200; let popupSeen = false; let clicked = false; while (Date.now() < appearanceDeadline) { if (popupVisible()) { popupSeen = true; break; } await sleep(120); } if (!popupSeen) return 'ARENA_AGREE_NOT_PRESENT'; const settleDeadline = Date.now() + 3500; while (Date.now() < settleDeadline) { const button = findAgreeButton(); if (button && !clicked) { button.click(); clicked = true; await sleep(180); } if (!popupVisible()) return clicked ? 'ARENA_AGREE_DISMISSED' : 'ARENA_AGREE_CLEARED'; await sleep(120); } return clicked ? 'ARENA_AGREE_STILL_VISIBLE' : 'ARENA_AGREE_BUTTON_NOT_FOUND'; })();"
+          },
+          {
+            "action": "STREAM_WAIT",
+            "target": "result_container",
+            "optional": false,
+            "value": null
+          }
+        ],
+        "stealth": true,
+        "stream_config": {
+          "mode": "network",
+          "hard_timeout": 300,
+          "network": {
+            "parser": "lmarena_image_side_left",
+            "url_pattern": "**/nextjs-api/stream/post-to-evaluation/**",
+            "method": "POST",
+            "listen_pattern": "/nextjs-api/stream/post-to-evaluation",
+            "silence_threshold": 3,
+            "response_interval": 1,
+            "first_content_timeout": 6
+          }
+        },
+        "image_extraction": {
+          "enabled": true,
+          "modalities": {
+            "image": true,
+            "audio": false,
+            "video": false
+          },
+          "selector": "img.transition-opacity.duration-500.opacity-100.aspect-square.object-cover",
+          "audio_selector": "audio, audio source",
+          "video_selector": "video, video source",
+          "container_selector": null,
+          "final_target_strategy": "latest_visual_reply",
+          "allow_container_fallback": false,
+          "debounce_seconds": 2,
+          "wait_for_load": true,
+          "load_timeout_seconds": 5,
+          "download_blobs": true,
+          "src_allow_patterns": [],
+          "max_size_mb": 10,
+          "mode": "first",
           "audio_capture_enabled": true,
           "audio_capture_mute_playback": true,
           "audio_capture_preload_enabled": true,
@@ -3213,7 +3350,8 @@
           "file_input": "input[type=\"file\"]",
           "drop_zone": "body",
           "下拉框": "#qwen-chat-header-left .ant-dropdown-trigger",
-          "3.6max": "//div[contains(@class, 'model-item') and .//span[text()='Qwen3.6-Max-Preview']]"
+          "展开更多模型": "//div[contains(text(), '展开更多模型')]",
+          "3.7max": "//div[contains(@class, 'model-item') and .//span[text()='Qwen3.7-Max-Preview']]"
         },
         "workflow": [
           {
@@ -3225,18 +3363,14 @@
           {
             "action": "CLICK",
             "target": "下拉框",
-            "optional": false,
+            "optional": true,
             "value": null
           },
           {
-            "action": "COORD_CLICK",
-            "target": "",
-            "optional": false,
-            "value": {
-              "x": 349,
-              "y": 326,
-              "random_radius": 10
-            }
+            "action": "CLICK",
+            "target": "展开更多模型",
+            "optional": true,
+            "value": null
           },
           {
             "action": "WAIT",
@@ -3245,14 +3379,10 @@
             "value": 0.5
           },
           {
-            "action": "COORD_CLICK",
-            "target": "",
-            "optional": false,
-            "value": {
-              "x": 797,
-              "y": 338,
-              "random_radius": 10
-            }
+            "action": "CLICK",
+            "target": "3.7max",
+            "optional": true,
+            "value": null
           },
           {
             "action": "FILL_INPUT",
@@ -3263,7 +3393,7 @@
           {
             "action": "KEY_PRESS",
             "target": "Enter",
-            "optional": true,
+            "optional": false,
             "value": null
           },
           {
@@ -3346,7 +3476,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 40000,
-          "hint_text": "继续",
+          "hint_text": "文件内容为需要回复的上下文，按上下文回复",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
           "post_upload_settle": 0,

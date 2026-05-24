@@ -17,6 +17,37 @@ from app.utils.human_mouse import cdp_precise_click, human_scroll_path, idle_dri
 
 
 class WorkflowExecutorActionMixin:
+    def _get_coord_click_settings(self) -> dict:
+        return {
+            "ready_timeout": self._coerce_float(
+                BrowserConstants.get("COORD_CLICK_READY_TIMEOUT"),
+                0.9,
+                minimum=0.0,
+            ),
+            "stable_samples": self._coerce_int(
+                BrowserConstants.get("COORD_CLICK_STABLE_SAMPLES"),
+                2,
+                minimum=1,
+            ),
+            "sample_interval": self._coerce_float(
+                BrowserConstants.get("COORD_CLICK_SAMPLE_INTERVAL"),
+                0.08,
+                minimum=0.02,
+            ),
+            "rect_tolerance": self._coerce_int(
+                BrowserConstants.get("COORD_CLICK_RECT_TOLERANCE"),
+                3,
+                minimum=0,
+            ),
+            "edge_inset": self._coerce_int(
+                BrowserConstants.get("COORD_CLICK_EDGE_INSET"),
+                4,
+                minimum=0,
+            ),
+            "retry_offsets": BrowserConstants.get("COORD_CLICK_RETRY_OFFSETS")
+            or [[0, 0], [4, 0], [-4, 0], [0, 4], [0, -4], [7, 3], [-7, 3]],
+        }
+
     def _get_stealth_click_strategy(self) -> str:
         raw = str(BrowserConstants.get("STEALTH_CLICK_STRATEGY") or "auto").strip().lower()
         aliases = {
@@ -93,7 +124,14 @@ class WorkflowExecutorActionMixin:
         self._warmup_page_for_stealth()
         self._page_warmed_up = True
 
-    def _stealth_dom_click_element(self, ele, target_key: str = "", selector: str = "") -> bool:
+    def _stealth_dom_click_element(
+        self,
+        ele,
+        target_key: str = "",
+        selector: str = "",
+        *,
+        log_label: str = "STEALTH_CLICK",
+    ) -> bool:
         """
         Background-safe low-entropy click path.
 
@@ -165,7 +203,7 @@ class WorkflowExecutorActionMixin:
             )
         except Exception as e:
             logger.warning(
-                "[STEALTH_CLICK] 后台安全 DOM 点击异常: "
+                f"[{log_label}] 后台安全 DOM 点击异常: "
                 f"target={target_label}, selector={selector_label}, error={self._compact_log_value(e, 180)}"
             )
             return False
@@ -175,7 +213,7 @@ class WorkflowExecutorActionMixin:
         if ok:
             self._mouse_pos = None
             logger.debug(
-                "[STEALTH_CLICK] 后台安全 DOM 点击完成: "
+                f"[{log_label}] 后台安全 DOM 点击完成: "
                 f"target={target_label}, total={elapsed:.2f}s, "
                 f"active={bool((result or {}).get('active')) if isinstance(result, dict) else '-'}, "
                 f"strategy={self._get_stealth_click_strategy()}"
@@ -183,10 +221,24 @@ class WorkflowExecutorActionMixin:
             return True
 
         logger.warning(
-            "[STEALTH_CLICK] 后台安全 DOM 点击失败: "
+            f"[{log_label}] 后台安全 DOM 点击失败: "
             f"target={target_label}, selector={selector_label}, result={self._compact_log_value(result, 180)}"
         )
         return False
+
+    def _should_use_background_safe_dom_click(self, target_key: str = "") -> bool:
+        target = str(target_key or "").strip()
+        if not target:
+            return False
+
+        if self.stealth_mode:
+            return self._should_use_stealth_dom_click(target)
+
+        if getattr(self, "_workflow_scope_depth", 0) <= 0:
+            return False
+        if not self._should_keep_workflow_awake():
+            return False
+        return target in self._get_stealth_dom_click_targets()
 
     def _smart_delay(self, min_sec: float = None, max_sec: float = None):
         """
@@ -333,6 +385,309 @@ class WorkflowExecutorActionMixin:
         except Exception:
             pass
         return (1200, 800)
+
+    @staticmethod
+    def _is_rect_stable(previous: dict, current: dict, tolerance: int) -> bool:
+        if not previous or not current:
+            return False
+        for key in ("x", "y", "width", "height"):
+            if abs(int(previous.get(key, 0)) - int(current.get(key, 0))) > tolerance:
+                return False
+        return True
+
+    def _clamp_viewport_point(self, x: int, y: int) -> tuple[int, int]:
+        vw, vh = self._get_viewport_size()
+        safe_x = max(1, min(int(vw) - 1, int(x)))
+        safe_y = max(1, min(int(vh) - 1, int(y)))
+        return safe_x, safe_y
+
+    def _sample_coord_click_target(self, x: int, y: int) -> Optional[dict]:
+        try:
+            state = self.tab.run_js(
+                """
+                try {
+                    const x = Math.round(Number(arguments[0]) || 0);
+                    const y = Math.round(Number(arguments[1]) || 0);
+                    const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+                    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+                    const insideViewport = x >= 0 && y >= 0 && x <= vw && y <= vh;
+                    const top = insideViewport && document.elementFromPoint ? document.elementFromPoint(x, y) : null;
+                    if (!top) {
+                        return {
+                            ok: false,
+                            insideViewport,
+                            viewport: { width: vw, height: vh }
+                        };
+                    }
+
+                    const rect = top.getBoundingClientRect ? top.getBoundingClientRect() : null;
+                    const style = window.getComputedStyle ? window.getComputedStyle(top) : null;
+                    const rectData = rect ? {
+                        x: Math.round(rect.x || 0),
+                        y: Math.round(rect.y || 0),
+                        width: Math.round(rect.width || 0),
+                        height: Math.round(rect.height || 0)
+                    } : null;
+                    const classText = String(top.className || "");
+                    const tag = String(top.tagName || "").toLowerCase();
+                    return {
+                        ok: true,
+                        insideViewport,
+                        viewport: { width: vw, height: vh },
+                        tag,
+                        className: classText,
+                        id: String(top.id || ""),
+                        text: String(top.innerText || top.textContent || "").slice(0, 120),
+                        pointerEvents: style ? String(style.pointerEvents || "") : "",
+                        disabled: !!top.disabled || top.getAttribute('aria-disabled') === 'true',
+                        rect: rectData
+                    };
+                } catch (error) {
+                    return {
+                        ok: false,
+                        error: String(error && error.message ? error.message : error || "")
+                    };
+                }
+                """,
+                x,
+                y,
+            )
+        except Exception as e:
+            logger.debug(f"[COORD_CLICK] 坐标探测失败（忽略）: {e}")
+            return None
+        return state if isinstance(state, dict) else None
+
+    def _pick_coord_click_safe_point(self, x: int, y: int, sample: Optional[dict], edge_inset: int) -> tuple[int, int]:
+        click_x, click_y = self._clamp_viewport_point(x, y)
+        rect = (sample or {}).get("rect") if isinstance(sample, dict) else None
+        if not isinstance(rect, dict):
+            return click_x, click_y
+
+        rect_x = int(rect.get("x", click_x))
+        rect_y = int(rect.get("y", click_y))
+        rect_w = max(0, int(rect.get("width", 0)))
+        rect_h = max(0, int(rect.get("height", 0)))
+        if rect_w <= 0 or rect_h <= 0:
+            return click_x, click_y
+
+        inner_left = rect_x + min(edge_inset, max(0, rect_w // 3))
+        inner_top = rect_y + min(edge_inset, max(0, rect_h // 3))
+        inner_right = rect_x + rect_w - min(edge_inset, max(0, rect_w // 3))
+        inner_bottom = rect_y + rect_h - min(edge_inset, max(0, rect_h // 3))
+
+        if inner_left > inner_right:
+            inner_left = rect_x
+            inner_right = rect_x + rect_w
+        if inner_top > inner_bottom:
+            inner_top = rect_y
+            inner_bottom = rect_y + rect_h
+
+        safe_x = min(max(click_x, inner_left), inner_right)
+        safe_y = min(max(click_y, inner_top), inner_bottom)
+        return self._clamp_viewport_point(safe_x, safe_y)
+
+    def _wait_for_coord_click_target_ready(self, x: int, y: int) -> tuple[int, int, Optional[dict]]:
+        settings = self._get_coord_click_settings()
+        timeout = float(settings["ready_timeout"])
+        if timeout <= 0:
+            safe_x, safe_y = self._clamp_viewport_point(x, y)
+            sample = self._sample_coord_click_target(safe_x, safe_y)
+            tuned_x, tuned_y = self._pick_coord_click_safe_point(
+                safe_x, safe_y, sample, int(settings["edge_inset"])
+            )
+            return tuned_x, tuned_y, sample
+
+        stable_needed = max(1, int(settings["stable_samples"]))
+        sample_interval = max(0.02, float(settings["sample_interval"]))
+        rect_tolerance = max(0, int(settings["rect_tolerance"]))
+        deadline = time.time() + timeout
+
+        safe_x, safe_y = self._clamp_viewport_point(x, y)
+        last_rect = None
+        last_signature = None
+        stable_count = 0
+        latest_sample = None
+
+        while time.time() < deadline:
+            if self._check_cancelled():
+                break
+
+            latest_sample = self._sample_coord_click_target(safe_x, safe_y)
+            rect = (latest_sample or {}).get("rect") if isinstance(latest_sample, dict) else None
+            if latest_sample and latest_sample.get("ok") and rect:
+                signature = (
+                    str(latest_sample.get("tag") or ""),
+                    str(latest_sample.get("id") or ""),
+                    str(latest_sample.get("className") or "")[:120],
+                )
+                rect_ok = self._is_rect_stable(last_rect, rect, rect_tolerance) if last_rect else False
+                if signature == last_signature and rect_ok:
+                    stable_count += 1
+                else:
+                    stable_count = 1
+                    last_signature = signature
+                last_rect = rect
+                if stable_count >= stable_needed:
+                    break
+            time.sleep(sample_interval)
+
+        tuned_x, tuned_y = self._pick_coord_click_safe_point(
+            safe_x, safe_y, latest_sample, int(settings["edge_inset"])
+        )
+        return tuned_x, tuned_y, latest_sample
+
+    def _iter_coord_click_candidates(self, base_x: int, base_y: int, sample: Optional[dict]):
+        settings = self._get_coord_click_settings()
+        seen = set()
+        offsets = settings.get("retry_offsets") or []
+
+        for item in offsets:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            try:
+                dx = int(item[0])
+                dy = int(item[1])
+            except Exception:
+                continue
+
+            cand_x, cand_y = self._clamp_viewport_point(base_x + dx, base_y + dy)
+            cand_x, cand_y = self._pick_coord_click_safe_point(
+                cand_x,
+                cand_y,
+                sample,
+                int(settings["edge_inset"]),
+            )
+            key = (cand_x, cand_y)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield cand_x, cand_y
+
+    def _coord_dom_click_at(self, x: int, y: int, sample: Optional[dict] = None) -> bool:
+        """Background-friendly coord click using page-side events before CDP fallback."""
+        try:
+            result = self.tab.run_js(
+                """
+                return (function() {
+                    try {
+                        const x = Math.round(Number(arguments[0]) || 0);
+                        const y = Math.round(Number(arguments[1]) || 0);
+                        const target = document.elementFromPoint ? document.elementFromPoint(x, y) : null;
+                        if (!target) {
+                            return { ok: false, reason: 'no_target' };
+                        }
+
+                        const clickable = target.closest(
+                            'button, a, summary, label, option, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [aria-haspopup], input[type="button"], input[type="submit"], input[type="checkbox"], input[type="radio"], [tabindex]'
+                        ) || target;
+
+                        try {
+                            clickable.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+                        } catch (error) {}
+                        try {
+                            clickable.focus?.({ preventScroll: true });
+                        } catch (error) {
+                            try { clickable.focus?.(); } catch (error2) {}
+                        }
+
+                        const baseMouse = {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: x,
+                            clientY: y,
+                            button: 0,
+                            buttons: 1,
+                            view: window
+                        };
+                        const basePointer = {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: x,
+                            clientY: y,
+                            button: 0,
+                            buttons: 1,
+                            pointerId: 1,
+                            pointerType: 'mouse',
+                            isPrimary: true,
+                            view: window
+                        };
+
+                        try {
+                            clickable.dispatchEvent(new MouseEvent('mousemove', baseMouse));
+                        } catch (error) {}
+                        try {
+                            if (typeof PointerEvent === 'function') {
+                                clickable.dispatchEvent(new PointerEvent('pointerdown', basePointer));
+                            }
+                        } catch (error) {}
+                        try {
+                            clickable.dispatchEvent(new MouseEvent('mousedown', baseMouse));
+                        } catch (error) {}
+                        try {
+                            if (typeof PointerEvent === 'function') {
+                                clickable.dispatchEvent(new PointerEvent('pointerup', basePointer));
+                            }
+                        } catch (error) {}
+                        try {
+                            clickable.dispatchEvent(new MouseEvent('mouseup', baseMouse));
+                        } catch (error) {}
+
+                        let clickInvoked = false;
+                        try {
+                            if (typeof clickable.click === 'function') {
+                                clickable.click();
+                                clickInvoked = true;
+                            }
+                        } catch (error) {}
+
+                        if (!clickInvoked) {
+                            try {
+                                clickable.dispatchEvent(new MouseEvent('click', {
+                                    ...baseMouse,
+                                    buttons: 0
+                                }));
+                                clickInvoked = true;
+                            } catch (error) {}
+                        }
+
+                        return {
+                            ok: !!clickInvoked,
+                            tag: String(clickable.tagName || '').toLowerCase(),
+                            id: String(clickable.id || ''),
+                            className: String(clickable.className || '').slice(0, 120),
+                            active: document.activeElement === clickable
+                                || (clickable.contains && clickable.contains(document.activeElement))
+                        };
+                    } catch (error) {
+                        return {
+                            ok: false,
+                            reason: String(error && error.message ? error.message : error || '')
+                        };
+                    }
+                })();
+                """,
+                x,
+                y,
+            )
+        except Exception as e:
+            logger.debug(f"[COORD_CLICK] 页面内坐标点击异常（忽略）: {e}")
+            return False
+
+        ok = bool((result or {}).get("ok")) if isinstance(result, dict) else bool(result)
+        if ok:
+            logger.debug(
+                "[COORD_CLICK] 页面内坐标点击完成: "
+                f"point=({x}, {y}), active={bool((result or {}).get('active')) if isinstance(result, dict) else '-'}, "
+                f"tag={self._compact_log_value((result or {}).get('tag') if isinstance(result, dict) else '', 40)}"
+            )
+            self._mouse_pos = None
+            return True
+
+        logger.debug(
+            "[COORD_CLICK] 页面内坐标点击未确认，回退 CDP: "
+            f"point=({x}, {y}), result={self._compact_log_value(result, 180)}"
+        )
+        return False
     
     # ================= 步骤执行 =================
 
@@ -392,15 +747,29 @@ class WorkflowExecutorActionMixin:
                     ele = self._wait_for_element_interactable(ele, selector, target_key)
 
                     if self.stealth_mode:
-                        if self._should_use_stealth_dom_click(target_key):
-                            if not self._stealth_dom_click_element(ele, target_key=target_key, selector=selector):
+                        if self._should_use_background_safe_dom_click(target_key):
+                            if not self._stealth_dom_click_element(
+                                ele,
+                                target_key=target_key,
+                                selector=selector,
+                                log_label="STEALTH_CLICK",
+                            ):
                                 raise WorkflowError("stealth_dom_click_failed")
                         else:
                             self._stealth_click_element(ele, target_key=target_key, selector=selector)
                     else:
                         if self._check_cancelled():
                             return
-                        ele.click()
+                        if self._should_use_background_safe_dom_click(target_key):
+                            if not self._stealth_dom_click_element(
+                                ele,
+                                target_key=target_key,
+                                selector=selector,
+                                log_label="INTERACT_CLICK",
+                            ):
+                                ele.click()
+                        else:
+                            ele.click()
 
                 self._smart_delay(
                     BrowserConstants.ACTION_DELAY_MIN,
@@ -465,7 +834,8 @@ class WorkflowExecutorActionMixin:
             with self._page_interaction_slot("COORD_CLICK", "coord_click") as acquired:
                 if not acquired or self._check_cancelled():
                     return
-                self._human_cdp_click_at(click_x, click_y)
+                tuned_x, tuned_y, sample = self._wait_for_coord_click_target_ready(click_x, click_y)
+                self._human_cdp_click_at(tuned_x, tuned_y, sample=sample)
             self._smart_delay(
                 BrowserConstants.ACTION_DELAY_MIN,
                 BrowserConstants.ACTION_DELAY_MAX
@@ -573,7 +943,7 @@ class WorkflowExecutorActionMixin:
         except Exception:
             pass
 
-    def _human_cdp_click_at(self, x: int, y: int):
+    def _human_cdp_click_at(self, x: int, y: int, sample: Optional[dict] = None):
         """
         使用 human_mouse 轨迹移动，并以 CDP 精确点击结束。
 
@@ -583,56 +953,82 @@ class WorkflowExecutorActionMixin:
         if self._check_cancelled():
             return
 
-        self._flash_click_marker(x, y)
-        logger.debug(f"[COORD_CLICK] viewport click at ({x}, {y})")
+        candidates = list(self._iter_coord_click_candidates(x, y, sample))
+        last_error = None
 
-        start_pos = self._ensure_mouse_origin()
-
-        self._mouse_pos = smooth_move_mouse(
-            tab=self.tab,
-            from_pos=start_pos,
-            to_pos=(x, y),
-            check_cancelled=self._check_cancelled
-        )
-
-        if self._check_cancelled():
-            return
-
-        if random.random() < 0.65:
-            self._mouse_pos = idle_drift(
-                tab=self.tab,
-                duration=random.uniform(0.02, 0.05),
-                center_pos=self._mouse_pos,
-                check_cancelled=self._check_cancelled,
-                drift_radius=random.uniform(0.8, 1.8),
-                freq_hz=random.uniform(7.0, 11.0)
+        for attempt_index, (cand_x, cand_y) in enumerate(candidates, start=1):
+            attempt_started_at = time.perf_counter()
+            self._flash_click_marker(cand_x, cand_y)
+            logger.debug(
+                f"[COORD_CLICK] viewport click at ({cand_x}, {cand_y}) "
+                f"(attempt={attempt_index}/{max(1, len(candidates))})"
             )
-        else:
-            time.sleep(random.uniform(0.015, 0.035))
 
-        if self._check_cancelled():
-            return
+            if not self.stealth_mode and self._coord_dom_click_at(cand_x, cand_y, sample=sample):
+                logger.debug(
+                    f"[COORD_CLICK] attempt={attempt_index} 使用页面内坐标点击成功 "
+                    f"(elapsed={time.perf_counter() - attempt_started_at:.2f}s)"
+                )
+                return
 
-        success = cdp_precise_click(
-            tab=self.tab,
-            x=x,
-            y=y,
-            check_cancelled=self._check_cancelled
-        )
-        if not success:
-            logger.warning(f"[CDP_CLICK] 首次坐标点击失败，重试一次: ({x}, {y})")
-            time.sleep(random.uniform(0.03, 0.08))
-            success = cdp_precise_click(
+            start_pos = self._ensure_mouse_origin()
+            move_started_at = time.perf_counter()
+
+            self._mouse_pos = smooth_move_mouse(
                 tab=self.tab,
-                x=x,
-                y=y,
+                from_pos=start_pos,
+                to_pos=(cand_x, cand_y),
                 check_cancelled=self._check_cancelled
             )
+            logger.debug(
+                f"[COORD_CLICK] attempt={attempt_index} 鼠标移动完成 "
+                f"(elapsed={time.perf_counter() - move_started_at:.2f}s)"
+            )
 
-        if not success:
-            raise WorkflowError("coord_click_failed")
+            if self._check_cancelled():
+                return
 
-        self._mouse_pos = (x, y)
+            if random.random() < 0.65:
+                self._mouse_pos = idle_drift(
+                    tab=self.tab,
+                    duration=random.uniform(0.02, 0.05),
+                    center_pos=self._mouse_pos,
+                    check_cancelled=self._check_cancelled,
+                    drift_radius=random.uniform(0.8, 1.8),
+                    freq_hz=random.uniform(7.0, 11.0)
+                )
+            else:
+                time.sleep(random.uniform(0.015, 0.035))
+
+            if self._check_cancelled():
+                return
+
+            click_started_at = time.perf_counter()
+            success = cdp_precise_click(
+                tab=self.tab,
+                x=cand_x,
+                y=cand_y,
+                check_cancelled=self._check_cancelled
+            )
+            logger.debug(
+                f"[COORD_CLICK] attempt={attempt_index} CDP 点击返回 "
+                f"(success={bool(success)}, elapsed={time.perf_counter() - click_started_at:.2f}s)"
+            )
+            if success:
+                self._mouse_pos = (cand_x, cand_y)
+                return
+
+            last_error = (cand_x, cand_y)
+            if attempt_index < len(candidates):
+                logger.warning(
+                    f"[CDP_CLICK] 坐标点击失败，尝试附近回退点: "
+                    f"({cand_x}, {cand_y}) -> next"
+                )
+                time.sleep(random.uniform(0.03, 0.08))
+
+        raise WorkflowError(
+            f"coord_click_failed:{last_error[0]},{last_error[1]}" if last_error else "coord_click_failed"
+        )
 
     def _direct_scroll_at(self, start_x: int, start_y: int, end_x: int, end_y: int):
         """普通模式下执行坐标滚轮滑动。"""

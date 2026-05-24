@@ -12,6 +12,12 @@ import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.services.tool_calling_common import (
+    _LEGACY_XML_ARG_TAG,
+    _LEGACY_XML_CALL_TAG,
+    _LEGACY_XML_WRAPPER_TAG,
+    _PREFERRED_XML_ARG_TAG,
+    _PREFERRED_XML_CALL_TAG,
+    _PREFERRED_XML_WRAPPER_TAG,
     _debug_preview,
     _new_completion_id,
     _new_tool_call_id,
@@ -353,7 +359,8 @@ def _normalize_parsed_payload(
                 "content": payload.get("content"),
                 "tool_calls": tool_calls,
             }
-        return None
+        if raw_calls:
+            return None
 
     if mode == "final" or "content" in payload:
         return {

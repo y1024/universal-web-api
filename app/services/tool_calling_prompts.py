@@ -8,7 +8,7 @@ import copy
 import html
 import json
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.tool_calling_common import (
     _LEGACY_XML_ARG_TAG,

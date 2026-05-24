@@ -266,6 +266,8 @@ class ImageExtractionConfig(TypedDict, total=False):
     audio_selector: str              # 音频选择器
     video_selector: str              # 视频选择器
     container_selector: Optional[str] # 容器选择器，限定查找范围
+    final_target_strategy: Literal["container", "latest_reply", "latest_visual_reply"] # 最终提取时锁定整容器或当前回复节点
+    allow_container_fallback: bool   # 当前回复内无媒体时是否回退到容器/整页
     debounce_seconds: float          # 文本稳定后等待时间
     wait_for_load: bool              # 是否等待媒体加载完成
     load_timeout_seconds: float      # 等待加载的超时时间

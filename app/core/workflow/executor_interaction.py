@@ -366,45 +366,69 @@ class WorkflowExecutorInteractionMixin:
             ),
         }
 
+    def _should_keep_workflow_awake(self) -> bool:
+        if self.stealth_mode:
+            return True
+        settings = self._get_workflow_wake_settings()
+        return bool(settings["wake_before_interaction"])
+
     @contextmanager
     def workflow_execution_scope(self):
-        """Keep stealth focus emulation active for the whole workflow run."""
-        if not self.stealth_mode:
+        """Keep the active workflow logically awake without stealing real foreground focus."""
+        if not self._should_keep_workflow_awake():
             yield
             return
 
         self._workflow_scope_depth += 1
         started_here = self._workflow_scope_depth == 1
         if started_here:
-            self._begin_stealth_workflow_scope()
+            self._begin_workflow_scope()
 
         try:
             yield
         finally:
             self._workflow_scope_depth = max(0, self._workflow_scope_depth - 1)
             if started_here:
-                self._end_stealth_workflow_scope()
+                self._end_workflow_scope()
 
-    def _begin_stealth_workflow_scope(self):
-        logger.debug("[STEALTH] 工作流开始前启用焦点模拟")
+    def _begin_workflow_scope(self):
+        settings = self._get_workflow_wake_settings()
+        scope_label = "STEALTH" if self.stealth_mode else "INTERACT"
+        enable_focus_emulation = self.stealth_mode or settings["focus_emulation"]
+
+        logger.debug(f"[{scope_label}] 工作流开始前启用后台保活")
+
+        self._workflow_focus_emulation_active = False
+        self._workflow_visibility_emulation_active = False
+
+        if enable_focus_emulation:
+            try:
+                self.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=True)
+                self._workflow_focus_emulation_active = True
+            except Exception as e:
+                logger.debug_throttled(
+                    f"workflow.focus_emulation.start.{scope_label.lower()}",
+                    f"[{scope_label}] 工作流级焦点模拟启用失败（忽略）: error={e}",
+                    interval_sec=10.0,
+                )
 
         try:
-            self.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=True)
-            self._workflow_focus_emulation_active = True
-        except Exception as e:
-            self._workflow_focus_emulation_active = False
-            logger.debug_throttled(
-                "workflow.stealth_focus_emulation.start",
-                f"[STEALTH] 工作流级焦点模拟启用失败（忽略）: error={e}",
-                interval_sec=10.0,
+            install_result = install_visibility_emulation(
+                self.tab,
+                owner=self.session,
+                reason="workflow_start",
             )
-
-        try:
-            install_visibility_emulation(self.tab, owner=self.session, reason="workflow_start")
+            self._workflow_visibility_emulation_active = True
+            if not install_result:
+                logger.debug_throttled(
+                    f"workflow.visibility.state.{scope_label.lower()}",
+                    f"[{scope_label}] 工作流级可见性模拟状态未完全确认，继续保留后台保活",
+                    interval_sec=10.0,
+                )
         except Exception as e:
             logger.debug_throttled(
-                "workflow.stealth_visibility.start",
-                f"[STEALTH] 工作流级可见性模拟启用失败（忽略）: error={e}",
+                f"workflow.visibility.start.{scope_label.lower()}",
+                f"[{scope_label}] 工作流级可见性模拟启用失败（忽略）: error={e}",
                 interval_sec=10.0,
             )
 
@@ -412,23 +436,35 @@ class WorkflowExecutorInteractionMixin:
             self.tab.run_cdp("Page.setWebLifecycleState", state="active")
         except Exception as e:
             logger.debug_throttled(
-                "workflow.stealth_lifecycle.start",
-                f"[STEALTH] 工作流开始前页面唤醒失败（忽略）: error={e}",
+                f"workflow.lifecycle.start.{scope_label.lower()}",
+                f"[{scope_label}] 工作流开始前页面唤醒失败（忽略）: error={e}",
                 interval_sec=10.0,
             )
 
-    def _end_stealth_workflow_scope(self):
-        if not self._workflow_focus_emulation_active:
-            restore_visibility_emulation(self.tab, owner=self.session, reason="workflow_end")
-            return
-
         try:
-            self.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=False)
+            self.tab.run_js("return document.readyState || '';")
         except Exception:
             pass
+
+    def _end_workflow_scope(self):
+        scope_label = "STEALTH" if self.stealth_mode else "INTERACT"
+
+        try:
+            if self._workflow_focus_emulation_active:
+                self.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=False)
+        except Exception as e:
+            logger.debug_throttled(
+                f"workflow.focus_emulation.end.{scope_label.lower()}",
+                f"[{scope_label}] 工作流级焦点模拟关闭失败（忽略）: error={e}",
+                interval_sec=10.0,
+            )
         finally:
             self._workflow_focus_emulation_active = False
+
+        try:
             restore_visibility_emulation(self.tab, owner=self.session, reason="workflow_end")
+        finally:
+            self._workflow_visibility_emulation_active = False
 
     @contextmanager
     def _wake_page_for_interaction(self, label: str):
@@ -443,8 +479,9 @@ class WorkflowExecutorInteractionMixin:
             return
 
         focus_emulation_enabled = False
+        restore_visibility_after_interaction = False
         try:
-            if settings["focus_emulation"]:
+            if settings["focus_emulation"] and not self._workflow_focus_emulation_active:
                 try:
                     self.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=True)
                     focus_emulation_enabled = True
@@ -454,6 +491,15 @@ class WorkflowExecutorInteractionMixin:
                         f"[INTERACT] 焦点模拟启用失败（忽略）: target={label}, error={e}",
                         interval_sec=10.0,
                     )
+            try:
+                install_visibility_emulation(self.tab, owner=self.session, reason=f"interaction:{label}")
+                restore_visibility_after_interaction = not self._workflow_visibility_emulation_active
+            except Exception as e:
+                logger.debug_throttled(
+                    f"interaction.visibility.{label}",
+                    f"[INTERACT] 可见性模拟启用失败（忽略）: target={label}, error={e}",
+                    interval_sec=10.0,
+                )
             try:
                 self.tab.run_cdp("Page.setWebLifecycleState", state="active")
             except Exception as e:
@@ -470,6 +516,11 @@ class WorkflowExecutorInteractionMixin:
                 pass
             yield
         finally:
+            if restore_visibility_after_interaction:
+                try:
+                    restore_visibility_emulation(self.tab, owner=self.session, reason=f"interaction_end:{label}")
+                except Exception:
+                    pass
             if focus_emulation_enabled:
                 try:
                     self.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=False)
@@ -485,6 +536,7 @@ class WorkflowExecutorInteractionMixin:
         尽量减少后台页被冻结、坐标读取或鼠标事件派发被拖延的概率。
         """
         focus_emulation_enabled = False
+        restore_visibility_after_interaction = False
 
         try:
             if not self._workflow_focus_emulation_active:
@@ -500,6 +552,7 @@ class WorkflowExecutorInteractionMixin:
 
             try:
                 install_visibility_emulation(self.tab, owner=self.session, reason=f"interaction:{label}")
+                restore_visibility_after_interaction = not self._workflow_visibility_emulation_active
             except Exception as e:
                 logger.debug_throttled(
                     f"interaction.stealth_visibility.{label}",
@@ -518,6 +571,11 @@ class WorkflowExecutorInteractionMixin:
 
             yield
         finally:
+            if restore_visibility_after_interaction:
+                try:
+                    restore_visibility_emulation(self.tab, owner=self.session, reason=f"interaction_end:{label}")
+                except Exception:
+                    pass
             if focus_emulation_enabled:
                 try:
                     self.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=False)

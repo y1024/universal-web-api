@@ -415,60 +415,71 @@ class MediaExtractor:
             downloadBlobs = true,
             maxBytes = 10485760,
             mode = "all",
-            mediaType = "audio"
+            mediaType = "audio",
+            allowContainerFallback = true
         } = opts || {};
 
-        const candidateRoots = [];
-        const pushRoot = (value) => {
+        const primaryRoots = [];
+        const fallbackRoots = [];
+        const pushRoot = (bucket, value) => {
             if (!value) return;
             const nodeType = Number(value.nodeType || 0);
             if (nodeType !== 1 && nodeType !== 9) return;
-            if (!candidateRoots.includes(value)) {
-                candidateRoots.push(value);
+            if (!bucket.includes(value)) {
+                bucket.push(value);
             }
         };
 
         if (this && (this.nodeType === 1 || this.nodeType === 9)) {
-            pushRoot(this);
+            pushRoot(primaryRoots, this);
         }
 
         if (containerSelector) {
             try {
                 const scopedRoots = Array.from(document.querySelectorAll(containerSelector));
                 for (const scopedRoot of scopedRoots) {
-                    pushRoot(scopedRoot);
+                    pushRoot(fallbackRoots, scopedRoot);
                 }
             } catch {}
         } else {
-            pushRoot(document);
+            pushRoot(fallbackRoots, document);
         }
 
-        if (candidateRoots.length === 0) {
+        if (primaryRoots.length === 0 && fallbackRoots.length === 0) {
             return { items: [], warnings: ["container_not_found"] };
         }
 
-        const nodes = [];
-        const seenNodes = new Set();
-        const pushNode = (value) => {
-            if (!(value instanceof Element)) return;
-            if (seenNodes.has(value)) return;
-            seenNodes.add(value);
-            nodes.push(value);
+        const collectNodes = (roots) => {
+            const scopedNodes = [];
+            const seenNodes = new Set();
+            const pushNode = (value) => {
+                if (!(value instanceof Element)) return;
+                if (seenNodes.has(value)) return;
+                seenNodes.add(value);
+                scopedNodes.push(value);
+            };
+
+            for (const root of roots) {
+                try {
+                    if (root instanceof Element && typeof root.matches === "function" && root.matches(selector)) {
+                        pushNode(root);
+                    }
+                } catch {}
+
+                try {
+                    const rootNodes = root.querySelectorAll ? Array.from(root.querySelectorAll(selector)) : [];
+                    for (const node of rootNodes) {
+                        pushNode(node);
+                    }
+                } catch {}
+            }
+
+            return scopedNodes;
         };
 
-        for (const root of candidateRoots) {
-            try {
-                if (root instanceof Element && typeof root.matches === "function" && root.matches(selector)) {
-                    pushNode(root);
-                }
-            } catch {}
-
-            try {
-                const scopedNodes = root.querySelectorAll ? Array.from(root.querySelectorAll(selector)) : [];
-                for (const node of scopedNodes) {
-                    pushNode(node);
-                }
-            } catch {}
+        let nodes = collectNodes(primaryRoots);
+        if (nodes.length === 0 && allowContainerFallback) {
+            nodes = collectNodes(fallbackRoots);
         }
 
         if (nodes.length === 0) {
@@ -2279,6 +2290,7 @@ class MediaExtractor:
             "maxBytes": int(config.get("max_size_mb", 10) * 1024 * 1024),
             "mode": config.get("mode", "all"),
             "mediaType": media_type,
+            "allowContainerFallback": bool(config.get("allow_container_fallback", True)),
         }
 
         try:

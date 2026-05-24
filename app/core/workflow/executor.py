@@ -203,6 +203,7 @@ class WorkflowExecutor(
         self._last_fill_after_new_chat = False
         self._workflow_scope_depth = 0
         self._workflow_focus_emulation_active = False
+        self._workflow_visibility_emulation_active = False
         
         # 检查是否启用网络监听模式
         self._stream_mode = stream_config.get("mode", "dom") if stream_config else "dom"

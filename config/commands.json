@@ -779,8 +779,8 @@
       "group_name": "gemini",
       "script": "",
       "script_lang": "javascript",
-      "last_triggered": 1777786374.5675476,
-      "trigger_count": 16,
+      "last_triggered": 1779594374.0821097,
+      "trigger_count": 3,
       "stop_on_error": false,
       "log_enabled": true,
       "log_level": "GLOBAL"
@@ -877,7 +877,7 @@
       "group_name": "gemini",
       "script": "",
       "script_lang": "javascript",
-      "last_triggered": 1777537123.1885848,
+      "last_triggered": 1779592799.5912514,
       "trigger_count": 1,
       "stop_on_error": false,
       "log_enabled": true,
@@ -939,7 +939,7 @@
       "mode": "simple",
       "trigger": {
         "type": "page_check",
-        "value": "需要我为你做些什么",
+        "value": "需要我为你做些什么 || 今天心情怎么样 || 最近怎么样 || 你问我答，快出题吧 || 有什么新灵感想聊聊吗？ || 我们开始吧 || 接下来想聊点什么？",
         "command_id": "",
         "action_ref": "",
         "match_rule": "equals",
@@ -970,15 +970,15 @@
         {
           "type": "run_js",
           "action_id": "step_2",
-          "code": "return (async () => { const findClickableButton = () => { const btn = document.querySelector('button.temp-chat-button'); if (!(btn instanceof HTMLButtonElement) || !btn.isConnected) return null; const style = window.getComputedStyle(btn); const hidden = btn.getClientRects().length === 0 || style.display === 'none' || style.visibility === 'hidden'; if (btn.disabled || hidden) return null; return btn; }; const deadline = Date.now() + 2000; while (Date.now() < deadline) { const btn = findClickableButton(); if (btn) { btn.click(); return 'temp_chat_button_clicked'; } await new Promise(resolve => setTimeout(resolve, 200)); } return 'temp_chat_button_timeout'; })()"
+          "code": "return (async () => { const findClickableButton = () => { const btn = document.querySelector('gem-icon-button.temp-chat-button button') || document.querySelector('[data-test-id=\"temp-chat-button\"] button'); if (!(btn instanceof HTMLButtonElement) || !btn.isConnected) return null; const style = window.getComputedStyle(btn); const hidden = btn.getClientRects().length === 0 || style.display === 'none' || style.visibility === 'hidden'; if (btn.disabled || hidden) return null; return btn; }; const deadline = Date.now() + 2000; while (Date.now() < deadline) { const btn = findClickableButton(); if (btn) { btn.click(); return 'temp_chat_button_clicked'; } await new Promise(resolve => setTimeout(resolve, 200)); } return 'temp_chat_button_timeout'; })()"
         }
       ],
       "group_name": "gemini",
       "script": "",
       "script_lang": "javascript",
       "id": "cmd_0020e346",
-      "last_triggered": 1778687663.777271,
-      "trigger_count": 1,
+      "last_triggered": 1779596531.0430164,
+      "trigger_count": 6,
       "log_enabled": true,
       "log_level": "GLOBAL",
       "stop_on_error": false
@@ -1026,8 +1026,8 @@
       "group_name": "gemini",
       "script": "",
       "script_lang": "javascript",
-      "last_triggered": 1778727170.4338207,
-      "trigger_count": 253,
+      "last_triggered": 1779596553.6381972,
+      "trigger_count": 1181,
       "log_enabled": false,
       "log_level": "GLOBAL",
       "stop_on_error": false

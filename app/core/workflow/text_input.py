@@ -1028,8 +1028,29 @@ class TextInputHandler:
 
         self._smart_delay(0.2, 0.4)
 
-        # 物理激活
-        self.physical_activate(ele)
+        expected = text.replace('\r\n', '\n').replace('\r', '\n')
+        expected_normalized = self.normalize_for_compare(expected)
+        expected_core = re.sub(r'\s+', '', expected)
+        current_text = self.read_input_full_text(ele)
+        current_normalized = self.normalize_for_compare(current_text)
+        current_core = re.sub(r'\s+', '', current_text)
+        looks_committed = (
+            current_text == expected
+            or current_normalized == expected_normalized
+            or (
+                self.is_contenteditable(ele)
+                and current_core == expected_core
+            )
+        )
+
+        if looks_committed:
+            self.focus_to_end(ele)
+            logger.debug(
+                "[INPUT_ACTIVATE] JS 输入结果已稳定，跳过物理激活 "
+                f"(len={len(current_text)}, is_rich={self.is_contenteditable(ele)})"
+            )
+        else:
+            self.physical_activate(ele)
 
         # 校验并修正
         self.verify_and_fix(ele, text)
