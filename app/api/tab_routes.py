@@ -41,7 +41,13 @@ from app.services.tool_calling import (
     normalize_tool_request,
     summarize_messages_for_debug,
 )
-from app.utils.site_url import normalize_route_domain, route_domain_matches
+from app.utils.site_url import (
+    encode_tab_url_route_token,
+    normalize_exact_tab_url,
+    normalize_route_domain,
+    route_domain_matches,
+    tab_url_matches,
+)
 
 logger = get_logger("API.TAB")
 
@@ -66,6 +72,12 @@ TAB_POOL_ALLOCATION_OPTIONS = [
     {"value": "first_idle", "label": "优先空闲"},
     {"value": "round_robin", "label": "轮询"},
 ]
+TAB_ROUTE_METHOD_OPTIONS = [
+    {"value": "domain", "label": "站点域名路由"},
+    {"value": "fixed_tab", "label": "固定标签页路由"},
+    {"value": "exact_url", "label": "标签页 URL 路由"},
+]
+DEFAULT_TAB_ROUTE_METHODS = {"domain", "fixed_tab", "exact_url"}
 TAB_SELECTOR_OPTIONS = {"first_idle", "round_robin", "random"}
 _route_round_robin_cursor: Dict[str, int] = {}
 _route_round_robin_lock = threading.Lock()
@@ -206,6 +218,31 @@ def _normalize_tab_selector(value: str, default: str = "first_idle") -> str:
     return default
 
 
+def _normalize_enabled_route_methods(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return [item["value"] for item in TAB_ROUTE_METHOD_OPTIONS]
+
+    normalized: List[str] = []
+    seen = set()
+    for item in value:
+        method = str(item or "").strip().lower()
+        if method in DEFAULT_TAB_ROUTE_METHODS and method not in seen:
+            seen.add(method)
+            normalized.append(method)
+
+    if not normalized:
+        return [item["value"] for item in TAB_ROUTE_METHOD_OPTIONS]
+    return normalized
+
+
+def _get_enabled_route_methods_from_config(config: Optional[Dict[str, Any]] = None) -> List[str]:
+    payload = config if isinstance(config, dict) else _read_browser_config()
+    tab_pool_config = payload.get("tab_pool") if isinstance(payload, dict) else {}
+    if not isinstance(tab_pool_config, dict):
+        tab_pool_config = {}
+    return _normalize_enabled_route_methods(tab_pool_config.get("enabled_route_methods"))
+
+
 def _get_pool_default_selector(browser) -> str:
     """当路由接口未显式传 selector 时，跟随标签页池当前分配模式。"""
     try:
@@ -225,6 +262,32 @@ def _get_tab_info_by_index(browser, tab_index: int) -> Optional[Dict[str, Any]]:
         if int(item.get("persistent_index") or 0) == int(tab_index):
             return item
     return None
+
+
+def _get_tabs_by_exact_url(browser, exact_url: str) -> List[Dict[str, Any]]:
+    target = normalize_exact_tab_url(exact_url)
+    if not target:
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    for item in browser.tab_pool.get_tabs_with_index():
+        actual_url = str(item.get("url") or "").strip()
+        if tab_url_matches(target, actual_url):
+            matches.append(item)
+    return matches
+
+
+def _get_tabs_by_url_route_token(browser, url_token: str) -> List[Dict[str, Any]]:
+    target = str(url_token or "").strip().lower()
+    if not target:
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    for item in browser.tab_pool.get_tabs_with_index():
+        actual_url = str(item.get("url") or "").strip()
+        if encode_tab_url_route_token(actual_url) == target:
+            matches.append(item)
+    return matches
 
 
 def _list_candidate_tabs(browser, route_domain: str = "") -> List[Dict[str, Any]]:
@@ -266,10 +329,14 @@ def _resolve_target_tab(
     browser,
     *,
     route_domain: str = "",
+    exact_url: str = "",
+    url_token: str = "",
     tab_index: Optional[int] = None,
     selector: str = "first_idle",
 ) -> Dict[str, Any]:
     target_route = normalize_route_domain(route_domain)
+    target_exact_url = normalize_exact_tab_url(exact_url)
+    target_url_token = str(url_token or "").strip().lower()
 
     if tab_index is not None:
         tab_info = _get_tab_info_by_index(browser, int(tab_index))
@@ -281,7 +348,30 @@ def _resolve_target_tab(
                 status_code=400,
                 detail=f"标签页 #{tab_index} 不属于域名路由 '{target_route}'",
             )
+        actual_url = str(tab_info.get("url") or "").strip()
+        if target_exact_url and not tab_url_matches(target_exact_url, actual_url):
+            raise HTTPException(
+                status_code=400,
+                detail="指定标签页与 URL 路由不匹配",
+            )
+        if target_url_token and encode_tab_url_route_token(actual_url) != target_url_token:
+            raise HTTPException(
+                status_code=400,
+                detail="指定标签页与 URL 路由不匹配",
+            )
         return tab_info
+
+    if target_exact_url:
+        matches = _get_tabs_by_exact_url(browser, target_exact_url)
+        if not matches:
+            raise HTTPException(status_code=404, detail="URL 路由没有匹配的已打开标签页")
+        return _select_round_robin_tab(matches, f"exact_url::{target_exact_url}")
+
+    if target_url_token:
+        matches = _get_tabs_by_url_route_token(browser, target_url_token)
+        if not matches:
+            raise HTTPException(status_code=404, detail="URL 路由没有匹配的已打开标签页")
+        return _select_round_robin_tab(matches, f"url_token::{target_url_token}")
 
     candidates = _list_candidate_tabs(browser, target_route)
     if not candidates:
@@ -309,6 +399,7 @@ def _build_tab_resolution_headers(
     tab_info: Optional[Dict[str, Any]],
     *,
     route_domain: str = "",
+    exact_url: str = "",
     selector: str = "",
 ) -> Dict[str, str]:
     headers: Dict[str, str] = {}
@@ -326,6 +417,9 @@ def _build_tab_resolution_headers(
     current_url = str(tab_info.get("url") or "").strip()
     if current_url:
         headers["X-Resolved-Tab-Url"] = current_url
+
+    if exact_url:
+        headers["X-Resolved-Exact-Url"] = normalize_exact_tab_url(exact_url) or exact_url
 
     current_domain = str(tab_info.get("current_domain") or tab_info.get("route_domain") or route_domain or "").strip()
     if current_domain:
@@ -367,6 +461,7 @@ class ChatRequest(BaseModel):
 class TabPoolConfigRequest(BaseModel):
     """标签页池配置更新请求。"""
     allocation_mode: str = Field(default="first_idle")
+    enabled_route_methods: Optional[List[str]] = Field(default=None)
 
 
 # ================= 认证依赖 =================
@@ -428,6 +523,8 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
         browser = get_browser(auto_connect=False)
         tabs = browser.tab_pool.get_tabs_with_index()
         pool_status = browser.tab_pool.get_status()
+        browser_config = _read_browser_config()
+        enabled_route_methods = _get_enabled_route_methods_from_config(browser_config)
         
         # 🆕 为每个标签页附加可用预设列表
         try:
@@ -458,6 +555,8 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "count": len(tabs),
             "allocation_mode": pool_status.get("allocation_mode", "first_idle"),
             "allocation_mode_options": TAB_POOL_ALLOCATION_OPTIONS,
+            "enabled_route_methods": enabled_route_methods,
+            "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
         }
     except Exception as e:
         logger.error(f"获取标签页列表失败: {e}")
@@ -467,6 +566,8 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "error": str(e),
             "allocation_mode": "first_idle",
             "allocation_mode_options": TAB_POOL_ALLOCATION_OPTIONS,
+            "enabled_route_methods": [item["value"] for item in TAB_ROUTE_METHOD_OPTIONS],
+            "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
         }
 
 
@@ -479,6 +580,7 @@ async def update_tab_pool_config(
     allocation_mode = str(body.allocation_mode or "").strip().lower()
     if allocation_mode not in {"first_idle", "round_robin"}:
         raise HTTPException(status_code=400, detail="invalid_allocation_mode")
+    enabled_route_methods = _normalize_enabled_route_methods(body.enabled_route_methods)
 
     try:
         config = _read_browser_config()
@@ -486,6 +588,7 @@ async def update_tab_pool_config(
         if not isinstance(tab_pool_config, dict):
             tab_pool_config = {}
         tab_pool_config["allocation_mode"] = allocation_mode
+        tab_pool_config["enabled_route_methods"] = enabled_route_methods
         config["tab_pool"] = tab_pool_config
         _write_browser_config(config)
 
@@ -509,6 +612,8 @@ async def update_tab_pool_config(
             "message": "标签页池分配模式已更新",
             "allocation_mode": allocation_mode,
             "allocation_mode_options": TAB_POOL_ALLOCATION_OPTIONS,
+            "enabled_route_methods": enabled_route_methods,
+            "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
             "pool_synced": pool_synced,
         }
     except HTTPException:
@@ -621,6 +726,45 @@ async def list_models_with_route_domain_and_preset(
     )
 
 
+@router.get("/tab-url/{url_token}/v1/models")
+async def list_models_with_exact_tab_url(
+    url_token: str,
+    authenticated: bool = Depends(verify_auth)
+):
+    """为精确 URL 路由提供 OpenAI 兼容模型列表接口。"""
+    route_token = str(url_token or "").strip().lower()
+    if not route_token:
+        raise HTTPException(status_code=400, detail="URL 路由无效")
+
+    browser = get_browser(auto_connect=False)
+    tab_info = _resolve_target_tab(
+        browser,
+        url_token=route_token,
+        selector="round_robin",
+    )
+
+    payload = {
+        "object": "list",
+        "data": [
+            {
+                "id": "web-browser",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "universal-web-api"
+            }
+        ]
+    }
+    response = JSONResponse(content=payload)
+    response.headers.update(
+        _build_tab_resolution_headers(
+            tab_info,
+            exact_url=str(tab_info.get("url") or ""),
+            selector="exact_url",
+        )
+    )
+    return response
+
+
 async def _chat_with_resolved_tab(
     request: Request,
     body: ChatRequest,
@@ -654,6 +798,43 @@ async def _chat_with_resolved_tab(
         )
 
     response = await _non_stream_with_tab_index(request, body, ctx, tab_index)
+    response.headers.update(headers)
+    return response
+
+
+async def _chat_with_exact_url(
+    request: Request,
+    body: ChatRequest,
+    ctx: RequestContext,
+    *,
+    exact_url: str,
+    resolved_headers: Optional[Dict[str, str]] = None,
+):
+    headers = resolved_headers or {}
+
+    if has_tool_calling_request(
+        messages=body.messages,
+        tools=body.tools,
+        functions=body.functions,
+    ):
+        if body.stream:
+            return StreamingResponse(
+                _stream_tool_calling_with_exact_url(request, body, ctx, exact_url),
+                media_type="text/event-stream",
+                headers=_build_stream_headers(headers),
+            )
+        response = await _non_stream_tool_calling_with_exact_url(request, body, ctx, exact_url)
+        response.headers.update(headers)
+        return response
+
+    if body.stream:
+        return StreamingResponse(
+            _stream_with_exact_url(request, body, ctx, exact_url),
+            media_type="text/event-stream",
+            headers=_build_stream_headers(headers),
+        )
+
+    response = await _non_stream_with_exact_url(request, body, ctx, exact_url)
     response.headers.update(headers)
     return response
 
@@ -795,6 +976,62 @@ async def chat_with_route_domain_and_preset(
         preset_name=forced_preset_name,
         authenticated=authenticated,
     )
+
+
+@router.post("/tab-url/{url_token}/v1/chat/completions")
+async def chat_with_exact_tab_url(
+    url_token: str,
+    request: Request,
+    body: ChatRequest,
+    preset_name: Optional[str] = Query(default=None),
+    authenticated: bool = Depends(verify_auth)
+):
+    """使用标签页完整 URL 严格路由到唯一已打开标签页。"""
+    route_token = str(url_token or "").strip().lower()
+    if not route_token:
+        raise HTTPException(status_code=400, detail="URL 路由无效")
+
+    resolved_preset_name = str(preset_name or body.preset_name or "").strip() or None
+    if resolved_preset_name != body.preset_name:
+        body = body.model_copy(update={"preset_name": resolved_preset_name})
+
+    browser = get_browser(auto_connect=False)
+    tab_info = _resolve_target_tab(
+        browser,
+        url_token=route_token,
+        selector="round_robin",
+    )
+    resolved_tab_index = int(tab_info.get("persistent_index") or 0)
+    if resolved_tab_index < 1:
+        raise HTTPException(status_code=500, detail="resolved_tab_index_invalid")
+    exact_url = str(tab_info.get("url") or "").strip()
+
+    resolved_headers = _build_tab_resolution_headers(
+        tab_info,
+        exact_url=exact_url,
+        selector="exact_url",
+    )
+    ctx = request_manager.create_request()
+    request_manager.record_request_input(
+        ctx,
+        body.model_dump(),
+        endpoint=f"/tab-url/{url_token}/v1/chat/completions",
+        route_domain=str(tab_info.get("current_domain") or tab_info.get("route_domain") or ""),
+        tab_index=resolved_tab_index,
+        preset_name=resolved_preset_name,
+    )
+    with logger.context(ctx.request_id):
+        logger.info(
+            f"开始 (URL 路由 {exact_url} -> 标签页 #{resolved_tab_index}, "
+            f"preset={resolved_preset_name or '<follow-tab/default>'})"
+        )
+        return await _chat_with_exact_url(
+            request,
+            body,
+            ctx,
+            exact_url=exact_url,
+            resolved_headers=resolved_headers,
+        )
 
 
 async def _stream_with_tab_index(
@@ -1194,6 +1431,201 @@ async def _non_stream_with_route_domain(
     return JSONResponse(content=response)
 
 
+async def _stream_with_exact_url(
+    request: Request,
+    body: ChatRequest,
+    ctx: RequestContext,
+    exact_url: str
+):
+    """使用精确 URL 路由的流式响应"""
+    disconnect_task = None
+    worker_thread = None
+    chunk_queue = None
+    fast_return_on_audio_media = _should_fast_return_on_audio_media(body)
+    fast_returned_on_audio = False
+
+    try:
+        disconnect_task = asyncio.create_task(
+            watch_client_disconnect(request, ctx, check_interval=0.3)
+        )
+
+        browser = get_browser(auto_connect=False)
+        request_manager.start_request(ctx)
+        chunk_queue = queue.Queue(maxsize=100)
+
+        def worker():
+            gen = None
+            try:
+                gen = browser.execute_workflow_for_exact_url(
+                    exact_url,
+                    body.messages,
+                    stream=True,
+                    task_id=ctx.request_id,
+                    preset_name=body.preset_name,
+                    stop_checker=ctx.should_stop,
+                )
+
+                for chunk in gen:
+                    if ctx.should_stop():
+                        cancel_reason = str(ctx.cancel_reason or "unknown")
+                        if cancel_reason in {"cleanup", "client_disconnected", "coroutine_cancelled"}:
+                            logger.debug(f"工作线程检测到停止: {cancel_reason}")
+                        else:
+                            logger.info(f"工作线程检测到取消: {cancel_reason}")
+                        break
+                    chunk_queue.put(chunk)
+
+            except Exception as e:
+                logger.error(f"工作线程异常: {e}")
+                chunk_queue.put(("ERROR", str(e)))
+            finally:
+                if gen is not None:
+                    try:
+                        gen.close()
+                    except Exception as e:
+                        logger.debug(f"关闭工作流生成器失败（忽略）: {e}")
+                chunk_queue.put(None)
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
+
+        last_sse_emit_at = time.monotonic()
+
+        while True:
+            if await request.is_disconnected():
+                ctx.request_cancel("client_disconnected")
+                break
+
+            try:
+                chunk = await asyncio.to_thread(
+                    chunk_queue.get,
+                    timeout=STREAM_QUEUE_POLL_TIMEOUT,
+                )
+            except queue.Empty:
+                if time.monotonic() - last_sse_emit_at >= SSE_HEARTBEAT_INTERVAL:
+                    yield SSEFormatter.pack_comment("keepalive")
+                    last_sse_emit_at = time.monotonic()
+                continue
+
+            if chunk is None:
+                break
+
+            if isinstance(chunk, tuple) and chunk[0] == "ERROR":
+                request_manager.capture_error(ctx, chunk[1], code="worker_error")
+                ctx.mark_failed(chunk[1])
+                yield _pack_error(f"执行错误: {chunk[1]}", "internal_error")
+                break
+
+            request_manager.capture_response_chunk(ctx, chunk)
+            yield chunk
+            last_sse_emit_at = time.monotonic()
+            error_message = _extract_stream_error_message(chunk)
+            if error_message:
+                logger.warning(f"流式响应返回错误事件(exact_url={exact_url}): {error_message}")
+                request_manager.capture_error(ctx, error_message, code="stream_error")
+                ctx.mark_failed(error_message)
+                break
+            if fast_return_on_audio_media and _has_audio_media(_extract_sse_chunk_media_items(chunk)):
+                fast_returned_on_audio = True
+                ctx.mark_completed()
+                logger.info(f"流式朗读响应已取得音频，提前结束(exact_url={exact_url})")
+                yield SSEFormatter.pack_finish(model=body.model)
+                break
+            await asyncio.sleep(0)
+
+        if not ctx.should_stop() and ctx.status == RequestStatus.RUNNING:
+            ctx.mark_completed()
+
+    except asyncio.CancelledError:
+        ctx.request_cancel("coroutine_cancelled")
+        raise
+
+    except Exception as e:
+        logger.error(f"异常: {e}")
+        request_manager.capture_error(ctx, e, code="internal_error")
+        ctx.mark_failed(str(e))
+        yield _pack_error(f"执行错误: {str(e)}", "internal_error")
+
+    finally:
+        if worker_thread and worker_thread.is_alive():
+            if fast_returned_on_audio:
+                ctx.request_cancel("audio_media_fast_return")
+                worker_thread.join(timeout=0.2)
+            elif not ctx.is_terminal():
+                ctx.request_cancel("cleanup")
+                worker_thread.join(timeout=2.0)
+
+        if chunk_queue is not None:
+            try:
+                while not chunk_queue.empty():
+                    chunk_queue.get_nowait()
+            except:
+                pass
+
+        if disconnect_task:
+            disconnect_task.cancel()
+            try:
+                await disconnect_task
+            except asyncio.CancelledError:
+                pass
+
+        request_manager.finish_request(ctx, success=(ctx.status == RequestStatus.COMPLETED))
+
+
+async def _non_stream_with_exact_url(
+    request: Request,
+    body: ChatRequest,
+    ctx: RequestContext,
+    exact_url: str
+) -> JSONResponse:
+    """使用精确 URL 路由的非流式响应"""
+    collected_content = []
+    collected_media = []
+    error_data = None
+    fast_return_on_audio_media = _should_fast_return_on_audio_media(body)
+
+    async for chunk in _stream_with_exact_url(request, body, ctx, exact_url):
+        if isinstance(chunk, str):
+            if chunk.startswith("data: [DONE]"):
+                continue
+
+            for data in _iter_sse_payloads(chunk):
+                try:
+                    if "error" in data:
+                        error_data = data
+                        break
+
+                    media_items = _extract_chunk_media_items(data)
+                    collected_media.extend(media_items)
+
+                    if "choices" in data and data["choices"]:
+                        delta = data["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            collected_content.append(content)
+
+                    if fast_return_on_audio_media and _has_audio_media(collected_media):
+                        ctx.mark_completed()
+                        break
+                except json.JSONDecodeError:
+                    continue
+            if error_data or (fast_return_on_audio_media and _has_audio_media(collected_media)):
+                break
+
+    if error_data:
+        return JSONResponse(content=error_data, status_code=500)
+
+    full_content = _cleanup_non_stream_content("".join(collected_content))
+    response = SSEFormatter.pack_non_stream(
+        full_content,
+        model=body.model,
+        media=_dedupe_media_items(collected_media),
+    )
+    request_manager.capture_response_payload(ctx, response)
+
+    return JSONResponse(content=response)
+
+
 def _execute_browser_non_stream_for_tab(
     browser,
     tab_index: int,
@@ -1235,6 +1667,36 @@ def _execute_browser_non_stream_for_route_domain(
     payload = None
     for chunk in browser.execute_workflow_for_route_domain(
         route_domain,
+        messages,
+        stream=False,
+        task_id=request_id,
+        preset_name=preset_name,
+        stop_checker=stop_checker,
+        allow_media_postprocess=get_tool_calling_allow_media_postprocess(),
+    ):
+        payload = chunk
+
+    if not payload:
+        raise RuntimeError("empty_browser_response")
+
+    data = decode_browser_non_stream_payload(payload)
+    if "error" in data:
+        error = data.get("error") or {}
+        raise RuntimeError(str(error.get("message") or "browser_execution_failed"))
+    return data
+
+
+def _execute_browser_non_stream_for_exact_url(
+    browser,
+    exact_url: str,
+    messages: List[Dict[str, Any]],
+    request_id: str,
+    preset_name: Optional[str] = None,
+    stop_checker=None,
+) -> Dict[str, Any]:
+    payload = None
+    for chunk in browser.execute_workflow_for_exact_url(
+        exact_url,
         messages,
         stream=False,
         task_id=request_id,
@@ -1355,6 +1817,53 @@ async def _run_tool_calling_async_for_route_domain(
     return build_tool_completion_response(body.model, parsed)
 
 
+async def _run_tool_calling_async_for_exact_url(
+    browser,
+    exact_url: str,
+    body: ChatRequest,
+    request_id: str,
+    stop_checker=None,
+) -> Dict[str, Any]:
+    tools, tool_choice = normalize_tool_request(
+        tools=body.tools,
+        tool_choice=body.tool_choice,
+        functions=body.functions,
+        function_call=body.function_call,
+    )
+
+    try:
+        logger.debug(
+            "[exact_url] 请求消息摘要: "
+            f"{summarize_messages_for_debug(body.messages)}"
+        )
+    except Exception as e:
+        logger.debug(f"[exact_url] 请求消息摘要生成失败: {e}")
+
+    async def _round_executor(browser_messages: List[Dict[str, str]]) -> str:
+        return await asyncio.to_thread(
+            lambda: _extract_assistant_content(
+                _execute_browser_non_stream_for_exact_url(
+                    browser=browser,
+                    exact_url=exact_url,
+                    messages=browser_messages,
+                    request_id=request_id,
+                    preset_name=body.preset_name,
+                    stop_checker=stop_checker,
+                )
+            )
+        )
+
+    parsed = await complete_tool_calling_roundtrip_async(
+        messages=body.messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        parallel_tool_calls=body.parallel_tool_calls,
+        round_executor=_round_executor,
+        stop_checker=stop_checker,
+    )
+    return build_tool_completion_response(body.model, parsed)
+
+
 async def _complete_tool_calling_with_tab_index(
     request: Request,
     body: ChatRequest,
@@ -1449,6 +1958,53 @@ async def _complete_tool_calling_with_route_domain(
         request_manager.finish_request(ctx, success=(ctx.status == RequestStatus.COMPLETED))
 
 
+async def _complete_tool_calling_with_exact_url(
+    request: Request,
+    body: ChatRequest,
+    ctx: RequestContext,
+    exact_url: str,
+) -> Dict[str, Any]:
+    disconnect_task = None
+    try:
+        disconnect_task = asyncio.create_task(
+            watch_client_disconnect(request, ctx, check_interval=0.3)
+        )
+
+        browser = get_browser(auto_connect=False)
+        request_manager.start_request(ctx)
+
+        response = await _run_tool_calling_async_for_exact_url(
+            browser,
+            exact_url,
+            body,
+            ctx.request_id,
+            ctx.should_stop,
+        )
+        request_manager.capture_response_payload(ctx, response)
+
+        if not ctx.should_stop() and ctx.status == RequestStatus.RUNNING:
+            ctx.mark_completed()
+
+        return response
+
+    except asyncio.CancelledError:
+        ctx.request_cancel("coroutine_cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"tool_calling_failed(exact_url={exact_url}): {e}")
+        request_manager.capture_error(ctx, e, code="tool_calling_failed")
+        ctx.mark_failed(str(e))
+        raise
+    finally:
+        if disconnect_task:
+            disconnect_task.cancel()
+            try:
+                await disconnect_task
+            except asyncio.CancelledError:
+                pass
+        request_manager.finish_request(ctx, success=(ctx.status == RequestStatus.COMPLETED))
+
+
 async def _non_stream_tool_calling_with_tab_index(
     request: Request,
     body: ChatRequest,
@@ -1495,6 +2051,29 @@ async def _non_stream_tool_calling_with_route_domain(
         )
 
 
+async def _non_stream_tool_calling_with_exact_url(
+    request: Request,
+    body: ChatRequest,
+    ctx: RequestContext,
+    exact_url: str,
+) -> JSONResponse:
+    try:
+        response = await _complete_tool_calling_with_exact_url(request, body, ctx, exact_url)
+        return JSONResponse(content=response)
+    except Exception as e:
+        request_manager.capture_error(ctx, e, code="tool_calling_failed")
+        return JSONResponse(
+            content={
+                "error": {
+                    "message": f"执行错误: {e}",
+                    "type": "execution_error",
+                    "code": "tool_calling_failed",
+                }
+            },
+            status_code=500,
+        )
+
+
 async def _stream_tool_calling_with_tab_index(
     request: Request,
     body: ChatRequest,
@@ -1526,6 +2105,29 @@ async def _stream_tool_calling_with_route_domain(
 ):
     try:
         response = await _complete_tool_calling_with_route_domain(request, body, ctx, route_domain)
+        message = response.get("choices", [{}])[0].get("message", {}) or {}
+        parsed = {
+            "content": message.get("content"),
+            "tool_calls": message.get("tool_calls") or [],
+        }
+        for chunk in iter_tool_stream_chunks(body.model, parsed):
+            if await request.is_disconnected():
+                ctx.request_cancel("client_disconnected")
+                break
+            yield chunk
+            await asyncio.sleep(0)
+    except Exception as e:
+        yield _pack_error(f"执行错误: {str(e)}", "tool_calling_failed")
+
+
+async def _stream_tool_calling_with_exact_url(
+    request: Request,
+    body: ChatRequest,
+    ctx: RequestContext,
+    exact_url: str,
+):
+    try:
+        response = await _complete_tool_calling_with_exact_url(request, body, ctx, exact_url)
         message = response.get("choices", [{}])[0].get("message", {}) or {}
         parsed = {
             "content": message.get("content"),

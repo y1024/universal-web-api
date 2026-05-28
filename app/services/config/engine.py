@@ -1582,8 +1582,16 @@ class ConfigEngine:
             if val in ("container", "latest_reply", "latest_visual_reply"):
                 result["final_target_strategy"] = val
 
+        if "latest_visual_column" in config:
+            val = str(config["latest_visual_column"] or "").strip().lower()
+            if val in ("left", "right"):
+                result["latest_visual_column"] = val
+
         if "allow_container_fallback" in config:
             result["allow_container_fallback"] = bool(config["allow_container_fallback"])
+
+        if "force_postprocess" in config:
+            result["force_postprocess"] = bool(config["force_postprocess"])
         
         if "debounce_seconds" in config:
             try:
@@ -1705,7 +1713,7 @@ class ConfigEngine:
                     network_capture["transport"] = val
             if "extractor" in raw_network_capture:
                 val = str(raw_network_capture["extractor"] or "").strip()
-                if val in {"voicegenie_ogg_pages"}:
+                if val in {"voicegenie_ogg_pages", "voicegenie_binary_stream"}:
                     network_capture["extractor"] = val
             if "settle_seconds" in raw_network_capture:
                 try:
@@ -1747,6 +1755,60 @@ class ConfigEngine:
                     network_capture["url_patterns"] = patterns
 
         result["audio_network_capture"] = network_capture
+
+        browser_tts_fallback = dict(result.get("audio_browser_tts_fallback") or {})
+        raw_browser_tts_fallback = config.get("audio_browser_tts_fallback")
+        if isinstance(raw_browser_tts_fallback, dict):
+            if "enabled" in raw_browser_tts_fallback:
+                browser_tts_fallback["enabled"] = bool(raw_browser_tts_fallback["enabled"])
+            if "provider" in raw_browser_tts_fallback:
+                val = str(raw_browser_tts_fallback["provider"] or "").strip()
+                if val in {"doubao_samantha"}:
+                    browser_tts_fallback["provider"] = val
+            if "speaker" in raw_browser_tts_fallback:
+                val = str(raw_browser_tts_fallback["speaker"] or "").strip()
+                if val:
+                    browser_tts_fallback["speaker"] = val
+            if "speech_rate" in raw_browser_tts_fallback:
+                try:
+                    val = int(raw_browser_tts_fallback["speech_rate"])
+                    browser_tts_fallback["speech_rate"] = max(-100, min(val, 100))
+                except (ValueError, TypeError):
+                    pass
+            if "pitch" in raw_browser_tts_fallback:
+                try:
+                    val = int(raw_browser_tts_fallback["pitch"])
+                    browser_tts_fallback["pitch"] = max(-100, min(val, 100))
+                except (ValueError, TypeError):
+                    pass
+            if "format" in raw_browser_tts_fallback:
+                val = str(raw_browser_tts_fallback["format"] or "").strip().lower()
+                if val in {"aac"}:
+                    browser_tts_fallback["format"] = val
+            if "timeout_seconds" in raw_browser_tts_fallback:
+                try:
+                    val = float(raw_browser_tts_fallback["timeout_seconds"])
+                    browser_tts_fallback["timeout_seconds"] = max(3.0, min(val, 120.0))
+                except (ValueError, TypeError):
+                    pass
+            for key in (
+                "pc_version",
+                "aid",
+                "real_aid",
+                "language",
+                "device_platform",
+                "pkg_type",
+                "region",
+                "sys_region",
+                "use_olympus_account",
+                "samantha_web",
+            ):
+                if key in raw_browser_tts_fallback:
+                    val = str(raw_browser_tts_fallback[key] or "").strip()
+                    if val:
+                        browser_tts_fallback[key] = val
+
+        result["audio_browser_tts_fallback"] = browser_tts_fallback
 
         if "audio_capture_poll_seconds" in config:
             try:

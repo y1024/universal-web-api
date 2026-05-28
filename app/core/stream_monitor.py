@@ -24,6 +24,65 @@ _GEMINI_IMAGE_PLACEHOLDER_RE = re.compile(
 )
 
 
+def _looks_like_image_generation_request(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+
+    direct_markers = (
+        "生成图片",
+        "生成图像",
+        "生成一张图",
+        "生成一张图片",
+        "画一张",
+        "画一幅",
+        "帮我画",
+        "请画",
+        "出图",
+        "做图",
+        "文生图",
+        "以图生图",
+        "image generation",
+        "generate image",
+        "generate an image",
+        "create image",
+        "create an image",
+        "draw an image",
+        "draw me",
+        "make an image",
+        "render an image",
+        "render image",
+    )
+    if any(marker in lowered for marker in direct_markers):
+        return True
+
+    english_actions = ("generate", "create", "draw", "make", "render", "design", "produce")
+    english_objects = (
+        "image",
+        "images",
+        "picture",
+        "pictures",
+        "photo",
+        "photos",
+        "illustration",
+        "artwork",
+        "poster",
+        "logo",
+        "icon",
+        "banner",
+        "wallpaper",
+        "portrait",
+    )
+    if any(action in lowered for action in english_actions) and any(obj in lowered for obj in english_objects):
+        return True
+
+    chinese_actions = ("画", "绘制", "生成", "创作", "设计")
+    chinese_objects = ("图片", "图像", "照片", "插画", "海报", "logo", "图标", "头像", "封面", "壁纸")
+    return any(action in lowered for action in chinese_actions) and any(
+        obj in lowered for obj in chinese_objects
+    )
+
+
 class StreamContext:
     """流式监控上下文（v5.5 增加图片追踪）"""
     def __init__(self):
@@ -213,6 +272,7 @@ class StreamMonitor:
         self._final_complete_text = ""
         self._final_images: List[Dict] = []
         self._generating_checker: Optional[GeneratingStatusCache] = None
+        self._expect_image_output = False
 
     def _sanitize_stream_text(self, text: str) -> str:
         if not text:
@@ -227,6 +287,10 @@ class StreamMonitor:
         return str(
             self._image_config.get("final_target_strategy", "container") or "container"
         ).strip().lower()
+
+    def _get_latest_visual_column(self) -> str:
+        value = str(self._image_config.get("latest_visual_column", "left") or "left").strip().lower()
+        return value if value in {"left", "right"} else "left"
 
     def _select_candidate_element(self, elements, prefer_anchor: Optional[str] = None):
         if not elements:
@@ -248,6 +312,7 @@ class StreamMonitor:
             return target, self.extractor.get_anchor(target)
 
         scored = []
+        column = self._get_latest_visual_column()
         for index, ele in enumerate(elements):
             try:
                 score = ele.run_js(
@@ -269,15 +334,16 @@ class StreamMonitor:
                 bottom = 0.0
                 left = 0.0
                 area = 0.0
-            scored.append((bottom, -left, area, -index, index, ele))
+            horizontal_score = left if column == "right" else -left
+            scored.append((bottom, horizontal_score, area, -index, index, left, ele))
 
         scored.sort(key=lambda item: item[:4], reverse=True)
         best = scored[0]
         logger.debug(
             "[latest_visual_reply] 选中视觉最新回复容器: "
-            f"index={best[4]}, bottom={best[0]:.1f}, left={-best[1]:.1f}, total={len(elements)}"
+            f"index={best[4]}, column={column}, bottom={best[0]:.1f}, left={best[5]:.1f}, total={len(elements)}"
         )
-        target = best[5]
+        target = best[6]
         return target, self.extractor.get_anchor(target)
 
     def monitor(self, selector: str, user_input: str = "",
@@ -292,6 +358,15 @@ class StreamMonitor:
         self._stream_ctx = ctx
         self._final_images = []
         self._generating_checker = GeneratingStatusCache(self.tab)
+        self._expect_image_output = (
+            self._image_extraction_enabled
+            and bool((self._image_config.get("modalities") or {}).get("image"))
+            and _looks_like_image_generation_request(user_input)
+        )
+        logger.debug(
+            f"[MONITOR] expect_image_output={self._expect_image_output}, "
+            f"user_input_len={len(str(user_input or ''))}"
+        )
 
         # ===== 阶段 0：instant baseline =====
         ctx.instant_baseline = self._get_latest_message_snapshot(selector)
@@ -729,10 +804,7 @@ class StreamMonitor:
             silence_threshold = BrowserConstants.STREAM_SILENCE_THRESHOLD
             silence_threshold_fallback = BrowserConstants.STREAM_SILENCE_THRESHOLD_FALLBACK
             stable_count_threshold = BrowserConstants.STREAM_STABLE_COUNT_THRESHOLD
-            image_modalities = self._image_config.get("modalities") or {}
-            image_mode_enabled = (
-                self._image_extraction_enabled and bool(image_modalities.get("image"))
-            )
+            image_mode_enabled = self._expect_image_output
             no_visible_progress = (
                 image_mode_enabled
                 and not ctx.images_detected

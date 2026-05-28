@@ -250,8 +250,29 @@ class AudioNetworkCaptureConfig(TypedDict, total=False):
     timeout_seconds: float
     transport: Literal["page_websocket_probe"]
     url_patterns: List[str]
-    extractor: Literal["voicegenie_ogg_pages"]
+    extractor: Literal["voicegenie_ogg_pages", "voicegenie_binary_stream"]
     settle_seconds: float
+
+
+class AudioBrowserTtsFallbackConfig(TypedDict, total=False):
+    """浏览器上下文内直接拉取 TTS 的兜底配置。"""
+    enabled: bool
+    provider: Literal["doubao_samantha"]
+    speaker: str
+    speech_rate: int
+    pitch: int
+    format: Literal["aac"]
+    timeout_seconds: float
+    pc_version: str
+    aid: str
+    real_aid: str
+    language: str
+    device_platform: str
+    pkg_type: str
+    region: str
+    sys_region: str
+    use_olympus_account: str
+    samantha_web: str
 
 
 class ImageExtractionConfig(TypedDict, total=False):
@@ -267,7 +288,9 @@ class ImageExtractionConfig(TypedDict, total=False):
     video_selector: str              # 视频选择器
     container_selector: Optional[str] # 容器选择器，限定查找范围
     final_target_strategy: Literal["container", "latest_reply", "latest_visual_reply"] # 最终提取时锁定整容器或当前回复节点
+    latest_visual_column: Literal["left", "right"] # latest_visual_reply 同一行内优先左栏或右栏
     allow_container_fallback: bool   # 当前回复内无媒体时是否回退到容器/整页
+    force_postprocess: bool          # 是否强制执行收尾多模态后处理（由配置显式声明）
     debounce_seconds: float          # 文本稳定后等待时间
     wait_for_load: bool              # 是否等待媒体加载完成
     load_timeout_seconds: float      # 等待加载的超时时间
@@ -289,6 +312,7 @@ class ImageExtractionConfig(TypedDict, total=False):
     audio_capture_estimated_chars_per_second: float # 按文本估算朗读时长的字符/秒
     audio_capture_wait_padding_seconds: float # 按文本估算等待时额外冗余
     audio_network_capture: AudioNetworkCaptureConfig # 页面内网络音频捕获配置
+    audio_browser_tts_fallback: AudioBrowserTtsFallbackConfig # 浏览器页内直接拉 TTS 的兜底
     audio_capture_poll_seconds: float      # 捕获状态轮询间隔
     audio_capture_silence_seconds: float   # 检测到静默后结束捕获
     audio_capture_activity_threshold: float # 音量活动检测阈值
@@ -660,6 +684,7 @@ def get_default_image_extraction_config() -> ImageExtractionConfig:
         "audio_selector": "audio, audio source",
         "video_selector": "video, video source",
         "container_selector": None,
+        "force_postprocess": False,
         "debounce_seconds": 2.0,
         "wait_for_load": True,
         "load_timeout_seconds": 5.0,
@@ -685,8 +710,27 @@ def get_default_image_extraction_config() -> ImageExtractionConfig:
             "timeout_seconds": 2.5,
             "transport": "page_websocket_probe",
             "url_patterns": ["voicegenie", "speech", "audio", "tts"],
-            "extractor": "voicegenie_ogg_pages",
+            "extractor": "voicegenie_binary_stream",
             "settle_seconds": 0.35,
+        },
+        "audio_browser_tts_fallback": {
+            "enabled": False,
+            "provider": "doubao_samantha",
+            "speaker": "2",
+            "speech_rate": 0,
+            "pitch": 0,
+            "format": "aac",
+            "timeout_seconds": 30.0,
+            "pc_version": "3.20.2",
+            "aid": "497858",
+            "real_aid": "497858",
+            "language": "zh",
+            "device_platform": "web",
+            "pkg_type": "release_version",
+            "region": "CN",
+            "sys_region": "CN",
+            "use_olympus_account": "1",
+            "samantha_web": "1",
         },
         "audio_capture_poll_seconds": 0.25,
         "audio_capture_silence_seconds": 1.2,

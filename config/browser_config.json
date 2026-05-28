@@ -60,7 +60,12 @@
     "idle_timeout": 300,
     "acquire_timeout": 60,
     "stuck_timeout": 300,
-    "allocation_mode": "round_robin"
+    "allocation_mode": "round_robin",
+    "enabled_route_methods": [
+      "domain",
+      "fixed_tab",
+      "exact_url"
+    ]
   },
   "UPLOAD_HISTORY_IMAGES": false,
   "NETWORK_DEBUG_CAPTURE_ENABLED": true,

@@ -19,7 +19,15 @@ window.TabPoolTabComponent = {
                 { value: 'first_idle', label: '优先空闲' },
                 { value: 'round_robin', label: '轮询' }
             ],
-            allocationModeUpdating: false
+            allocationModeUpdating: false,
+            routeMethodOptions: [
+                { value: 'domain', label: '站点域名路由' },
+                { value: 'fixed_tab', label: '固定标签页路由' },
+                { value: 'exact_url', label: '标签页 URL 路由' }
+            ],
+            enabledRouteMethods: ['domain', 'fixed_tab', 'exact_url'],
+            routeMethodUpdating: false,
+            showRouteSettings: false
         };
     },
     computed: {
@@ -42,9 +50,23 @@ window.TabPoolTabComponent = {
                     default: return status;
                 }
             };
+        },
+        routeMethodSet() {
+            return new Set(this.enabledRouteMethods || []);
         }
     },
     methods: {
+        handleDocumentClick(event) {
+            if (!this.showRouteSettings) return;
+            const panel = this.$el && this.$el.querySelector('[data-route-settings-panel]');
+            const trigger = this.$el && this.$el.querySelector('[data-route-settings-trigger]');
+            const target = event && event.target;
+            if ((panel && panel.contains(target)) || (trigger && trigger.contains(target))) {
+                return;
+            }
+            this.showRouteSettings = false;
+        },
+
         async fetchTabs() {
             this.loading = true;
             try {
@@ -58,6 +80,8 @@ window.TabPoolTabComponent = {
                 this.tabs = data.tabs || [];
                 this.allocationMode = data.allocation_mode || 'first_idle';
                 this.allocationModeOptions = data.allocation_mode_options || this.allocationModeOptions;
+                this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
+                this.routeMethodOptions = data.route_method_options || this.routeMethodOptions;
                 this.lastUpdate = new Date().toLocaleTimeString();
                 this.error = null;
             } catch (e) {
@@ -80,7 +104,10 @@ window.TabPoolTabComponent = {
                 const response = await fetch('/api/tab-pool/config', {
                     method: 'PUT',
                     headers,
-                    body: JSON.stringify({ allocation_mode: nextMode })
+                    body: JSON.stringify({
+                        allocation_mode: nextMode,
+                        enabled_route_methods: this.enabledRouteMethods
+                    })
                 });
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -94,6 +121,60 @@ window.TabPoolTabComponent = {
             } finally {
                 this.allocationModeUpdating = false;
             }
+        },
+
+        isRouteMethodEnabled(method) {
+            return this.routeMethodSet.has(method);
+        },
+
+        async saveRouteMethodSettings() {
+            this.routeMethodUpdating = true;
+            try {
+                const token = localStorage.getItem('api_token');
+                const headers = { 'Content-Type': 'application/json' };
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+
+                const response = await fetch('/api/tab-pool/config', {
+                    method: 'PUT',
+                    headers,
+                    body: JSON.stringify({
+                        allocation_mode: this.allocationMode,
+                        enabled_route_methods: this.enabledRouteMethods
+                    })
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
+                this.routeMethodOptions = data.route_method_options || this.routeMethodOptions;
+                this.$emit('notify', { type: 'success', message: '路由显示设置已保存' });
+            } catch (e) {
+                this.$emit('notify', { type: 'error', message: '保存路由显示设置失败: ' + e.message });
+            } finally {
+                this.routeMethodUpdating = false;
+            }
+        },
+
+        async toggleRouteMethod(method) {
+            const value = String(method || '').trim();
+            if (!value) return;
+
+            const next = new Set(this.enabledRouteMethods || []);
+            if (next.has(value)) {
+                next.delete(value);
+            } else {
+                next.add(value);
+            }
+
+            if (next.size === 0) {
+                this.$emit('notify', { type: 'error', message: '至少保留一种路由方式' });
+                return;
+            }
+
+            this.enabledRouteMethods = this.routeMethodOptions
+                .map(item => item.value)
+                .filter(item => next.has(item));
+            await this.saveRouteMethodSettings();
         },
         
         startAutoRefresh() {
@@ -118,6 +199,13 @@ window.TabPoolTabComponent = {
                 this.$emit('notify', { type: 'success', message: successMessage });
             });
         },
+        
+        copyPresetEndpoint(routePrefix, presetName, successMessage = '已复制端点地址') {
+            const endpoint = `${this.baseUrl}${routePrefix}/${presetName}/v1/chat/completions`;
+            navigator.clipboard.writeText(endpoint).then(() => {
+                this.$emit('notify', { type: 'success', message: successMessage });
+            });
+        },
 
         getDomainRoutePrefix(tab) {
             return tab.domain_route_prefix || '';
@@ -125,6 +213,10 @@ window.TabPoolTabComponent = {
 
         getFixedTabRoutePrefix(tab) {
             return tab.tab_route_prefix || `/tab/${tab.persistent_index}`;
+        },
+
+        getExactUrlRoutePrefix(tab) {
+            return tab.exact_url_route_prefix || '';
         },
         
         truncateUrl(url, maxLen = 50) {
@@ -228,9 +320,11 @@ window.TabPoolTabComponent = {
         this.baseUrl = window.location.origin;
         this.fetchTabs();
         this.startAutoRefresh();
+        document.addEventListener('click', this.handleDocumentClick);
     },
     beforeUnmount() {
         this.stopAutoRefresh();
+        document.removeEventListener('click', this.handleDocumentClick);
     },
     template: `
         <div class="p-6">
@@ -258,6 +352,45 @@ window.TabPoolTabComponent = {
                     </p>
                 </div>
                 <div class="flex items-center gap-4">
+                    <div class="relative">
+                        <button
+                            @click="showRouteSettings = !showRouteSettings"
+                            data-route-settings-trigger
+                            class="w-9 h-9 rounded-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-300 dark:hover:border-blue-600 transition-colors"
+                            title="路由显示设置"
+                        >
+                            ⚙
+                        </button>
+                        <div
+                            v-if="showRouteSettings"
+                            data-route-settings-panel
+                            class="absolute right-0 top-11 z-20 w-72 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl p-4"
+                        >
+                            <div class="flex items-start justify-between gap-3 mb-3">
+                                <div>
+                                    <div class="text-sm font-semibold text-gray-900 dark:text-white">路由显示设置</div>
+                                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">关闭后前端会隐藏对应路由；URL 路由只会匹配已打开标签页，相同 URL 会自动轮询。</p>
+                                </div>
+                                <button @click="showRouteSettings = false" class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">关闭</button>
+                            </div>
+                            <div class="space-y-2">
+                                <label
+                                    v-for="method in routeMethodOptions"
+                                    :key="method.value"
+                                    class="flex items-center justify-between gap-3 text-sm text-gray-700 dark:text-gray-200"
+                                >
+                                    <span>{{ method.label }}</span>
+                                    <input
+                                        type="checkbox"
+                                        :checked="isRouteMethodEnabled(method.value)"
+                                        :disabled="routeMethodUpdating"
+                                        @change="toggleRouteMethod(method.value)"
+                                        class="rounded"
+                                    >
+                                </label>
+                            </div>
+                        </div>
+                    </div>
                     <label class="flex items-center gap-2 text-sm dark:text-gray-300">
                         <input type="checkbox" v-model="autoRefresh" class="rounded">
                         自动刷新
@@ -288,8 +421,9 @@ window.TabPoolTabComponent = {
                 <h3 class="font-semibold text-blue-800 dark:text-blue-300 mb-2">💡 使用方式</h3>
                 <ul class="text-sm text-blue-700 dark:text-blue-200 space-y-1">
                     <li>• <strong>默认路由</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/v1/chat/completions</code> - 自动选择空闲标签页</li>
-                    <li>• <strong>指定站点域名</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/url/gemini.com/v1/chat/completions</code> - 自动匹配该站点的标签页</li>
-                    <li>• <strong>指定标签页</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/tab/{编号}/v1/chat/completions</code> - 使用特定标签页</li>
+                    <li v-if="isRouteMethodEnabled('domain')">• <strong>指定站点域名</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/url/gemini.com/v1/chat/completions</code> - 自动匹配该站点的标签页</li>
+                    <li v-if="isRouteMethodEnabled('fixed_tab')">• <strong>指定标签页</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/tab/{编号}/v1/chat/completions</code> - 使用特定标签页</li>
+                    <li v-if="isRouteMethodEnabled('exact_url')">• <strong>标签页 URL 路由</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/tab-url/{token}/v1/chat/completions</code> - 只匹配当前已打开的 URL，相同 URL 会轮询，不会回退到别的 URL</li>
                     <li>• 标签页编号在脚本运行期间保持不变，关闭标签页不会影响其他编号</li>
                 </ul>
             </div>
@@ -349,7 +483,7 @@ window.TabPoolTabComponent = {
                             
                             <!-- 路由端点 -->
                             <div class="space-y-2">
-                                <div v-if="getDomainRoutePrefix(tab)" class="flex flex-wrap items-center gap-2">
+                                <div v-if="isRouteMethodEnabled('domain') && getDomainRoutePrefix(tab)" class="flex flex-wrap items-center gap-2">
                                     <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">站点域名路由</span>
                                     <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
                                         {{ getDomainRoutePrefix(tab) }}/v1/chat/completions
@@ -359,7 +493,7 @@ window.TabPoolTabComponent = {
                                         📋 复制
                                     </button>
                                 </div>
-                                <div class="flex flex-wrap items-center gap-2">
+                                <div v-if="isRouteMethodEnabled('fixed_tab')" class="flex flex-wrap items-center gap-2">
                                     <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">固定标签页路由</span>
                                     <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
                                         {{ getFixedTabRoutePrefix(tab) }}/v1/chat/completions
@@ -369,6 +503,30 @@ window.TabPoolTabComponent = {
                                         📋 复制
                                     </button>
                                 </div>
+                                <div v-if="isRouteMethodEnabled('exact_url') && getExactUrlRoutePrefix(tab)" class="flex flex-wrap items-center gap-2">
+                                    <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">标签页 URL 路由</span>
+                                    <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
+                                        {{ getExactUrlRoutePrefix(tab) }}/v1/chat/completions
+                                    </code>
+                                    <button @click="copyEndpoint(getExactUrlRoutePrefix(tab), '已复制标签页 URL 路由')"
+                                            class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400">
+                                        📋 复制
+                                    </button>
+                                </div>
+                                
+                                <!-- 预设专属路由 -->
+                                <template v-if="tab.available_presets && tab.available_presets.length > 0">
+                                    <div v-if="isRouteMethodEnabled('domain') && getDomainRoutePrefix(tab)" class="flex flex-wrap items-center gap-2">
+                                        <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">预设域名路由</span>
+                                        <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
+                                            {{ getDomainRoutePrefix(tab) }}/{{ getDisplayedPreset(tab) }}/v1/chat/completions
+                                        </code>
+                                        <button @click="copyPresetEndpoint(getDomainRoutePrefix(tab), getDisplayedPreset(tab), '已复制预设域名路由')"
+                                                class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400">
+                                            📋 复制
+                                        </button>
+                                    </div>
+                                </template>
                             </div>
 
                             <!-- 🆕 预设选择器 -->

@@ -82,8 +82,16 @@ def _load_tab_pool_config() -> Dict:
         config["max_tabs"] = int(os.getenv("MAX_TABS"))
     if os.getenv("MIN_TABS"):
         config["min_tabs"] = int(os.getenv("MIN_TABS"))
-    
-    return config
+
+    allowed_keys = {
+        "max_tabs",
+        "min_tabs",
+        "idle_timeout",
+        "acquire_timeout",
+        "stuck_timeout",
+        "allocation_mode",
+    }
+    return {key: value for key, value in config.items() if key in allowed_keys}
 
 
 # ================= 浏览器核心 =================
@@ -162,6 +170,18 @@ class BrowserCore:
             f"音频尾静音开始: file={target.name}, ext={suffix or '<none>'}, "
             f"append={duration_text}s, duration_before={original_duration:.3f}"
         )
+
+        if original_duration <= 0:
+            logger.debug(
+                f"音频尾静音跳过：无法可靠探测原始时长，保留原文件。file={target.name}"
+            )
+            return filepath
+
+        if suffix == ".webm":
+            logger.debug(
+                f"音频尾静音跳过：暂不改写 webm，保留原文件。file={target.name}"
+            )
+            return filepath
 
         command_variants = [[
             ffmpeg_path,
@@ -1356,6 +1376,93 @@ class BrowserCore:
                 except Exception:
                     pass
 
+    def execute_workflow_for_exact_url(
+        self,
+        exact_url: str,
+        messages: List[Dict],
+        stream: bool = True,
+        task_id: str = None,
+        preset_name: Optional[str] = None,
+        stop_checker: Optional[Callable[[], bool]] = None,
+        workflow_priority: Optional[int] = None,
+        allow_media_postprocess: bool = True,
+    ) -> Generator[str, None, None]:
+        """使用标签页完整 URL 严格匹配的唯一标签页执行工作流。"""
+        is_valid, error_msg, sanitized_messages = MessageValidator.validate(messages)
+
+        if not is_valid:
+            yield self.formatter.pack_error(
+                f"无效请求: {error_msg}",
+                error_type="invalid_request_error",
+                code="invalid_messages"
+            )
+            return
+
+        normalized_exact_url = str(exact_url or "").strip()
+        if not normalized_exact_url:
+            yield self.formatter.pack_error(
+                "URL 路由不能为空",
+                error_type="invalid_request_error",
+                code="invalid_route_url"
+            )
+            return
+
+        if task_id is None:
+            task_id = f"tab_url_{int(time.time() * 1000)}"
+        effective_stop_checker = stop_checker or self._should_stop_checker
+
+        session = None
+        try:
+            session = self.tab_pool.acquire_by_exact_url(normalized_exact_url, task_id, timeout=60)
+
+            if session is None:
+                yield self.formatter.pack_error(
+                    f"URL 路由 '{normalized_exact_url}' 没有唯一可用标签页",
+                    error_type="not_found_error",
+                    code="exact_url_not_found"
+                )
+                yield self.formatter.pack_finish()
+                return
+
+            self._bind_request_tab_id(task_id, session)
+            effective_stop_checker = self._build_task_ownership_stop_checker(
+                session,
+                task_id,
+                effective_stop_checker,
+            )
+
+            if stream:
+                yield from self._execute_workflow_stream(
+                    session,
+                    sanitized_messages,
+                    preset_name=preset_name,
+                    stop_checker=effective_stop_checker,
+                    workflow_priority=workflow_priority,
+                    allow_media_postprocess=allow_media_postprocess,
+                )
+            else:
+                yield from self._execute_workflow_non_stream(
+                    session,
+                    sanitized_messages,
+                    preset_name=preset_name,
+                    stop_checker=effective_stop_checker,
+                    workflow_priority=workflow_priority,
+                    allow_media_postprocess=allow_media_postprocess,
+                )
+
+        finally:
+            if session:
+                self._release_workflow_session(
+                    session,
+                    effective_stop_checker=effective_stop_checker,
+                    task_id=task_id,
+                )
+                try:
+                    from app.services.command_engine import command_engine
+                    command_engine.schedule_deferred_workflow_commands(session, delay_sec=0.25)
+                except Exception:
+                    pass
+
     def _bind_request_tab_id(self, task_id: str, session: Optional[TabSession]):
         if not session:
             return
@@ -1785,6 +1892,10 @@ class BrowserCore:
             and bool(image_config.get("audio_capture_enabled", True))
             and bool(image_config.get("audio_capture_preload_enabled", True))
         )
+        if not audio_capture_preload_enabled:
+            if getattr(session, "_audio_capture_init_script_source", None) is not None:
+                setattr(session, "_audio_capture_init_script_source", None)
+                logger.debug("页面音频捕获预注入脚本已按配置停用")
         if audio_capture_preload_enabled and not effective_stop_checker():
             try:
                 from app.core.extractors.media_extractor import media_extractor
@@ -2210,20 +2321,62 @@ class BrowserCore:
                 and not effective_stop_checker()
                 and not workflow_aborted
             ):
-                logger.debug("[WORKFLOW] 进入多模态提取分支")
+                response_text_hint = "".join(streamed_text_parts)
+                request_text_hint = str(context.get("prompt") or "")
+                media_generation_state = getattr(executor, "_last_stream_media_state", None)
+                stream_media_items = getattr(executor, "_last_stream_media_items", None)
+                dom_stream_media_items = []
                 try:
-                    media_items = self._extract_media_after_stream(
-                        tab=tab,
-                        extractor=extractor,
-                        image_config=image_config,
-                        result_selector=result_container_selector,
-                        message_wrapper_selector=selectors.get("message_wrapper", ""),
-                        completion_id=executor._completion_id,
-                        stop_checker=_combined_stop_checker,
-                        response_text_hint="".join(streamed_text_parts),
-                        media_generation_state=getattr(executor, "_last_stream_media_state", None),
-                        stream_media_items=getattr(executor, "_last_stream_media_items", None),
+                    stream_monitor = getattr(executor, "_stream_monitor", None)
+                    if stream_monitor is not None:
+                        dom_stream_media_items = stream_monitor.get_final_images() or []
+                except Exception:
+                    dom_stream_media_items = []
+
+                should_run_media_postprocess, media_postprocess_diag = self._should_run_media_postprocess(
+                    image_config,
+                    request_text_hint=request_text_hint,
+                    response_text_hint=response_text_hint,
+                    media_generation_state=media_generation_state,
+                    stream_media_items=stream_media_items,
+                    dom_stream_media_items=dom_stream_media_items,
+                )
+                if not should_run_media_postprocess:
+                    logger.debug(
+                        "[WORKFLOW] 跳过多模态提取分支："
+                        f"{json.dumps(media_postprocess_diag, ensure_ascii=False)}"
                     )
+                else:
+                    logger.debug(
+                        "[WORKFLOW] 进入多模态提取分支："
+                        f"{json.dumps(media_postprocess_diag, ensure_ascii=False)}"
+                    )
+                try:
+                    media_items = []
+                    if should_run_media_postprocess:
+                        if dom_stream_media_items:
+                            media_items = [
+                                dict(item)
+                                for item in dom_stream_media_items
+                                if isinstance(item, dict)
+                            ]
+                            logger.debug(
+                                f"[WORKFLOW] 复用 DOM 监听已提取的媒体结果: {len(media_items)} 项"
+                            )
+                        else:
+                            media_items = self._extract_media_after_stream(
+                                tab=tab,
+                                extractor=extractor,
+                                image_config=image_config,
+                                result_selector=result_container_selector,
+                                message_wrapper_selector=selectors.get("message_wrapper", ""),
+                                completion_id=executor._completion_id,
+                                stop_checker=_combined_stop_checker,
+                                response_text_hint=response_text_hint,
+                                request_text_hint=request_text_hint,
+                                media_generation_state=media_generation_state,
+                                stream_media_items=stream_media_items,
+                            )
                     
                     if media_items:
                         download_urls = image_config.get("download_urls", False)
@@ -2378,6 +2531,154 @@ class BrowserCore:
             if not self._is_pending_media_item(item, image_config)
         ]
 
+    @staticmethod
+    def _looks_like_image_generation_request(text: str) -> bool:
+        lowered = str(text or "").strip().lower()
+        if not lowered:
+            return False
+
+        direct_markers = (
+            "生成图片",
+            "生成图像",
+            "生成一张图",
+            "生成一张图片",
+            "画一张",
+            "画一幅",
+            "帮我画",
+            "请画",
+            "出图",
+            "做图",
+            "文生图",
+            "以图生图",
+            "image generation",
+            "generate image",
+            "generate an image",
+            "create image",
+            "create an image",
+            "draw an image",
+            "draw me",
+            "make an image",
+            "render an image",
+            "render image",
+        )
+        if any(marker in lowered for marker in direct_markers):
+            return True
+
+        english_actions = ("generate", "create", "draw", "make", "render", "design", "produce")
+        english_objects = (
+            "image",
+            "images",
+            "picture",
+            "pictures",
+            "photo",
+            "photos",
+            "illustration",
+            "artwork",
+            "poster",
+            "logo",
+            "icon",
+            "banner",
+            "wallpaper",
+            "portrait",
+        )
+        if any(action in lowered for action in english_actions) and any(obj in lowered for obj in english_objects):
+            return True
+
+        chinese_actions = ("画", "绘制", "生成", "创作", "设计")
+        chinese_objects = ("图片", "图像", "照片", "插画", "海报", "logo", "图标", "头像", "封面", "壁纸")
+        return any(action in lowered for action in chinese_actions) and any(
+            obj in lowered for obj in chinese_objects
+        )
+
+    def _should_run_media_postprocess(
+        self,
+        image_config: Dict,
+        *,
+        request_text_hint: str = "",
+        response_text_hint: str = "",
+        media_generation_state: Optional[Dict[str, Any]] = None,
+        stream_media_items: Optional[List[Dict[str, Any]]] = None,
+        dom_stream_media_items: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple[bool, Dict[str, Any]]:
+        modalities = dict((image_config or {}).get("modalities") or {})
+        enabled_types = sorted({
+            media_type
+            for media_type in ("image", "audio", "video")
+            if bool(modalities.get(media_type))
+        })
+        stream_media_count = sum(1 for item in (stream_media_items or []) if isinstance(item, dict))
+        dom_stream_media_count = sum(1 for item in (dom_stream_media_items or []) if isinstance(item, dict))
+        force_postprocess = bool((image_config or {}).get("force_postprocess"))
+        media_state = dict(media_generation_state or {})
+        media_state_pending = bool(media_state.get("pending"))
+        media_state_type = str(media_state.get("media_type") or "").strip().lower()
+        media_state_hint = str(media_state.get("hint_text") or "").strip()
+        response_hint = str(response_text_hint or "").strip()
+        combined_hint = "\n".join(part for part in (response_hint, media_state_hint) if part).lower()
+        request_likely_image = self._looks_like_image_generation_request(request_text_hint)
+        av_pending_text_signal = (
+            ("audio" in enabled_types or "video" in enabled_types)
+            and self._is_pending_media_text(combined_hint, image_config)
+        )
+        image_markers = (
+            "image_generation_content/",
+            "googleusercontent.com/image_generation_content/",
+            "generated image",
+            "generating image",
+            "images are being generated",
+        )
+        image_marker_hit = any(marker in combined_hint for marker in image_markers)
+        diagnostics: Dict[str, Any] = {
+            "enabled_types": enabled_types,
+            "stream_media_count": stream_media_count,
+            "dom_stream_media_count": dom_stream_media_count,
+            "force_postprocess": force_postprocess,
+            "media_state_pending": media_state_pending,
+            "media_state_type": media_state_type,
+            "media_state_hint_len": len(media_state_hint),
+            "response_hint_len": len(response_hint),
+            "request_hint_len": len(str(request_text_hint or "").strip()),
+            "request_likely_image": request_likely_image,
+            "av_pending_text_signal": av_pending_text_signal,
+            "image_marker_hit": image_marker_hit,
+            "decision": "",
+        }
+
+        if not enabled_types:
+            diagnostics["decision"] = "disabled"
+            return False, diagnostics
+
+        if stream_media_count > 0:
+            diagnostics["decision"] = "stream_media_items"
+            return True, diagnostics
+        if dom_stream_media_count > 0:
+            diagnostics["decision"] = "dom_stream_media_items"
+            return True, diagnostics
+
+        if force_postprocess:
+            diagnostics["decision"] = "force_postprocess"
+            return True, diagnostics
+
+        if media_state_pending:
+            diagnostics["decision"] = "media_state_pending"
+            return True, diagnostics
+
+        if av_pending_text_signal:
+            diagnostics["decision"] = "audio_video_pending_text_signal"
+            return True, diagnostics
+
+        if "image" in enabled_types:
+            if request_likely_image:
+                diagnostics["decision"] = "request_likely_image"
+                return True, diagnostics
+
+            if image_marker_hit:
+                diagnostics["decision"] = "image_marker_hint"
+                return True, diagnostics
+
+        diagnostics["decision"] = "no_media_signal"
+        return False, diagnostics
+
     def _extract_media_after_stream(
         self,
         tab,
@@ -2388,6 +2689,7 @@ class BrowserCore:
         completion_id: str = None,
         stop_checker: Optional[Callable[[], bool]] = None,
         response_text_hint: str = "",
+        request_text_hint: str = "",
         media_generation_state: Optional[Dict[str, Any]] = None,
         stream_media_items: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict]:
@@ -2531,6 +2833,9 @@ class BrowserCore:
 
                 if strategy == "latest_visual_reply":
                     scored_candidates = []
+                    column = str(image_config.get("latest_visual_column", "left") or "left").strip().lower()
+                    if column not in {"left", "right"}:
+                        column = "left"
                     for index, candidate in enumerate(candidates):
                         has_media = _has_media(candidate)
                         try:
@@ -2552,17 +2857,18 @@ class BrowserCore:
                             bottom = 0.0
                             left = 0.0
                             area = 0.0
-                        scored_candidates.append((bottom, -left, area, -index, index, has_media, candidate))
+                        horizontal_score = left if column == "right" else -left
+                        scored_candidates.append((bottom, horizontal_score, area, -index, index, left, has_media, candidate))
 
                     if scored_candidates:
                         scored_candidates.sort(key=lambda item: item[:4], reverse=True)
                         best = scored_candidates[0]
                         logger.debug(
                             "[latest_visual_reply] 选中视觉最新媒体容器: "
-                            f"index={best[4]}, has_media={best[5]}, "
-                            f"bottom={best[0]:.1f}, left={-best[1]:.1f}, total={len(candidates)}"
+                            f"index={best[4]}, column={column}, has_media={best[6]}, "
+                            f"bottom={best[0]:.1f}, left={best[5]:.1f}, total={len(candidates)}"
                         )
-                        return best[6]
+                        return best[7]
 
                 for candidate in reversed(candidates):
                     if _has_media(candidate):
@@ -2574,22 +2880,25 @@ class BrowserCore:
             if last_element is None:
                 return []
 
-            def _extract_media_once(target_element):
+            def _extract_media_once(target_element, quiet=False):
+                cfg = dict(image_config or {})
+                if quiet:
+                    cfg["quiet"] = True
                 if hasattr(extractor, 'extract_media'):
                     return extractor.extract_media(
                         target_element,
-                        config=image_config,
+                        config=cfg,
                         container_selector_fallback=result_selector
                     )
                 if hasattr(extractor, 'extract_images'):
                     return media_extractor.extract(
                         target_element,
-                        config=image_config,
+                        config=cfg,
                         container_selector_fallback=result_selector
                     )
                 return media_extractor.extract(
                     target_element,
-                    config=image_config,
+                    config=cfg,
                     container_selector_fallback=result_selector
                 )
 
@@ -2620,6 +2929,7 @@ class BrowserCore:
 
             placeholder_text_lower = placeholder_text.lower()
             response_text_hint_lower = str(response_text_hint or "").strip().lower()
+            request_likely_image = self._looks_like_image_generation_request(request_text_hint)
             media_state = dict(media_generation_state or {})
             media_state_pending = bool(media_state.get("pending"))
             media_state_type = str(media_state.get("media_type") or "").strip().lower()
@@ -2655,14 +2965,6 @@ class BrowserCore:
 
             pending_audio_hint = self._is_pending_media_text(combined_pending_text, image_config, "audio")
             pending_video_hint = self._is_pending_media_text(combined_pending_text, image_config, "video")
-            latest_visual_image_pending = (
-                str(image_config.get("final_target_strategy", "") or "").strip().lower() == "latest_visual_reply"
-                and bool(modalities.get("image"))
-                and not image_items
-                and not only_audio_mode
-            )
-            if latest_visual_image_pending:
-                logger.debug("视觉最新回复容器暂未发现图片，进入延迟图片渲染等待")
 
             if pending_media_items:
                 pending_audio_hint = pending_audio_hint or any(
@@ -2679,7 +2981,6 @@ class BrowserCore:
             pending_kinds = set()
             if (
                 has_generated_image_hint
-                or latest_visual_image_pending
                 or (media_state_pending and media_state_type == "image")
             ) and not image_items:
                 pending_kinds.add("image")
@@ -2722,7 +3023,7 @@ class BrowserCore:
                     if selected is None:
                         continue
                     last_element = selected
-                    media_items = _extract_media_once(last_element)
+                    media_items = _extract_media_once(last_element, quiet=True)
                     ready_media_items = _apply_stream_media_fallback(
                         self._filter_ready_media_items(media_items, image_config)
                     )
@@ -2759,6 +3060,7 @@ class BrowserCore:
                 and not pending_kinds
                 and not only_audio_mode
                 and not effective_stop_checker()
+                and request_likely_image
                 and len(str(response_text_hint or "").strip()) <= 32
             )
             if should_probe_late_image_render:
@@ -2779,7 +3081,7 @@ class BrowserCore:
                     if selected is None:
                         continue
                     last_element = selected
-                    media_items = _extract_media_once(last_element)
+                    media_items = _extract_media_once(last_element, quiet=True)
                     ready_media_items = _apply_stream_media_fallback(
                         self._filter_ready_media_items(media_items, image_config)
                     )
@@ -2861,22 +3163,82 @@ class BrowserCore:
         if network_capture_enabled and not media_extractor.install_audio_network_probe(tab, image_config):
             network_capture_enabled = False
 
+        activation_result = media_extractor.activate_audio_trigger_surface(target_element or tab)
+        if activation_result:
+            logger.debug(
+                "页面音频操作区激活结果: "
+                f"ok={bool(activation_result.get('ok'))}, "
+                f"activated_count={activation_result.get('activated_count')}"
+            )
+
         trigger_target = target_element or tab
-        trigger_result = media_extractor.trigger_audio_playback(trigger_target, image_config)
-        if not bool(trigger_result.get("clicked")) and target_element is not None and target_element is not tab:
-            trigger_result = media_extractor.trigger_audio_playback(tab, image_config)
+        trigger_result: Dict[str, Any] = {}
+        trigger_targets = [trigger_target]
+        if target_element is not None and target_element is not tab:
+            trigger_targets.append(tab)
+
+        for attempt in range(3):
+            if effective_stop_checker():
+                return []
+            if attempt > 0:
+                time.sleep(0.35)
+                media_extractor.activate_audio_trigger_surface(target_element or tab)
+
+            for current_target in trigger_targets:
+                trigger_result = media_extractor.trigger_audio_playback(current_target, image_config)
+                if bool(trigger_result.get("clicked")):
+                    trigger_result["attempt"] = attempt + 1
+                    trigger_result["target_scope"] = "tab" if current_target is tab else "message"
+                    break
+            if bool(trigger_result.get("clicked")):
+                break
+
         if not bool(trigger_result.get("clicked")):
-            logger.debug("页面音频捕获未触发")
+            logger.debug(
+                "页面音频捕获未触发: "
+                f"selector={trigger_result.get('selector_used')!r}, "
+                f"labels={trigger_result.get('labels_used')!r}, "
+                f"candidate_count={trigger_result.get('candidate_count')}, "
+                f"debug_matches={trigger_result.get('debug_matches')!r}, "
+                f"nearby_candidates={trigger_result.get('nearby_candidates')!r}, "
+                f"visible_button_samples={trigger_result.get('visible_button_samples')!r}"
+            )
             return []
 
-        logger.debug("页面音频捕获已触发")
+        logger.debug(
+            "页面音频捕获已触发: "
+            f"attempt={trigger_result.get('attempt')}, "
+            f"scope={trigger_result.get('target_scope')}, "
+            f"text={trigger_result.get('text')!r}, "
+            f"score={trigger_result.get('score')}"
+        )
+
+        effective_response_text_hint = str(response_text_hint or "").strip()
+        if target_element is not None and len(effective_response_text_hint) <= 8:
+            try:
+                dom_response_text = str(
+                    target_element.run_js(
+                        """
+                        const text = (this.innerText || this.textContent || "").trim();
+                        return text;
+                        """
+                    ) or ""
+                ).strip()
+            except Exception:
+                dom_response_text = ""
+            if len(dom_response_text) > len(effective_response_text_hint):
+                logger.debug(
+                    "页面音频捕获文本提示已回退到当前回复 DOM 文本: "
+                    f"old_len={len(effective_response_text_hint)}, new_len={len(dom_response_text)}"
+                )
+                effective_response_text_hint = dom_response_text
 
         if network_capture_enabled:
             network_audio_items = media_extractor.capture_network_audio(
                 tab=tab,
                 config=image_config,
                 stop_checker=effective_stop_checker,
-                response_text_hint=response_text_hint,
+                response_text_hint=effective_response_text_hint,
             )
             if network_audio_items:
                 logger.debug(f"网络音频捕获成功: {len(network_audio_items)} 项")
@@ -2886,7 +3248,7 @@ class BrowserCore:
             image_config.get("audio_capture_max_wait_seconds")
             or max(8.0, float(image_config.get("load_timeout_seconds", 5.0) or 5.0) * 1.8)
         )
-        hint_text = str(response_text_hint or "").strip()
+        hint_text = str(effective_response_text_hint or "").strip()
         if hint_text:
             try:
                 chars_per_second = max(
@@ -3002,6 +3364,28 @@ class BrowserCore:
                 )
             else:
                 logger.debug("页面音频捕获未导出到任何音频数据")
+            if network_capture_enabled:
+                try:
+                    media_extractor.capture_network_audio(
+                        tab=tab,
+                        config=image_config,
+                        stop_checker=lambda: True,
+                        response_text_hint=effective_response_text_hint,
+                    )
+                except Exception:
+                    pass
+            try:
+                browser_tts_items = media_extractor.capture_browser_tts_fallback(
+                    tab=tab,
+                    config=image_config,
+                    stop_checker=effective_stop_checker,
+                    response_text_hint=effective_response_text_hint,
+                )
+            except Exception as exc:
+                logger.debug(f"浏览器 TTS 兜底失败（已忽略）: {exc}")
+                browser_tts_items = []
+            if browser_tts_items:
+                return browser_tts_items
         return captured_items
 
     def _resolve_media_ref(self, media_item: Dict) -> str:
@@ -3088,6 +3472,7 @@ class BrowserCore:
         max_bytes = max(1, int(max_size_mb)) * 1024 * 1024
 
         ext_map = {
+            "audio/aac": ".aac",
             "audio/mpeg": ".mp3",
             "audio/mp3": ".mp3",
             "audio/wav": ".wav",
@@ -3421,6 +3806,7 @@ class BrowserCore:
             "image/webp": ".webp",
             "image/gif": ".gif",
             "image/bmp": ".bmp",
+            "audio/aac": ".aac",
             "audio/mpeg": ".mp3",
             "audio/mp3": ".mp3",
             "audio/wav": ".wav",

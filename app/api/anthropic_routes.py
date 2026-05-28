@@ -86,8 +86,62 @@ def _new_message_id() -> str:
     return f"msg_{uuid.uuid4().hex[:24]}"
 
 
+def _new_request_id() -> str:
+    return f"req_{uuid.uuid4().hex[:24]}"
+
+
 def _pack_anthropic_sse(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _anthropic_error_type_for_status(status_code: int) -> str:
+    mapping = {
+        400: "invalid_request_error",
+        401: "authentication_error",
+        403: "permission_error",
+        404: "not_found_error",
+        413: "request_too_large",
+        429: "rate_limit_error",
+        500: "api_error",
+        502: "api_error",
+        503: "api_error",
+        504: "api_error",
+        529: "overloaded_error",
+    }
+    return mapping.get(int(status_code or 500), "api_error" if int(status_code or 500) >= 500 else "invalid_request_error")
+
+
+def _build_anthropic_error_payload(
+    *,
+    status_code: int,
+    message: str,
+    error_type: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "type": "error",
+        "error": {
+            "type": str(error_type or _anthropic_error_type_for_status(status_code)),
+            "message": str(message or "gateway_error"),
+        },
+        "request_id": str(request_id or _new_request_id()),
+    }
+
+
+def _convert_openai_error_to_anthropic(
+    payload: Dict[str, Any],
+    *,
+    status_code: int,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    message = str(error.get("message") or "gateway_error")
+    return _build_anthropic_error_payload(
+        status_code=status_code,
+        message=message,
+        error_type=_anthropic_error_type_for_status(status_code),
+        request_id=request_id,
+    )
 
 
 def _serialize_content_value(value: Any) -> str:
@@ -561,6 +615,7 @@ async def create_message(
     body: AnthropicMessageRequest,
     authenticated: bool = Depends(verify_anthropic_auth),
 ):
+    request_id = _new_request_id()
     openai_payload = _anthropic_request_to_openai_payload(body)
     chat_body = chat_api.ChatRequest(**openai_payload)
     response = await chat_api.chat_completions(
@@ -577,18 +632,36 @@ async def create_message(
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                "request-id": request_id,
             },
         )
 
     if not isinstance(response, JSONResponse):
-        raise HTTPException(status_code=500, detail="unexpected_gateway_response")
+        return JSONResponse(
+            content=_build_anthropic_error_payload(
+                status_code=500,
+                message="unexpected_gateway_response",
+                request_id=request_id,
+            ),
+            status_code=500,
+            headers={"request-id": request_id},
+        )
 
     payload = json.loads(response.body.decode("utf-8", errors="ignore"))
     if "error" in payload:
-        return JSONResponse(content=payload, status_code=response.status_code)
+        return JSONResponse(
+            content=_convert_openai_error_to_anthropic(
+                payload,
+                status_code=response.status_code,
+                request_id=request_id,
+            ),
+            status_code=response.status_code,
+            headers={"request-id": request_id},
+        )
     return JSONResponse(
         content=_openai_response_to_anthropic(payload, body.model),
         status_code=response.status_code,
+        headers={"request-id": request_id},
     )
 
 
@@ -598,4 +671,8 @@ async def count_message_tokens(
     authenticated: bool = Depends(verify_anthropic_auth),
 ):
     del authenticated
-    return {"input_tokens": _count_tokens_payload(body)}
+    request_id = _new_request_id()
+    return JSONResponse(
+        content={"input_tokens": _count_tokens_payload(body)},
+        headers={"request-id": request_id},
+    )

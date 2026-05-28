@@ -14,6 +14,7 @@ import time
 import asyncio
 import queue
 import threading
+import uuid
 from typing import Optional, Any, Dict, List
 
 from fastapi import APIRouter, Request, HTTPException, Header, Depends
@@ -164,6 +165,713 @@ class ChatRequest(BaseModel):
     functions: Optional[list] = Field(default=None)
     function_call: Optional[Any] = Field(default=None)
     preset_name: Optional[str] = Field(default=None)
+
+
+class ResponsesRequest(BaseModel):
+    """Responses API 请求模型（兼容 Codex / OpenAI Responses wire format）"""
+    model: str = Field(default="gpt-3.5-turbo")
+    input: Optional[Any] = Field(default="")
+    instructions: Optional[str] = Field(default=None)
+    stream: Optional[bool] = Field(default=False)
+    temperature: Optional[float] = Field(default=0.7, ge=0, le=2)
+    max_output_tokens: Optional[int] = Field(default=None, ge=1)
+    tools: Optional[list] = Field(default=None)
+    tool_choice: Optional[Any] = Field(default=None)
+    parallel_tool_calls: Optional[bool] = Field(default=None)
+    text: Optional[dict] = Field(default=None)
+    metadata: Optional[dict] = Field(default=None)
+    prompt: Optional[Any] = Field(default=None)
+    previous_response_id: Optional[str] = Field(default=None)
+
+    model_config = {
+        "extra": "allow",
+    }
+
+
+def _new_response_id() -> str:
+    return f"resp_{int(time.time() * 1000)}_{uuid.uuid4().hex[:10]}"
+
+
+def _new_response_item_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _pack_responses_sse(event: str, data: Dict[str, Any]) -> str:
+    return (
+        f"event: {event}\n"
+        f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+    )
+
+
+def _format_rfc3339_timestamp(timestamp: Optional[float] = None) -> str:
+    return time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime(float(timestamp if timestamp is not None else time.time())),
+    )
+
+
+def _normalize_response_tool_choice(value: Any) -> Any:
+    if isinstance(value, dict):
+        value_type = str(value.get("type") or "").strip().lower()
+        if value_type == "function":
+            function_block = value.get("function") if isinstance(value.get("function"), dict) else {}
+            name = str(function_block.get("name") or value.get("name") or "").strip()
+            if name:
+                return {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                    },
+                }
+    return value
+
+
+def _normalize_responses_tools(tools: Any) -> Optional[List[Dict[str, Any]]]:
+    if not isinstance(tools, list):
+        return None
+
+    normalized: List[Dict[str, Any]] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type != "function":
+            continue
+
+        if isinstance(item.get("function"), dict):
+            fn = item["function"]
+            name = str(fn.get("name") or "").strip()
+            if not name:
+                continue
+            normalized.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": str(fn.get("description") or "").strip(),
+                        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                }
+            )
+            continue
+
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        normalized.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(item.get("description") or "").strip(),
+                    "parameters": item.get("parameters", {"type": "object", "properties": {}}),
+                },
+            }
+        )
+
+    return normalized or None
+
+
+def _normalize_responses_text_format(text_config: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(text_config, dict):
+        return None
+
+    format_config = text_config.get("format")
+    if not isinstance(format_config, dict):
+        return None
+
+    format_type = str(format_config.get("type") or "text").strip().lower()
+    if format_type == "json_schema":
+        if isinstance(format_config.get("json_schema"), dict):
+            payload = format_config["json_schema"]
+        else:
+            payload = {}
+            if "name" in format_config:
+                payload["name"] = format_config.get("name")
+            if "schema" in format_config:
+                payload["schema"] = format_config.get("schema")
+            if "strict" in format_config:
+                payload["strict"] = format_config.get("strict")
+        return {
+            "type": "json_schema",
+            "json_schema": payload,
+        }
+
+    if format_type == "json_object":
+        return {"type": "json_object"}
+
+    return {"type": format_type}
+
+
+def _normalize_response_message_content(content: Any) -> Any:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return _normalize_response_message_content([content])
+    if not isinstance(content, list):
+        return str(content)
+
+    normalized_parts: List[Dict[str, Any]] = []
+    leading_text_parts: List[str] = []
+
+    for part in content:
+        if isinstance(part, str):
+            if part:
+                leading_text_parts.append(part)
+            continue
+        if not isinstance(part, dict):
+            text = str(part or "")
+            if text:
+                leading_text_parts.append(text)
+            continue
+
+        part_type = str(part.get("type") or "").strip().lower()
+        if part_type in {"input_text", "output_text", "text"}:
+            text = str(part.get("text") or "")
+            if not text:
+                continue
+            if normalized_parts:
+                normalized_parts.append({"type": "text", "text": text})
+            else:
+                leading_text_parts.append(text)
+            continue
+
+        if part_type in {"input_image", "image_url"}:
+            image_value = part.get("image_url")
+            if isinstance(image_value, dict):
+                image_url = str(image_value.get("url") or "").strip()
+                detail = str(image_value.get("detail") or "").strip()
+            else:
+                image_url = str(image_value or part.get("url") or "").strip()
+                detail = str(part.get("detail") or "").strip()
+
+            if not image_url:
+                continue
+
+            image_payload: Dict[str, Any] = {"url": image_url}
+            if detail:
+                image_payload["detail"] = detail
+
+            normalized_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": image_payload,
+                }
+            )
+            continue
+
+        text_fallback = str(part.get("text") or part.get("output") or "").strip()
+        if text_fallback:
+            if normalized_parts:
+                normalized_parts.append({"type": "text", "text": text_fallback})
+            else:
+                leading_text_parts.append(text_fallback)
+
+    joined_text = "\n".join(part for part in leading_text_parts if part)
+
+    if not normalized_parts:
+        return joined_text
+
+    if joined_text:
+        normalized_parts.insert(
+            0,
+            {
+                "type": "text",
+                "text": joined_text,
+            },
+        )
+    return normalized_parts
+
+
+def _normalize_response_tool_output_content(content: Any) -> Any:
+    normalized = _normalize_response_message_content(content)
+    if normalized in ("", None):
+        return ""
+    return normalized
+
+
+def _response_function_call_to_tool_call(item: Dict[str, Any]) -> Dict[str, Any]:
+    arguments = item.get("arguments")
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
+    return {
+        "id": str(item.get("call_id") or item.get("id") or _new_response_item_id("call")).strip(),
+        "type": "function",
+        "function": {
+            "name": str(item.get("name") or "").strip(),
+            "arguments": arguments,
+        },
+    }
+
+
+def _append_response_input_item(messages: List[Dict[str, Any]], item: Any) -> None:
+    if item is None:
+        return
+
+    if isinstance(item, str):
+        if item:
+            messages.append({"role": "user", "content": item})
+        return
+
+    if not isinstance(item, dict):
+        text = str(item)
+        if text:
+            messages.append({"role": "user", "content": text})
+        return
+
+    role = str(item.get("role") or "").strip().lower()
+    item_type = str(item.get("type") or "").strip().lower()
+
+    if role or item_type == "message":
+        normalized_role = role or "user"
+        content = item.get("content")
+        if content is None and "text" in item:
+            content = item.get("text")
+        message_payload: Dict[str, Any] = {
+            "role": normalized_role if normalized_role in {"system", "user", "assistant", "tool"} else "user",
+            "content": _normalize_response_message_content(content),
+        }
+        if normalized_role == "assistant" and isinstance(item.get("tool_calls"), list):
+            message_payload["tool_calls"] = item.get("tool_calls")
+        messages.append(message_payload)
+        return
+
+    if item_type == "function_call":
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [_response_function_call_to_tool_call(item)],
+            }
+        )
+        return
+
+    if item_type in {"function_call_output", "tool_result"}:
+        output = _normalize_response_tool_output_content(item.get("output"))
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": str(item.get("call_id") or item.get("id") or "").strip(),
+                "name": str(item.get("name") or "").strip() or None,
+                "content": output,
+            }
+        )
+        return
+
+    content = item.get("content")
+    if content is None and "text" in item:
+        content = item.get("text")
+    normalized_content = _normalize_response_message_content(content)
+    if normalized_content not in ("", [], None):
+        messages.append({"role": "user", "content": normalized_content})
+
+
+def _responses_input_to_messages(body: ResponsesRequest) -> List[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
+
+    instructions = str(body.instructions or "").strip()
+    if instructions:
+        messages.append({"role": "system", "content": instructions})
+
+    source = body.input
+    if source in (None, "") and body.prompt not in (None, ""):
+        source = body.prompt
+
+    if isinstance(source, list):
+        pending_tool_calls: List[Dict[str, Any]] = []
+
+        def _flush_pending_tool_calls() -> None:
+            nonlocal pending_tool_calls
+            if not pending_tool_calls:
+                return
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": pending_tool_calls,
+                }
+            )
+            pending_tool_calls = []
+
+        for item in source:
+            if isinstance(item, dict) and str(item.get("type") or "").strip().lower() == "function_call":
+                pending_tool_calls.append(_response_function_call_to_tool_call(item))
+                continue
+            _flush_pending_tool_calls()
+            _append_response_input_item(messages, item)
+        _flush_pending_tool_calls()
+    else:
+        _append_response_input_item(messages, source)
+
+    if not messages:
+        messages.append({"role": "user", "content": ""})
+
+    return messages
+
+
+def _responses_request_to_chat_request(body: ResponsesRequest, *, stream: bool) -> ChatRequest:
+    return ChatRequest(
+        model=body.model,
+        messages=_responses_input_to_messages(body),
+        stream=stream,
+        temperature=body.temperature,
+        max_tokens=body.max_output_tokens,
+        response_format=_normalize_responses_text_format(body.text),
+        tools=_normalize_responses_tools(body.tools),
+        tool_choice=_normalize_response_tool_choice(body.tool_choice),
+        parallel_tool_calls=body.parallel_tool_calls,
+    )
+
+
+def _response_message_item_from_text(text: str) -> Dict[str, Any]:
+    return {
+        "id": _new_response_item_id("msg"),
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": str(text or ""),
+                "annotations": [],
+            }
+        ],
+    }
+
+
+def _response_function_call_item_from_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    function_data = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    call_id = str(tool_call.get("id") or _new_response_item_id("call")).strip()
+    item_id = (
+        f"fc_{call_id[5:]}" if call_id.startswith("call_") else _new_response_item_id("fc")
+    )
+    arguments = function_data.get("arguments")
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
+    return {
+        "id": item_id,
+        "type": "function_call",
+        "status": "completed",
+        "call_id": call_id,
+        "name": str(function_data.get("name") or "").strip(),
+        "arguments": arguments,
+    }
+
+
+def _chat_payload_to_responses_output(chat_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    choices = chat_payload.get("choices") if isinstance(chat_payload.get("choices"), list) else []
+    if not choices:
+        return []
+
+    message = choices[0].get("message") if isinstance(choices[0], dict) else {}
+    if not isinstance(message, dict):
+        return []
+
+    output: List[Dict[str, Any]] = []
+    tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        output.append(_response_function_call_item_from_tool_call(tool_call))
+
+    content = message.get("content")
+    if content not in ("", None):
+        output.append(_response_message_item_from_text(str(content)))
+
+    return output
+
+
+def _build_in_progress_response_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    item_type = str(item.get("type") or "").strip().lower()
+    if item_type == "function_call":
+        return {
+            "id": item.get("id"),
+            "type": "function_call",
+            "status": "in_progress",
+            "call_id": item.get("call_id"),
+            "name": item.get("name"),
+            "arguments": "",
+        }
+
+    if item_type == "message":
+        return {
+            "id": item.get("id"),
+            "type": "message",
+            "status": "in_progress",
+            "role": item.get("role") or "assistant",
+            "content": [],
+        }
+
+    return dict(item)
+
+
+def _build_responses_usage(chat_payload: Dict[str, Any]) -> Dict[str, int]:
+    usage = chat_payload.get("usage") if isinstance(chat_payload.get("usage"), dict) else {}
+    return {
+        "input_tokens": int(usage.get("prompt_tokens") or 0),
+        "output_tokens": int(usage.get("completion_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+    }
+
+
+def _build_responses_text_payload(body: ResponsesRequest) -> Dict[str, Any]:
+    format_payload = _normalize_responses_text_format(body.text)
+    if isinstance(format_payload, dict):
+        return {"format": format_payload}
+    return {"format": {"type": "text"}}
+
+
+def _build_responses_object(
+    body: ResponsesRequest,
+    chat_payload: Dict[str, Any],
+    *,
+    response_id: Optional[str] = None,
+    status: str = "completed",
+    error: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    response_obj: Dict[str, Any] = {
+        "id": response_id or _new_response_id(),
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": status,
+        "error": error,
+        "incomplete_details": None,
+        "model": body.model,
+        "output": _chat_payload_to_responses_output(chat_payload),
+        "parallel_tool_calls": bool(body.parallel_tool_calls) if body.parallel_tool_calls is not None else bool(body.tools),
+        "tool_choice": body.tool_choice if body.tool_choice is not None else ("auto" if body.tools else "none"),
+        "tools": body.tools or [],
+        "text": _build_responses_text_payload(body),
+        "usage": _build_responses_usage(chat_payload),
+    }
+
+    if body.instructions is not None:
+        response_obj["instructions"] = body.instructions
+    if body.max_output_tokens is not None:
+        response_obj["max_output_tokens"] = body.max_output_tokens
+    if body.temperature is not None:
+        response_obj["temperature"] = body.temperature
+    if isinstance(body.metadata, dict):
+        response_obj["metadata"] = body.metadata
+    if body.previous_response_id:
+        response_obj["previous_response_id"] = body.previous_response_id
+
+    return response_obj
+
+
+def _decode_json_response(response: JSONResponse) -> Dict[str, Any]:
+    raw = response.body
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8")
+    else:
+        text = str(raw or "")
+    data = json.loads(text or "{}")
+    return data if isinstance(data, dict) else {}
+
+
+async def _run_chat_completion_final(
+    request: Request,
+    body: ChatRequest,
+    authenticated: bool,
+) -> tuple[int, Dict[str, Any]]:
+    effective_body = body if body.stream is False else body.model_copy(update={"stream": False})
+    response = await chat_completions(
+        request=request,
+        body=effective_body,
+        authenticated=authenticated,
+    )
+
+    if not isinstance(response, JSONResponse):
+        raise RuntimeError("responses_backing_request_unexpected_response_type")
+
+    return int(response.status_code), _decode_json_response(response)
+
+
+async def _stream_responses_compat(
+    request: Request,
+    body: ResponsesRequest,
+    authenticated: bool,
+):
+    response_id = _new_response_id()
+    created_at = int(time.time())
+
+    yield _pack_responses_sse(
+        "response.created",
+        {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "in_progress",
+            "error": None,
+            "incomplete_details": None,
+            "model": body.model,
+            "output": [],
+            "tools": body.tools or [],
+            "tool_choice": body.tool_choice if body.tool_choice is not None else ("auto" if body.tools else "none"),
+            "parallel_tool_calls": bool(body.parallel_tool_calls) if body.parallel_tool_calls is not None else bool(body.tools),
+            "text": _build_responses_text_payload(body),
+        },
+    )
+
+    chat_body = _responses_request_to_chat_request(body, stream=False)
+
+    try:
+        status_code, payload = await _run_chat_completion_final(
+            request=request,
+            body=chat_body,
+            authenticated=authenticated,
+        )
+    except Exception as e:
+        failed = _build_responses_object(
+            body,
+            {"choices": [], "usage": {}},
+            response_id=response_id,
+            status="failed",
+            error={
+                "message": str(e),
+                "type": "execution_error",
+                "code": "responses_backing_request_failed",
+            },
+        )
+        yield _pack_responses_sse("response.failed", failed)
+        return
+
+    if status_code >= 400 or "error" in payload:
+        error_payload = payload.get("error") if isinstance(payload.get("error"), dict) else {
+            "message": "responses_backing_request_failed",
+            "type": "execution_error",
+            "code": "responses_backing_request_failed",
+        }
+        failed = _build_responses_object(
+            body,
+            payload,
+            response_id=response_id,
+            status="failed",
+            error=error_payload,
+        )
+        yield _pack_responses_sse("response.failed", failed)
+        return
+
+    completed = _build_responses_object(
+        body,
+        payload,
+        response_id=response_id,
+        status="completed",
+        error=None,
+    )
+
+    for output_index, item in enumerate(completed.get("output") or []):
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        yield _pack_responses_sse(
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added",
+                "response_id": response_id,
+                "output_index": output_index,
+                "item": _build_in_progress_response_item(item),
+            },
+        )
+
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type == "message":
+            content_items = item.get("content") if isinstance(item.get("content"), list) else []
+            for content_index, part in enumerate(content_items):
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "").strip().lower()
+                if part_type != "output_text":
+                    continue
+                yield _pack_responses_sse(
+                    "response.content_part.added",
+                    {
+                        "type": "response.content_part.added",
+                        "response_id": response_id,
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": {
+                            "type": "output_text",
+                            "text": "",
+                            "annotations": [],
+                        },
+                    },
+                )
+                text = str(part.get("text") or "")
+                if text:
+                    yield _pack_responses_sse(
+                        "response.output_text.delta",
+                        {
+                            "type": "response.output_text.delta",
+                            "response_id": response_id,
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "delta": text,
+                        },
+                    )
+                yield _pack_responses_sse(
+                    "response.output_text.done",
+                    {
+                        "type": "response.output_text.done",
+                        "response_id": response_id,
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "text": text,
+                    },
+                )
+                yield _pack_responses_sse(
+                    "response.content_part.done",
+                    {
+                        "type": "response.content_part.done",
+                        "response_id": response_id,
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": part,
+                    },
+                )
+        elif item_type == "function_call":
+            arguments = str(item.get("arguments") or "")
+            if arguments:
+                yield _pack_responses_sse(
+                    "response.function_call_arguments.delta",
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "response_id": response_id,
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "delta": arguments,
+                    },
+                )
+            yield _pack_responses_sse(
+                "response.function_call_arguments.done",
+                {
+                    "type": "response.function_call_arguments.done",
+                    "response_id": response_id,
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "arguments": arguments,
+                    "name": str(item.get("name") or ""),
+                    "call_id": str(item.get("call_id") or ""),
+                },
+            )
+
+        yield _pack_responses_sse(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "response_id": response_id,
+                "output_index": output_index,
+                "item": item,
+            },
+        )
+
+    yield _pack_responses_sse("response.completed", completed)
 
 
 # ================= response_format 转化 =================
@@ -372,6 +1080,43 @@ async def chat_completions(
             )
         else:
             return await _non_stream_with_lifecycle(request, body, ctx)
+
+
+@router.post("/v1/responses")
+async def create_response(
+    request: Request,
+    body: ResponsesRequest,
+    authenticated: bool = Depends(verify_auth)
+):
+    """OpenAI Responses API 兼容入口。"""
+    chat_body = _responses_request_to_chat_request(body, stream=False)
+
+    if body.stream:
+        return StreamingResponse(
+            _stream_responses_compat(
+                request=request,
+                body=body,
+                authenticated=authenticated,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    status_code, payload = await _run_chat_completion_final(
+        request=request,
+        body=chat_body,
+        authenticated=authenticated,
+    )
+
+    if status_code >= 400 or "error" in payload:
+        return JSONResponse(content=payload, status_code=status_code)
+
+    response_obj = _build_responses_object(body, payload, status="completed", error=None)
+    return JSONResponse(content=response_obj)
 
 
 async def _stream_with_lifecycle(
@@ -756,17 +1501,14 @@ def _pack_done() -> str:
     return "data: [DONE]\n\n"
 
 
-# ================= 模型列表 =================
-
-@router.get("/v1/models")
-async def list_models(authenticated: bool = Depends(verify_auth)):
-    """列出可用模型"""
-    data = [
+def _collect_model_entries() -> List[Dict[str, Any]]:
+    entries = [
         {
             "id": "web-browser",
             "object": "model",
             "created": int(time.time()),
-            "owned_by": "universal-web-api"
+            "owned_by": "universal-web-api",
+            "display_name": "web-browser",
         }
     ]
 
@@ -774,14 +1516,94 @@ async def list_models(authenticated: bool = Depends(verify_auth)):
         browser = get_browser(auto_connect=False)
         tabs = browser.tab_pool.get_tabs_with_index()
         for item in collect_route_domain_models(tabs):
-            data.append({
-                "id": item["id"],
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": item["route_domain"],
-            })
+            model_id = str(item.get("id") or "").strip()
+            if not model_id:
+                continue
+            entries.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": str(item.get("route_domain") or "universal-web-api"),
+                    "display_name": model_id,
+                }
+            )
     except Exception as e:
         logger.debug(f"构建模型列表失败（已忽略）: {e}")
+
+    return entries
+
+
+def _build_anthropic_models_response(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    data = []
+    for item in entries:
+        model_id = str(item.get("id") or "").strip()
+        if not model_id:
+            continue
+        data.append(
+            {
+                "type": "model",
+                "id": model_id,
+                "display_name": str(item.get("display_name") or model_id),
+                "created_at": _format_rfc3339_timestamp(item.get("created")),
+            }
+        )
+
+    first_id = data[0]["id"] if data else None
+    last_id = data[-1]["id"] if data else None
+    return {
+        "data": data,
+        "has_more": False,
+        "first_id": first_id,
+        "last_id": last_id,
+    }
+
+
+def _verify_models_auth(
+    authorization: Optional[str],
+    x_api_key: Optional[str],
+) -> None:
+    if not AppConfig.is_auth_enabled():
+        return
+
+    token_value = AppConfig.get_auth_token()
+    if not token_value:
+        raise HTTPException(status_code=500, detail="服务配置错误")
+
+    candidates: List[str] = []
+    if isinstance(authorization, str):
+        raw = authorization.strip()
+        if raw:
+            candidates.append(raw)
+            if raw.lower().startswith("bearer "):
+                candidates.append(raw[7:].strip())
+    if isinstance(x_api_key, str):
+        raw = x_api_key.strip()
+        if raw:
+            candidates.append(raw)
+
+    if token_value not in candidates:
+        raise HTTPException(
+            status_code=401,
+            detail="认证令牌无效",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+# ================= 模型列表 =================
+
+@router.get("/v1/models")
+async def list_models(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+    anthropic_version: Optional[str] = Header(None, alias="anthropic-version"),
+):
+    """列出可用模型"""
+    _verify_models_auth(authorization, x_api_key)
+    data = _collect_model_entries()
+
+    if anthropic_version:
+        return _build_anthropic_models_response(data)
 
     return {
         "object": "list",

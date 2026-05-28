@@ -5,8 +5,9 @@ site_url.py - URL helpers for identifying real remote sites and route domains.
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 from typing import Optional, List
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from app.utils.site_rules import build_route_alias_groups
 
@@ -152,11 +153,70 @@ def route_domain_matches(target_domain: str, actual_domain: str) -> bool:
     return False
 
 
+def normalize_exact_tab_url(value: str) -> str:
+    """Normalize a full tab URL for strict route matching."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return raw
+
+    scheme = str(parsed.scheme or "").strip().lower()
+    hostname = str(parsed.hostname or "").strip().lower().rstrip(".")
+    if not scheme or not hostname:
+        return raw
+
+    default_port = 80 if scheme == "http" else 443 if scheme == "https" else None
+    port = parsed.port
+    netloc = hostname
+    if port and port != default_port:
+        netloc = f"{hostname}:{port}"
+
+    path = parsed.path or "/"
+    return urlunparse((
+        scheme,
+        netloc,
+        path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment,
+    ))
+
+
+def tab_url_matches(target_url: str, actual_url: str) -> bool:
+    """Whether two tab URLs match after strict normalization."""
+    target = normalize_exact_tab_url(target_url)
+    actual = normalize_exact_tab_url(actual_url)
+    return bool(target and actual and target == actual)
+
+
+def encode_tab_url_route_token(value: str) -> str:
+    """Encode a normalized tab URL into a short stable route token."""
+    normalized = normalize_exact_tab_url(value)
+    if not normalized:
+        return ""
+
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+def decode_tab_url_route_token(token: str) -> str:
+    """Short route tokens are one-way hashes; keep API shape for compatibility."""
+    return str(token or "").strip().lower()
+
+
 __all__ = [
     "build_route_domain_aliases",
+    "decode_tab_url_route_token",
+    "encode_tab_url_route_token",
     "extract_remote_site_domain",
     "get_preferred_route_domain",
     "is_remote_site_url",
     "normalize_route_domain",
+    "normalize_exact_tab_url",
     "route_domain_matches",
+    "tab_url_matches",
 ]

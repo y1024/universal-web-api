@@ -1,5 +1,20 @@
 # 更新日志
 
+## 2026-05-28
+
+new:
+- 新增 `/v1/responses` 兼容入口，允许只支持 Responses wire API 的 Codex 直接接入当前项目。
+
+change:
+- Responses 请求现在会复用现有 `/v1/chat/completions` 执行链，并把 `input`、`instructions`、`tools`、`tool_choice`、`text.format` 等字段转换为现有聊天请求格式。
+- Responses 流式模式改为输出 `response.created`、`response.output_item.added`、`response.output_text.delta`、`response.function_call_arguments.done`、`response.completed` 等 SSE 事件，方便 Codex 按 Responses 协议消费。
+- Responses 工具调用流补充 `response.function_call_arguments.delta`、`response_id` 和 in-progress 到 done 的事件过渡，工具调用历史里的 `function_call_output` 也会更准确地转回现有工具结果消息。
+- `/v1/models` 现在会同时兼容 OpenAI 和 Anthropic/Claude Code 风格：接受 `Authorization` 或 `x-api-key` 认证，并在携带 `anthropic-version` 头时返回 Anthropic 风格模型列表。
+- Claude/Anthropic 兼容层现在会把非流式错误转换为 Anthropic 风格错误体，并为 `/v1/messages`、`/v1/messages/count_tokens` 与流式响应补充 `request-id` 头，便于 Claude Code 网关诊断。
+
+fix:
+- 修复项目仅暴露 `/v1/chat/completions` 时无法直接作为 Codex provider 使用的问题。
+
 ## 2026-05-23
 
 fix:

@@ -21,11 +21,13 @@ from urllib.parse import urlsplit
 
 from app.core.config import logger, BrowserConstants
 from app.utils.site_url import (
+    encode_tab_url_route_token,
     extract_remote_site_domain,
     get_preferred_route_domain,
     is_remote_site_url,
     normalize_route_domain,
     route_domain_matches,
+    tab_url_matches,
 )
 
 
@@ -433,6 +435,8 @@ class TabSession:
         current_url = self._safe_get_url()
         current_domain = self._refresh_current_domain(current_url)
 
+        url_route_token = encode_tab_url_route_token(current_url)
+
         return {
             "id": self.id,
             "persistent_index": self.persistent_index,
@@ -442,6 +446,7 @@ class TabSession:
             "route_domain": get_preferred_route_domain(current_domain),
             "domain_url": self._build_domain_url(current_url, current_domain),
             "url": current_url,
+            "url_route_token": url_route_token,
             "request_count": self.request_count,
             "busy_duration": busy_duration,
             "preset_name": self.preset_name,  # 🆕
@@ -1369,6 +1374,8 @@ class TabPoolManager:
             info["tab_route_prefix"] = f"/tab/{session.persistent_index}"
             route_domain = str(info.get("route_domain") or "").strip()
             info["domain_route_prefix"] = f"/url/{route_domain}" if route_domain else ""
+            url_route_token = str(info.get("url_route_token") or "").strip()
+            info["exact_url_route_prefix"] = f"/tab-url/{url_route_token}" if url_route_token else ""
             info["route_prefix"] = info["domain_route_prefix"] or info["tab_route_prefix"]
 
             return {
@@ -1408,6 +1415,8 @@ class TabPoolManager:
             info["tab_route_prefix"] = f"/tab/{session.persistent_index}"
             route_domain = str(info.get("route_domain") or "").strip()
             info["domain_route_prefix"] = f"/url/{route_domain}" if route_domain else ""
+            url_route_token = str(info.get("url_route_token") or "").strip()
+            info["exact_url_route_prefix"] = f"/tab-url/{url_route_token}" if url_route_token else ""
             info["route_prefix"] = info["domain_route_prefix"] or info["tab_route_prefix"]
 
             return {
@@ -2489,6 +2498,117 @@ class TabPoolManager:
             finally:
                 self._unregister_waiter(self._acquire_waiters, waiter_token)
 
+    def _get_sessions_for_exact_url(self, exact_url: str) -> List[TabSession]:
+        target = str(exact_url or "").strip()
+        if not target:
+            return []
+
+        matches: List[TabSession] = []
+        for session in self._tabs.values():
+            current_url = session._safe_get_url()
+            session._refresh_current_domain(current_url)
+            if tab_url_matches(target, current_url):
+                matches.append(session)
+
+        matches.sort(key=lambda item: item.persistent_index or 0)
+        return matches
+
+    def acquire_by_exact_url(self, exact_url: str, task_id: str, timeout: float = None) -> Optional[TabSession]:
+        """Acquire a tab by strict full-URL match, round-robin within identical URLs."""
+        target = str(exact_url or "").strip()
+        if not target:
+            logger.warning("Exact tab URL is empty; cannot acquire a tab")
+            return None
+
+        timeout = timeout or self.acquire_timeout
+        deadline = time.time() + timeout
+
+        with self._condition:
+            waiters = self._route_waiters.setdefault(f"url::{target}", deque())
+            waiter_token = self._next_waiter_token(task_id)
+            waiters.append(waiter_token)
+            try:
+                while True:
+                    if self._shutdown:
+                        return None
+
+                    if self._should_scan():
+                        self._scan_new_tabs()
+
+                    self._check_stuck_tabs()
+                    self._cleanup_unhealthy_tabs()
+
+                    if not self._is_waiter_turn(waiters, waiter_token):
+                        remaining = deadline - time.time()
+                        if remaining <= 0:
+                            logger.warning(
+                                f"Timed out waiting for exact URL '{target}' (task={task_id})"
+                            )
+                            return None
+                        logger.debug_throttled(
+                            f"tab_pool.wait_exact_url.{target}",
+                            f"Waiting for exact URL '{target}' release...",
+                            interval_sec=5.0,
+                        )
+                        self._condition.wait(timeout=min(remaining, 1.0))
+                        continue
+
+                    matching_sessions = self._get_sessions_for_exact_url(target)
+                    if not matching_sessions:
+                        logger.warning(f"No tab matches exact URL '{target}'")
+                        return None
+                    for session in self._order_sessions_for_allocation(
+                        matching_sessions,
+                        route_domain=f"url::{target}",
+                    ):
+                        if not session.is_healthy():
+                            continue
+                        if self._should_defer_to_command(session, task_id):
+                            continue
+
+                        if session.status == TabStatus.IDLE and session.acquire(task_id):
+                            self._stop_global_monitor_for_session(session.id, reason="acquire_by_exact_url")
+                            if self._auto_activate_on_acquire and session.id != self._active_session_id:
+                                session.activate()
+                                self._active_session_id = session.id
+                            self._mark_allocation_cursor(session, route_domain=f"url::{target}")
+
+                            self._unregister_waiter(
+                                waiters,
+                                waiter_token,
+                                owner_map=self._route_waiters,
+                                owner_key=f"url::{target}",
+                            )
+                            logger.debug(
+                                f"TabPool -> {session.id} "
+                                f"(task={task_id}, exact_url={target}, "
+                                f"idx=#{session.persistent_index}, snapshot={self._describe_session(session)})"
+                            )
+                            return session
+
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        logger.warning(
+                            f"Timed out waiting for exact URL '{target}' "
+                            f"(task={task_id}, matching tabs: "
+                            f"{', '.join(f'{s.id}(#{s.persistent_index}:{s.status.value})' for s in matching_sessions) or 'none'})"
+                        )
+                        return None
+
+                    logger.debug_throttled(
+                        f"tab_pool.wait_exact_url.{target}",
+                        f"Waiting for exact URL '{target}' release...",
+                        interval_sec=5.0,
+                    )
+                    self._condition.wait(timeout=min(remaining, 1.0))
+            finally:
+                self._unregister_waiter(
+                    waiters,
+                    waiter_token,
+                    owner_map=self._route_waiters,
+                    owner_key=f"url::{target}",
+                )
+
     def acquire_by_index(self, persistent_index: int, task_id: str, timeout: float = None) -> Optional[TabSession]:
         """ASCII-safe fair acquire for a fixed persistent tab index."""
         timeout = timeout or self.acquire_timeout
@@ -2792,8 +2912,11 @@ class TabPoolManager:
                 tab_route_prefix = f"/tab/{session.persistent_index}"
                 route_domain = str(info.get("route_domain") or "").strip()
                 domain_route_prefix = f"/url/{route_domain}" if route_domain else ""
+                url_route_token = str(info.get("url_route_token") or "").strip()
+                exact_url_route_prefix = f"/tab-url/{url_route_token}" if url_route_token else ""
                 info["tab_route_prefix"] = tab_route_prefix
                 info["domain_route_prefix"] = domain_route_prefix
+                info["exact_url_route_prefix"] = exact_url_route_prefix
                 info["route_prefix"] = domain_route_prefix or tab_route_prefix
                 result.append(info)
 

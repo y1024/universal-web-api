@@ -29,6 +29,8 @@ class AIStudioParser(ResponseParser):
     _VISIBLE_TEXT_BLOCK_RE = re.compile(
         r'null,"((?:\\.|[^"\\])*)"\]\],"model"'
     )
+    _OBFUSCATED_PAYLOAD_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
+    _CJK_RE = re.compile(r"[\u3400-\u9fff]")
     
     def __init__(self):
         self._accumulated_content = ""
@@ -125,10 +127,64 @@ class AIStudioParser(ResponseParser):
         pieces: List[str] = []
         for match in cls._VISIBLE_TEXT_BLOCK_RE.finditer(raw_text):
             piece = cls._decode_json_fragment(match.group(1))
-            if piece:
+            if piece and cls._looks_like_visible_text(piece):
                 pieces.append(piece)
 
         return "".join(pieces)
+
+    @classmethod
+    def _looks_like_obfuscated_payload(cls, value: Any) -> bool:
+        text = str(value or "").strip()
+        if len(text) < 96:
+            return False
+        if any(ch.isspace() for ch in text):
+            return False
+        if cls._CJK_RE.search(text):
+            return False
+        if not cls._OBFUSCATED_PAYLOAD_RE.fullmatch(text):
+            return False
+        if not any(ch in "+/=_-" for ch in text):
+            return False
+
+        distinct_chars = len(set(text))
+        if distinct_chars < 20:
+            return False
+
+        alpha_num_ratio = sum(ch.isalnum() for ch in text) / len(text)
+        return alpha_num_ratio >= 0.85
+
+    @classmethod
+    def _looks_like_visible_text(cls, value: Any) -> bool:
+        text = str(value or "")
+        stripped = text.strip()
+        if not stripped:
+            return False
+        if cls._looks_like_obfuscated_payload(stripped):
+            return False
+        if cls._CJK_RE.search(stripped):
+            return True
+        if any(ch.isspace() for ch in stripped):
+            return True
+        if stripped.startswith(("{", "[", "<", "```", "http://", "https://")):
+            return True
+
+        punctuation_count = sum(
+            ch in '.,!?;:()[]{}<>"\'`~@#$%^&*\\|'
+            for ch in stripped
+        )
+        if punctuation_count > 0:
+            return True
+
+        return len(stripped) <= 80
+
+    @classmethod
+    def _pick_visible_text_candidate(cls, values: List[Any]) -> str:
+        for item in values:
+            if not isinstance(item, str):
+                continue
+            if cls._looks_like_visible_text(item):
+                return item
+        return ""
 
     @staticmethod
     def _decode_json_fragment(value: str) -> str:
@@ -278,17 +334,29 @@ class AIStudioParser(ResponseParser):
             if not isinstance(content_arr, list):
                 return "", False, False
             
-            # 提取文本 (优先索引 1，必要时回退到首个非空字符串)
+            # 提取文本：只接受像“可见正文”的字符串，避免把内部高熵 payload 误当回复。
             text = ""
-            if len(content_arr) > 1 and isinstance(content_arr[1], str):
-                text = content_arr[1]
-            elif len(content_arr) > 1:
-                string_candidates = [
-                    item for item in content_arr[1:]
-                    if isinstance(item, str) and item.strip()
-                ]
-                if string_candidates:
-                    text = max(string_candidates, key=len)
+            primary_text = content_arr[1] if len(content_arr) > 1 else ""
+            if self._looks_like_visible_text(primary_text):
+                text = primary_text
+            else:
+                text = self._pick_visible_text_candidate(content_arr[2:])
+                if not text:
+                    suppressed_payload = next(
+                        (
+                            item for item in content_arr[2:]
+                            if isinstance(item, str)
+                            and self._looks_like_obfuscated_payload(item)
+                        ),
+                        "",
+                    )
+                    if suppressed_payload:
+                        logger.debug_throttled(
+                            f"aistudio.hidden_payload.{id(self)}",
+                            "[AIStudioParser] 忽略疑似内部高熵 payload "
+                            f"(len={len(str(suppressed_payload).strip())})",
+                            interval_sec=3.0,
+                        )
             
             # 判断是否是 thinking
             # thinking 块特征：len >= 13 且索引 12 == 1
@@ -331,6 +399,9 @@ class AIStudioParser(ResponseParser):
     @classmethod
     def get_supported_patterns(cls) -> List[str]:
         return ["MakerSuiteService/GenerateContent", "GenerateContent"]
+
+    def should_fallback_to_dom_when_no_visible_content(self) -> bool:
+        return True
 
 
 __all__ = ['AIStudioParser']

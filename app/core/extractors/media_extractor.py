@@ -401,6 +401,314 @@ return (function() {
 """
 
 
+PAGE_BROWSER_TTS_FALLBACK_START_JS = r"""
+return (async function(opts) {
+    const stateKey = "__uwaBrowserTtsFallbackState";
+    const input = Object.assign({}, opts || {});
+    const text = String(input.text || "").trim();
+    if (!text) {
+        return { ok: false, error: "empty_text" };
+    }
+
+    const normalizeString = (value, fallback = "") => {
+        const textValue = String(value == null ? fallback : value).trim();
+        return textValue || String(fallback || "").trim();
+    };
+    const normalizeInt = (value, fallback = 0) => {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return Number(fallback || 0) || 0;
+        return Math.trunc(n);
+    };
+    const readJsonStorage = (key) => {
+        try {
+            const raw = window.localStorage ? window.localStorage.getItem(key) : null;
+            if (!raw) return null;
+            return JSON.parse(raw);
+        } catch {
+            return null;
+        }
+    };
+    const randomUuid = () => {
+        try {
+            if (window.crypto && typeof window.crypto.randomUUID === "function") {
+                return window.crypto.randomUUID();
+            }
+        } catch {}
+        const seed = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx";
+        return seed.replace(/[xy]/g, (ch) => {
+            const r = Math.random() * 16 | 0;
+            const v = ch === "x" ? r : ((r & 0x3) | 0x8);
+            return v.toString(16);
+        });
+    };
+
+    const samanthaMeta = readJsonStorage("samantha_web_web_id") || {};
+    const teaMeta = readJsonStorage("__tea_cache_tokens_497858") || {};
+    const deviceId = normalizeString(
+        input.device_id || input.deviceId || samanthaMeta.web_id || teaMeta.user_unique_id || teaMeta.device_id,
+        ""
+    );
+    const webId = normalizeString(
+        input.web_id || input.webId || teaMeta.web_id || samanthaMeta.web_id,
+        ""
+    );
+    const teaUuid = normalizeString(
+        input.tea_uuid || input.teaUuid || teaMeta.user_unique_id || webId,
+        webId
+    );
+    const webTabId = normalizeString(
+        input.web_tab_id || input.webTabId,
+        randomUuid()
+    );
+
+    const query = new URLSearchParams();
+    query.set("speaker", normalizeString(input.speaker, "2"));
+    query.set("format", normalizeString(input.format, "aac").toLowerCase() || "aac");
+    query.set("speech_rate", String(normalizeInt(input.speech_rate, 0)));
+    query.set("pitch", String(normalizeInt(input.pitch, 0)));
+    query.set("version_code", "20800");
+    query.set("language", normalizeString(input.language, "zh"));
+    query.set("device_platform", normalizeString(input.device_platform, "web"));
+    query.set("aid", normalizeString(input.aid, "497858"));
+    query.set("real_aid", normalizeString(input.real_aid, "497858"));
+    query.set("pkg_type", normalizeString(input.pkg_type, "release_version"));
+    query.set("device_id", deviceId);
+    query.set("pc_version", normalizeString(input.pc_version, "3.20.2"));
+    query.set("web_id", webId);
+    query.set("tea_uuid", teaUuid);
+    query.set("region", normalizeString(input.region, "CN"));
+    query.set("sys_region", normalizeString(input.sys_region, "CN"));
+    query.set("samantha_web", normalizeString(input.samantha_web, "1"));
+    query.set("use-olympus-account", normalizeString(input.use_olympus_account, "1"));
+    query.set("web_tab_id", webTabId);
+
+    const wsUrl = "wss://ws-samantha.doubao.com/samantha/audio/tts?" + query.toString();
+    const timeoutMs = Math.max(3000, Math.min(120000, Number(input.timeout_ms || input.timeoutMs || 30000) || 30000));
+    const existing = window[stateKey];
+    if (existing && existing.active) {
+        return {
+            ok: false,
+            error: "already_active",
+            state: {
+                active: true,
+                started_at: existing.started_at || 0,
+            },
+        };
+    }
+
+    const state = {
+        active: true,
+        started_at: Date.now(),
+        phase: "starting",
+        error: "",
+        text_length: text.length,
+        received_chunks: 0,
+        received_bytes: 0,
+        mime: "audio/aac",
+        events: [],
+        audio_chunks: [],
+        completed: false,
+        data_uri: "",
+        open_event_seen: false,
+        synthesis_started_seen: false,
+        sentence_start_seen: false,
+        finish_event_seen: false,
+    };
+    window[stateKey] = state;
+
+    const pushEvent = (name, payload) => {
+        state.events.push({
+            t: Date.now(),
+            name: String(name || ""),
+            ...(payload || {}),
+        });
+        if (state.events.length > 64) {
+            state.events.splice(0, state.events.length - 64);
+        }
+    };
+    const bytesToBase64 = (u8) => {
+        let binary = "";
+        const chunkSize = 0x8000;
+        for (let i = 0; i < u8.length; i += chunkSize) {
+            binary += String.fromCharCode.apply(null, Array.from(u8.subarray(i, i + chunkSize)));
+        }
+        return btoa(binary);
+    };
+    const concatUint8Arrays = (chunks) => {
+        let total = 0;
+        for (const part of chunks) {
+            if (part instanceof Uint8Array) {
+                total += part.length;
+            }
+        }
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (const part of chunks) {
+            if (!(part instanceof Uint8Array)) continue;
+            merged.set(part, offset);
+            offset += part.length;
+        }
+        return merged;
+    };
+    const finalize = () => {
+        if (state.completed) {
+            return;
+        }
+        state.active = false;
+        if (state.audio_chunks.length > 0) {
+            const mergedAudio = concatUint8Arrays(state.audio_chunks);
+            state.data_uri = "data:" + state.mime + ";base64," + bytesToBase64(mergedAudio);
+        }
+        state.completed = true;
+        pushEvent("completed", {
+            bytes: state.received_bytes,
+            chunks: state.received_chunks,
+            hasData: !!state.data_uri,
+            error: state.error,
+        });
+    };
+
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+    const timer = window.setTimeout(() => {
+        state.error = state.error || "timeout";
+        state.phase = "timeout";
+        try { ws.close(); } catch {}
+    }, timeoutMs);
+
+    ws.addEventListener("open", () => {
+        state.phase = "open";
+        state.open_event_seen = true;
+        pushEvent("open");
+        try {
+            ws.send(JSON.stringify({ event: "text", text }));
+            ws.send(JSON.stringify({ event: "finish" }));
+            state.phase = "request_sent";
+            pushEvent("request_sent", { textLength: text.length });
+        } catch (error) {
+            state.error = String(error && (error.message || error.name) || error || "send_failed");
+            state.phase = "send_failed";
+            pushEvent("send_failed", { message: state.error });
+            try { ws.close(); } catch {}
+        }
+    });
+
+    ws.addEventListener("message", async (event) => {
+        try {
+            if (typeof event.data === "string") {
+                let payload = null;
+                try {
+                    payload = JSON.parse(event.data);
+                } catch {}
+                if (payload && typeof payload === "object") {
+                    const eventName = String(payload.event || "");
+                    pushEvent("json", {
+                        event: eventName,
+                        code: Number(payload.code || 0) || 0,
+                        message: String(payload.message || payload.error || ""),
+                    });
+                    if (eventName === "open_success") state.open_event_seen = true;
+                    if (eventName === "synthesis_started") state.synthesis_started_seen = true;
+                    if (eventName === "sentence_start") state.sentence_start_seen = true;
+                    if (eventName === "finish") state.finish_event_seen = true;
+                    if (payload.error || (payload.code && Number(payload.code) !== 0)) {
+                        state.error = String(payload.message || payload.error || ("code:" + payload.code));
+                        state.phase = "api_error";
+                        try { ws.close(); } catch {}
+                    }
+                    return;
+                }
+                pushEvent("text", { preview: String(event.data || "").slice(0, 120) });
+                return;
+            }
+
+            let bytes = null;
+            if (event.data instanceof ArrayBuffer) {
+                bytes = new Uint8Array(event.data);
+            } else if (event.data instanceof Blob) {
+                bytes = new Uint8Array(await event.data.arrayBuffer());
+            } else if (ArrayBuffer.isView(event.data)) {
+                bytes = new Uint8Array(event.data.buffer.slice(0));
+            }
+            if (!bytes || !bytes.length) {
+                return;
+            }
+            state.audio_chunks.push(bytes);
+            state.received_chunks = state.audio_chunks.length;
+            state.received_bytes += bytes.length;
+            state.phase = "receiving_audio";
+            pushEvent("audio", { bytes: bytes.length, totalBytes: state.received_bytes });
+        } catch (error) {
+            pushEvent("message_error", {
+                message: String(error && (error.message || error.name) || error || "message_error"),
+            });
+        }
+    });
+
+    ws.addEventListener("error", () => {
+        if (!state.error) {
+            state.error = "websocket_error";
+        }
+        state.phase = "websocket_error";
+        pushEvent("error", { message: state.error });
+    });
+
+    ws.addEventListener("close", (event) => {
+        window.clearTimeout(timer);
+        if (!state.error && event && event.code && event.code !== 1000) {
+            state.error = "close:" + String(event.code);
+        }
+        state.phase = "closed";
+        pushEvent("close", {
+            code: Number(event && event.code || 0) || 0,
+            reason: String(event && event.reason || ""),
+        });
+        finalize();
+    });
+
+    return {
+        ok: true,
+        state: {
+            ws_url: wsUrl,
+            timeout_ms: timeoutMs,
+            device_id: deviceId,
+            web_id: webId,
+            tea_uuid: teaUuid,
+            web_tab_id: webTabId,
+        },
+    };
+})(arguments[0]);
+"""
+
+
+PAGE_BROWSER_TTS_FALLBACK_STATUS_JS = r"""
+return (function() {
+    const state = window.__uwaBrowserTtsFallbackState;
+    if (!state || typeof state !== "object") {
+        return {};
+    }
+    return {
+        active: !!state.active,
+        started_at: Number(state.started_at || 0) || 0,
+        phase: String(state.phase || ""),
+        error: String(state.error || ""),
+        text_length: Number(state.text_length || 0) || 0,
+        received_chunks: Number(state.received_chunks || 0) || 0,
+        received_bytes: Number(state.received_bytes || 0) || 0,
+        mime: String(state.mime || ""),
+        completed: !!state.completed,
+        has_data: !!state.data_uri,
+        data_uri: state.data_uri || "",
+        open_event_seen: !!state.open_event_seen,
+        synthesis_started_seen: !!state.synthesis_started_seen,
+        sentence_start_seen: !!state.sentence_start_seen,
+        finish_event_seen: !!state.finish_event_seen,
+        events: Array.isArray(state.events) ? state.events.slice(-16) : [],
+    };
+})();
+"""
+
+
 class MediaExtractor:
     """多模态提取器。"""
     PAGE_AUDIO_CAPTURE_SCRIPT_VERSION = 4
@@ -1421,9 +1729,111 @@ class MediaExtractor:
     })();
     """
 
+    ACTIVATE_AUDIO_TRIGGER_SURFACE_JS = r"""
+    return (function() {
+        const roots = [];
+        const seen = new Set();
+        const pushRoot = (value) => {
+            if (!(value instanceof Element) || seen.has(value)) return;
+            seen.add(value);
+            roots.push(value);
+        };
+
+        if (this instanceof Document) {
+            pushRoot(this.body || this.documentElement);
+        } else if (this instanceof Element) {
+            let current = this;
+            for (let depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+                pushRoot(current);
+            }
+        }
+        pushRoot(document.body || document.documentElement);
+
+        const describe = (el, reason = "") => ({
+            tag: String(el && el.tagName || "").toLowerCase(),
+            aria_label: String(el && el.getAttribute && el.getAttribute("aria-label") || "").trim(),
+            data_testid: String(el && el.getAttribute && el.getAttribute("data-testid") || "").trim(),
+            class_name: String(el && el.className || "").trim().slice(0, 180),
+            text: String(el && (el.innerText || el.textContent) || "").trim().slice(0, 120),
+            reason,
+        });
+
+        const candidates = [];
+        for (const root of roots) {
+            if (!(root instanceof Element)) continue;
+            candidates.push(root);
+            const selectors = [
+                '[data-testid*="message"]',
+                '[data-testid*="content"]',
+                '[aria-label="doc_editor"]',
+                '[role="article"]',
+                '[class*="message"]',
+                '[class*="content"]',
+                '[class*="assistant"]',
+            ];
+            for (const selector of selectors) {
+                let nodes = [];
+                try {
+                    nodes = Array.from(root.querySelectorAll(selector));
+                } catch {}
+                for (const node of nodes.slice(-6)) {
+                    if (node instanceof Element) {
+                        candidates.push(node);
+                    }
+                }
+            }
+        }
+
+        const uniqueCandidates = [];
+        const candidateSeen = new Set();
+        for (const node of candidates) {
+            if (!(node instanceof Element) || candidateSeen.has(node)) continue;
+            candidateSeen.add(node);
+            uniqueCandidates.push(node);
+        }
+
+        const activated = [];
+        for (const node of uniqueCandidates.slice(0, 12)) {
+            try {
+                if (typeof node.scrollIntoView === "function") {
+                    node.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+                }
+            } catch {}
+            try {
+                const rect = typeof node.getBoundingClientRect === "function" ? node.getBoundingClientRect() : null;
+                const clientX = rect ? rect.left + Math.min(Math.max(rect.width / 2, 6), Math.max(rect.width - 6, 6)) : 24;
+                const clientY = rect ? rect.top + Math.min(Math.max(rect.height / 2, 6), Math.max(rect.height - 6, 6)) : 24;
+                const eventInit = {
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                    view: window,
+                    clientX,
+                    clientY,
+                };
+                node.dispatchEvent(new PointerEvent("pointerenter", eventInit));
+                node.dispatchEvent(new PointerEvent("pointerover", eventInit));
+                node.dispatchEvent(new PointerEvent("pointermove", eventInit));
+                node.dispatchEvent(new MouseEvent("mouseenter", eventInit));
+                node.dispatchEvent(new MouseEvent("mouseover", eventInit));
+                node.dispatchEvent(new MouseEvent("mousemove", eventInit));
+                activated.push(describe(node, "pointer_and_mouse_move"));
+            } catch (error) {
+                activated.push(describe(node, `dispatch_failed:${String(error && (error.message || error.name) || error).slice(0, 80)}`));
+            }
+        }
+
+        return {
+            ok: activated.length > 0,
+            activated_count: activated.length,
+            activated,
+        };
+    }).call(this);
+    """
+
     TRIGGER_AUDIO_PLAYBACK_JS = r"""
     return (function(opts) {
-        const fallbackLabels = ["朗读", "语音朗读", "收听", "read aloud", "listen", "tts", "voice"];
+        const fallbackLabels = ["朗读", "语音朗读", "收听", "开启自动播报", "自动播报", "播报", "read aloud", "listen", "tts", "voice"];
         const labels = Array.isArray(opts && opts.audioTriggerLabels) && opts.audioTriggerLabels.length
             ? opts.audioTriggerLabels
             : fallbackLabels;
@@ -1767,6 +2177,16 @@ class MediaExtractor:
             logger.debug(f"读取页面音频捕获状态失败（已忽略）: {exc}")
             return {}
 
+    def activate_audio_trigger_surface(self, element: Any) -> Dict[str, Any]:
+        if not element:
+            return {}
+        try:
+            result = element.run_js(self.ACTIVATE_AUDIO_TRIGGER_SURFACE_JS) or {}
+            return result if isinstance(result, dict) else {}
+        except Exception as exc:
+            logger.debug(f"激活页面音频操作区失败（已忽略）: {exc}")
+            return {}
+
     def trigger_audio_playback(
         self,
         element: Any,
@@ -1792,6 +2212,15 @@ class MediaExtractor:
             return {}
 
     def install_audio_network_probe(self, tab: Any, config: Optional[Dict] = None) -> bool:
+        return self._install_audio_network_probe(tab, config=config, clear=True)
+
+    def _install_audio_network_probe(
+        self,
+        tab: Any,
+        config: Optional[Dict] = None,
+        *,
+        clear: bool,
+    ) -> bool:
         if not tab:
             return False
         final_config = get_default_image_extraction_config()
@@ -1802,7 +2231,7 @@ class MediaExtractor:
             tab.run_js(
                 PAGE_TTS_WS_PROBE_INSTALL_JS,
                 {
-                    "clear": True,
+                    "clear": bool(clear),
                     "maxLogs": int(network_config.get("max_logs") or 1024),
                     "urlPatterns": network_config.get("url_patterns") or [],
                 },
@@ -1828,6 +2257,140 @@ class MediaExtractor:
         except Exception as exc:
             logger.debug(f"清空页面 TTS 网络探针失败（已忽略）: {exc}")
             return False
+
+    def capture_browser_tts_fallback(
+        self,
+        tab: Any,
+        config: Optional[Dict] = None,
+        stop_checker: Optional[Any] = None,
+        response_text_hint: str = "",
+    ) -> List[Dict]:
+        if not tab:
+            return []
+
+        final_config = get_default_image_extraction_config()
+        if config:
+            final_config.update(config)
+
+        fallback_config = dict(final_config.get("audio_browser_tts_fallback") or {})
+        if not bool(fallback_config.get("enabled", False)):
+            return []
+
+        if str(fallback_config.get("provider") or "").strip() != "doubao_samantha":
+            return []
+
+        hint_text = str(response_text_hint or "").strip()
+        if not hint_text:
+            logger.debug("浏览器 TTS 兜底跳过：缺少 response_text_hint")
+            return []
+
+        timeout_seconds = max(3.0, min(120.0, float(fallback_config.get("timeout_seconds") or 30.0)))
+        timeout_ms = int(timeout_seconds * 1000)
+        effective_stop_checker = stop_checker or (lambda: False)
+        start_opts = {
+            "text": hint_text,
+            "speaker": str(fallback_config.get("speaker") or "2").strip() or "2",
+            "speech_rate": int(fallback_config.get("speech_rate") or 0),
+            "pitch": int(fallback_config.get("pitch") or 0),
+            "format": str(fallback_config.get("format") or "aac").strip().lower() or "aac",
+            "timeout_ms": timeout_ms,
+            "pc_version": str(fallback_config.get("pc_version") or "3.20.2").strip() or "3.20.2",
+            "aid": str(fallback_config.get("aid") or "497858").strip() or "497858",
+            "real_aid": str(fallback_config.get("real_aid") or "497858").strip() or "497858",
+            "language": str(fallback_config.get("language") or "zh").strip() or "zh",
+            "device_platform": str(fallback_config.get("device_platform") or "web").strip() or "web",
+            "pkg_type": str(fallback_config.get("pkg_type") or "release_version").strip() or "release_version",
+            "region": str(fallback_config.get("region") or "CN").strip() or "CN",
+            "sys_region": str(fallback_config.get("sys_region") or "CN").strip() or "CN",
+            "use_olympus_account": str(fallback_config.get("use_olympus_account") or "1").strip() or "1",
+            "samantha_web": str(fallback_config.get("samantha_web") or "1").strip() or "1",
+        }
+
+        try:
+            start_result = tab.run_js(PAGE_BROWSER_TTS_FALLBACK_START_JS, start_opts) or {}
+        except Exception as exc:
+            logger.debug(f"浏览器 TTS 兜底启动失败（已忽略）: {exc}")
+            return []
+
+        if not isinstance(start_result, dict) or not bool(start_result.get("ok")):
+            logger.debug(
+                "浏览器 TTS 兜底启动失败: "
+                f"{start_result if isinstance(start_result, dict) else repr(start_result)}"
+            )
+            return []
+
+        logger.debug(
+            "浏览器 TTS 兜底已启动: "
+            f"speaker={start_opts['speaker']!r}, format={start_opts['format']!r}, "
+            f"text_len={len(hint_text)}, timeout={timeout_seconds:.1f}s"
+        )
+
+        deadline = time.time() + timeout_seconds + 2.0
+        last_chunks = 0
+        last_bytes = 0
+        status: Dict[str, Any] = {}
+
+        while time.time() < deadline and not effective_stop_checker():
+            time.sleep(0.2)
+            try:
+                status = tab.run_js(PAGE_BROWSER_TTS_FALLBACK_STATUS_JS) or {}
+            except Exception as exc:
+                logger.debug(f"读取浏览器 TTS 兜底状态失败（已忽略）: {exc}")
+                status = {}
+
+            if not isinstance(status, dict) or not status:
+                continue
+
+            current_chunks = int(status.get("received_chunks") or 0)
+            current_bytes = int(status.get("received_bytes") or 0)
+            if current_chunks > last_chunks or current_bytes > last_bytes:
+                last_chunks = current_chunks
+                last_bytes = current_bytes
+                logger.debug(
+                    "浏览器 TTS 兜底增长: "
+                    f"chunks={current_chunks}, bytes={current_bytes}, phase={status.get('phase')!r}"
+                )
+
+            if bool(status.get("completed")) and (bool(status.get("has_data")) or bool(status.get("error"))):
+                break
+
+        if effective_stop_checker():
+            return []
+
+        if not status:
+            try:
+                status = tab.run_js(PAGE_BROWSER_TTS_FALLBACK_STATUS_JS) or {}
+            except Exception:
+                status = {}
+
+        if not isinstance(status, dict):
+            return []
+
+        data_uri = str(status.get("data_uri") or "").strip()
+        if not data_uri.startswith("data:audio/"):
+            logger.debug(
+                "浏览器 TTS 兜底未产出音频: "
+                f"phase={status.get('phase')!r}, error={status.get('error')!r}, "
+                f"chunks={status.get('received_chunks')}, bytes={status.get('received_bytes')}, "
+                f"events={status.get('events')!r}"
+            )
+            return []
+
+        media_item = {
+            "media_type": "audio",
+            "kind": "data_uri",
+            "data_uri": data_uri,
+            "mime": str(status.get("mime") or "audio/aac").strip() or "audio/aac",
+            "byte_size": int(status.get("received_bytes") or 0),
+            "label": "browser_tts_fallback",
+            "source": "browser_tts_fallback",
+        }
+        logger.debug(
+            "浏览器 TTS 兜底成功: "
+            f"bytes={media_item.get('byte_size')}, chunks={status.get('received_chunks')}, "
+            f"events={status.get('events')!r}"
+        )
+        return [media_item]
 
     def capture_network_audio(
         self,
@@ -1879,7 +2442,7 @@ class MediaExtractor:
         if not url_patterns:
             return []
 
-        extractor_name = str(network_config.get("extractor") or "").strip() or "voicegenie_ogg_pages"
+        extractor_name = str(network_config.get("extractor") or "").strip() or "voicegenie_binary_stream"
         extractor = self._get_audio_network_extractor(extractor_name)
         if extractor is None:
             logger.debug(f"未知网络音频提取器（已忽略）: {extractor_name}")
@@ -1894,7 +2457,7 @@ class MediaExtractor:
         saw_stop_marker = False
 
         try:
-            self.install_audio_network_probe(tab, final_config)
+            self._install_audio_network_probe(tab, final_config, clear=False)
 
             while time.time() < deadline and not effective_stop_checker():
                 time.sleep(0.15)
@@ -1938,6 +2501,7 @@ class MediaExtractor:
         if not best_event:
             try:
                 logs = tab.run_js(PAGE_TTS_WS_PROBE_DUMP_JS) or []
+                related_count = 0
                 summaries: List[str] = []
                 for item in logs[-32:]:
                     if not isinstance(item, dict):
@@ -1950,6 +2514,7 @@ class MediaExtractor:
                         or ("audio" in content_type.lower() if content_type else False)
                     ):
                         continue
+                    related_count += 1
                     summaries.append(
                         (
                             f"{str(item.get('transport') or '')}:{str(item.get('dir') or '')}:"
@@ -1964,6 +2529,11 @@ class MediaExtractor:
                     logger.debug(
                         "网络音频捕获未命中，最近相关网络摘要: "
                         + " | ".join(summaries)
+                    )
+                elif isinstance(logs, list):
+                    logger.debug(
+                        "网络音频捕获未命中：探针中没有采集到任何相关事件 "
+                        f"(total_logs={len(logs)}, patterns={url_patterns!r}, related={related_count})"
                     )
             except Exception as exc:
                 logger.debug(f"读取网络音频探针摘要失败（已忽略）: {exc}")
@@ -2018,7 +2588,24 @@ class MediaExtractor:
         for warning in result.get("warnings", []):
             logger.warning(f"页面音频捕获告警: {warning}")
 
-        return self._normalize_media_items("audio", result.get("items", []))
+        normalized_items = self._normalize_media_items("audio", result.get("items", []))
+        filtered_items: List[Dict] = []
+        dropped_items: List[str] = []
+        for item in normalized_items:
+            byte_size = int(item.get("byte_size") or 0)
+            mime = str(item.get("mime") or "").strip().lower()
+            if byte_size > 0 and byte_size < 2048 and mime.startswith("audio/"):
+                dropped_items.append(f"{mime}:{byte_size}")
+                continue
+            filtered_items.append(item)
+
+        if dropped_items:
+            logger.debug(
+                "页面音频捕获已过滤疑似空白片段: "
+                + ", ".join(dropped_items)
+            )
+
+        return filtered_items
 
     def _get_audio_network_capture_config(self, config: Dict) -> Dict[str, Any]:
         defaults = dict((get_default_image_extraction_config().get("audio_network_capture") or {}))
@@ -2039,7 +2626,7 @@ class MediaExtractor:
         merged["enabled"] = bool(merged.get("enabled", False))
         merged["timeout_seconds"] = max(0.1, float(merged.get("timeout_seconds") or 2.5))
         merged["transport"] = str(merged.get("transport") or "page_websocket_probe").strip() or "page_websocket_probe"
-        merged["extractor"] = str(merged.get("extractor") or "voicegenie_ogg_pages").strip() or "voicegenie_ogg_pages"
+        merged["extractor"] = str(merged.get("extractor") or "voicegenie_binary_stream").strip() or "voicegenie_binary_stream"
         merged["settle_seconds"] = max(0.05, float(merged.get("settle_seconds") or 0.35))
         merged["url_patterns"] = [
             str(item or "").strip()
@@ -2051,8 +2638,94 @@ class MediaExtractor:
     def _get_audio_network_extractor(self, name: str):
         registry = {
             "voicegenie_ogg_pages": self._extract_voicegenie_ogg_pages_from_probe_logs,
+            "voicegenie_binary_stream": self._extract_voicegenie_binary_stream_from_probe_logs,
         }
         return registry.get(str(name or "").strip())
+
+    def _extract_voicegenie_binary_stream_from_probe_logs(
+        self,
+        logs: List[Dict[str, Any]],
+        url_patterns: List[str],
+    ) -> Dict[str, Any]:
+        best_url = ""
+        payload_parts: List[bytes] = []
+        payload_size = 0
+        seen_stop_marker = False
+        stop_markers = (b"TTSSentenceEnd", b"TTSEnded", b"SessionCanceled")
+        first_audio_mime = ""
+
+        for item in logs:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("dir") or "").strip().lower() != "recv":
+                continue
+            if str(item.get("kind") or "").strip().lower() != "binary":
+                continue
+
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            lowered_url = url.lower()
+            if not any(pattern.lower() in lowered_url for pattern in url_patterns):
+                continue
+
+            base64_data = str(item.get("base64") or "").strip()
+            if not base64_data:
+                continue
+
+            try:
+                frame_bytes = base64.b64decode(base64_data)
+            except Exception:
+                continue
+
+            if not frame_bytes:
+                continue
+
+            if any(marker in frame_bytes for marker in stop_markers):
+                seen_stop_marker = True
+                continue
+
+            # 优先复用旧 OGG 页识别能力：如果帧里本来就带 OggS，就交给旧逻辑。
+            if b"OggS" in frame_bytes:
+                return self._extract_voicegenie_ogg_pages_from_probe_logs(logs, url_patterns)
+
+            # 跳过看起来像控制帧/极小 ACK 的二进制消息。
+            if len(frame_bytes) < 256:
+                continue
+
+            if not first_audio_mime:
+                if frame_bytes[:4] == b"\x1a\x45\xdf\xa3":
+                    first_audio_mime = "audio/webm"
+                elif (
+                    len(frame_bytes) >= 2
+                    and frame_bytes[0] == 0xFF
+                    and (frame_bytes[1] & 0xF0) == 0xF0
+                ):
+                    first_audio_mime = "audio/aac"
+                elif frame_bytes[:3] == b"ID3" or frame_bytes[:2] == b"\xff\xfb":
+                    first_audio_mime = "audio/mpeg"
+                elif frame_bytes[:4] == b"RIFF":
+                    first_audio_mime = "audio/wav"
+                else:
+                    first_audio_mime = "audio/webm"
+
+            payload_parts.append(frame_bytes)
+            payload_size += len(frame_bytes)
+            best_url = url
+
+        if not payload_parts or payload_size < 2048:
+            return {}
+
+        return {
+            "url": best_url,
+            "mime": first_audio_mime or "audio/webm",
+            "body_bytes": b"".join(payload_parts),
+            "seen_stop_marker": seen_stop_marker,
+            "page_count": len(payload_parts),
+            "gap_count": 0,
+            "min_seq": 0,
+            "max_seq": max(0, len(payload_parts) - 1),
+        }
 
     def _extract_voicegenie_ogg_pages_from_probe_logs(
         self,
@@ -2232,6 +2905,7 @@ class MediaExtractor:
         ext_map = {
             "audio/ogg": ".ogg",
             "audio/webm": ".webm",
+            "audio/aac": ".aac",
             "audio/mpeg": ".mp3",
             "audio/mp3": ".mp3",
             "audio/wav": ".wav",

@@ -473,11 +473,6 @@ class ImageExtractor:
             "allowContainerFallback": bool(final_config.get("allow_container_fallback", True))
         }
         
-        logger.debug(
-            f"开始提取: selector={js_opts['selector']}, "
-            f"container={container_selector or 'element'}, mode={js_opts['mode']}"
-        )
-        
         try:
             # 执行 JS
             result = element.run_js(self.EXTRACT_IMAGES_JS, js_opts)
@@ -499,11 +494,16 @@ class ImageExtractor:
             images = self._normalize_and_dedupe(raw_images)
             
             # 日志摘要
-            logger.debug(f" 提取完成: {len(images)} 张图片 (scope={scope}, nodes={node_count})")
-            for img in images[:5]:  # 最多记录前 5 张
-                self._log_image_summary(img)
-            if len(images) > 5:
-                logger.debug(f" ... 还有 {len(images) - 5} 张")
+            is_quiet = bool(final_config.get("quiet", False))
+            if not is_quiet or len(images) > 0:
+                logger.debug(
+                    f"提取完成: {len(images)} 张图片 (selector={js_opts['selector']}, "
+                    f"scope={scope}, nodes={node_count})"
+                )
+                for img in images[:5]:  # 最多记录前 5 张
+                    self._log_image_summary(img)
+                if len(images) > 5:
+                    logger.debug(f" ... 还有 {len(images) - 5} 张")
             
             return images
             

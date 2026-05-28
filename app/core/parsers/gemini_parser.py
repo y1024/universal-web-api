@@ -93,6 +93,14 @@ _REASONING_META_HINTS = (
     "climax",
     "structure",
 )
+_GEMINI_GENERATED_MEDIA_URL_RE = re.compile(
+    r"https?://(?:[\w.-]+\.)?(?:googleusercontent\.com|lh3\.googleusercontent\.com)/[^\s\"'<>\\]+",
+    re.IGNORECASE,
+)
+_GEMINI_PLACEHOLDER_MEDIA_RE = re.compile(
+    r"https?://(?:[\w.-]+\.)?googleusercontent\.com/(?:image_generation_content|generated_music_content)/\d+",
+    re.IGNORECASE,
+)
 
 
 def _clean_escaped(text: str) -> str:
@@ -127,6 +135,7 @@ class GeminiParser(ResponseParser):
     def __init__(self) -> None:
         self._last_len = 0      # 已发送给上层的字符数
         self._full_cache = ""   # 最新完整文本
+        self._seen_media_refs: set[str] = set()
 
     # ---------- 对外接口 ---------- #
     def parse_chunk(self, raw: str | bytes) -> Dict[str, Any]:
@@ -138,6 +147,7 @@ class GeminiParser(ResponseParser):
 
         try:
             full_txt, done = self._parse(raw)
+            images = self._extract_generated_images(raw)
         except Exception as exc:  # pragma: no cover
             logger.debug(f"[GeminiParser] 解析异常: {exc}")
             return {"content": "", "images": [], "done": False, "error": str(exc)}
@@ -148,11 +158,12 @@ class GeminiParser(ResponseParser):
             self._last_len = len(full_txt)
             self._full_cache = full_txt
 
-        return {"content": delta, "images": [], "done": done, "error": None}
+        return {"content": delta, "images": images, "done": done, "error": None}
 
     def reset(self) -> None:
         self._last_len = 0
         self._full_cache = ""
+        self._seen_media_refs.clear()
 
     @staticmethod
     def _list_get(value: Any, index: int) -> Any:
@@ -433,6 +444,86 @@ class GeminiParser(ResponseParser):
 
     def should_fallback_to_dom_when_no_visible_content(self) -> bool:
         return True
+
+    def get_media_generation_state(
+        self,
+        raw_response: str = "",
+        parse_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        raw_text = str(raw_response or "")
+        if not raw_text:
+            return {}
+
+        if self._extract_generated_images(raw_text):
+            return {}
+
+        hint_parts: List[str] = []
+        lowered = raw_text.lower()
+        wait_timeout_seconds = None
+
+        if "nano banana" in lowered:
+            hint_parts.append("正在加载 Nano Banana 2...")
+            wait_timeout_seconds = max(float(wait_timeout_seconds or 0), 90.0)
+
+        if "image_generation_content/" in lowered:
+            hint_parts.append("image_generation_content")
+            wait_timeout_seconds = max(float(wait_timeout_seconds or 0), 90.0)
+
+        if not hint_parts:
+            return {}
+
+        deduped_hint_parts: List[str] = []
+        seen = set()
+        for item in hint_parts:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped_hint_parts.append(item)
+
+        return {
+            "pending": True,
+            "media_type": "image",
+            "hint_text": "\n\n".join(deduped_hint_parts[:3]),
+            "wait_timeout_seconds": wait_timeout_seconds,
+        }
+
+    def _extract_generated_images(self, raw_response: str) -> List[Dict[str, Any]]:
+        raw_text = str(raw_response or "")
+        if not raw_text:
+            return []
+
+        matches = []
+        for match in _GEMINI_GENERATED_MEDIA_URL_RE.finditer(raw_text):
+            url = str(match.group(0) or "").strip()
+            if not url:
+                continue
+            if _GEMINI_PLACEHOLDER_MEDIA_RE.fullmatch(url):
+                continue
+            lowered = url.lower()
+            if "/gg/" not in lowered and "/gg-dl/" not in lowered:
+                continue
+            if not any(ext in lowered for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif")):
+                continue
+            matches.append(url)
+
+        images: List[Dict[str, Any]] = []
+        for url in matches:
+            if url in self._seen_media_refs:
+                continue
+            self._seen_media_refs.add(url)
+            images.append(
+                {
+                    "media_type": "image",
+                    "kind": "url",
+                    "url": url,
+                    "data_uri": None,
+                    "mime": None,
+                    "byte_size": None,
+                    "source": "gemini_stream",
+                }
+            )
+
+        return images
 
     # ---------- 元数据 ---------- #
     @classmethod
