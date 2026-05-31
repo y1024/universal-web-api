@@ -367,6 +367,14 @@ class NetworkMonitor:
                 listen.stop()
         except Exception:
             self._force_reset_listen_state()
+            return
+
+        try:
+            clear = getattr(listen, "clear", None)
+            if callable(clear):
+                clear()
+        except Exception:
+            pass
 
     @staticmethod
     def _is_restartable_listen_error(err_text: str) -> bool:
@@ -1634,7 +1642,20 @@ class NetworkMonitor:
             if media_type == "image" and normalized.get("kind") == "url":
                 self._prefetch_image_url(normalized.get("url"))
         
-    def _cleanup(self):
+    def _clear_cached_results(self, *, include_media: bool = False) -> None:
+        self._prefetched_responses = []
+        self._last_stream_event = {}
+        self._last_stream_raw_body = ""
+        self._last_stream_parse_result = {}
+        self._prefetched_image_urls = set()
+        if include_media:
+            self._last_media_generation_state = {}
+            self._last_stream_media_items = []
+
+    def cleanup(self) -> None:
+        self._cleanup(include_media=True)
+
+    def _cleanup(self, *, include_media: bool = False):
         """
         清理：停止网络监听并释放额外的 CDP session
         
@@ -1650,7 +1671,6 @@ class NetworkMonitor:
                 self._safe_stop_listen()
                 self._is_listening = False
                 self._pre_started = False
-                self._prefetched_responses = []
                 logger.debug("[NetworkMonitor] 已停止监听（CDP session 已释放）")
             except Exception as e:
                 logger.debug(f"[NetworkMonitor] 停止监听失败: {e}")
@@ -1663,6 +1683,8 @@ class NetworkMonitor:
                 logger.debug("[NetworkMonitor] 补充停止残留监听")
             except Exception:
                 pass
+
+        self._clear_cached_results(include_media=include_media)
 
 
 # ================= 工厂函数 =================

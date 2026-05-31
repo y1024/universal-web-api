@@ -365,6 +365,7 @@ class StreamMonitor:
 
         ctx = StreamContext()
         self._stream_ctx = ctx
+        self._final_complete_text = ""
         self._final_images = []
         self._final_image_urls = []
         self._generating_checker = GeneratingStatusCache(self.tab)
@@ -1139,6 +1140,16 @@ class StreamMonitor:
     def get_final_image_urls(self) -> List[str]:
         """获取最终 settle 快照中识别到的远程图片 URL。"""
         return list(self._final_image_urls)
+
+    def cleanup(self) -> None:
+        self._final_complete_text = ""
+        self._final_images = []
+        self._final_image_urls = []
+        self._prefetched_image_urls = set()
+        self._stream_ctx = None
+        self._generating_checker = None
+        self._expect_image_output = False
+        logger.debug("[StreamMonitor] large cached stream results cleared")
 
 
 __all__ = ['StreamContext', 'GeneratingStatusCache', 'StreamMonitor']

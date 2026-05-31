@@ -332,6 +332,18 @@ class WorkflowExecutor(
                 self._attachment_monitor.destroy()
         except Exception as e:
             logger.debug(f"[Executor] 附件监控清理失败（忽略）: {e}")
+        try:
+            if self._network_monitor is not None and hasattr(self._network_monitor, "cleanup"):
+                self._network_monitor.cleanup()
+        except Exception as e:
+            logger.debug(f"[Executor] 网络监听器清理失败（忽略）: {e}")
+        try:
+            if self._stream_monitor is not None and hasattr(self._stream_monitor, "cleanup"):
+                self._stream_monitor.cleanup()
+        except Exception as e:
+            logger.debug(f"[Executor] DOM 流式监听器清理失败（忽略）: {e}")
+        self._last_stream_media_state = {}
+        self._last_stream_media_items = []
 
     @staticmethod
     def _coerce_bool(value: Any, default: bool = False) -> bool:

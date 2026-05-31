@@ -12,7 +12,8 @@ import asyncio
 import os
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any
 from enum import Enum
@@ -216,7 +217,8 @@ class TabSession:
             prev_request_count = self.request_count
             if rollback_request_count and self.request_count > 0:
                 self.request_count -= 1
-            self.status = TabStatus.IDLE
+            if self.status != TabStatus.ERROR:
+                self.status = TabStatus.IDLE
             self.current_task_id = None
             setattr(self, "_bound_request_id", None)
             setattr(self, "_command_request_id", None)
@@ -244,6 +246,8 @@ class TabSession:
             f"req_count={prev_request_count}->{new_request_count}"
         )
 
+        self.clear_visibility_emulation("release")
+
         # Trigger command checks outside the lock to avoid blocking
         try:
             from app.services.command_engine import command_engine
@@ -260,7 +264,9 @@ class TabSession:
             prev_bound_request_id = str(getattr(self, "_bound_request_id", "") or "").strip()
             prev_command_request_id = str(getattr(self, "_command_request_id", "") or "").strip()
             prev_request_count = self.request_count
-            self.status = TabStatus.IDLE
+            prev_was_error = self.status == TabStatus.ERROR
+            if not prev_was_error:
+                self.status = TabStatus.IDLE
             self.current_task_id = None
             setattr(self, "_bound_request_id", None)
             setattr(self, "_command_request_id", None)
@@ -275,6 +281,8 @@ class TabSession:
             f"req_count={prev_request_count}, clear_page={clear_page}, "
             f"check_triggers={check_triggers}"
         )
+
+        self.clear_visibility_emulation("force_release")
 
         try:
             if hasattr(self.tab, "stop_loading"):
@@ -294,7 +302,8 @@ class TabSession:
 
         with self._lock:
             if reset_success:
-                self.status = TabStatus.IDLE
+                if not prev_was_error:
+                    self.status = TabStatus.IDLE
                 logger.info(
                     f"[{self.id}] force_release done "
                     f"(idx=#{self.persistent_index or '-'}, final_status={self.status.value}, "
@@ -516,6 +525,14 @@ class TabSession:
             pass
         return cached_url
 
+    def clear_visibility_emulation(self, reason: str = "") -> None:
+        try:
+            from app.core.page_lifecycle import restore_visibility_emulation
+
+            restore_visibility_emulation(self.tab, owner=self, reason=reason)
+        except Exception as e:
+            logger.debug(f"[{self.id}] visibility emulation cleanup failed: {e}")
+
 
 @dataclass
 class _GlobalNetworkWorker:
@@ -550,7 +567,7 @@ class _GlobalNetworkInterceptionManager:
         self._retry_delay = max(0.2, float(retry_delay or 1.0))
         self._workers: Dict[str, _GlobalNetworkWorker] = {}
         self._lock = threading.RLock()
-        self._stop_join_timeout = max(0.5, self._wait_timeout + 0.2)
+        self._stop_join_timeout = max(2.0, self._wait_timeout + self._retry_delay + 0.2)
 
     @staticmethod
     def _extract_event(response: Any) -> Dict[str, Any]:
@@ -669,6 +686,13 @@ class _GlobalNetworkInterceptionManager:
             log = logger.debug if cls._is_expected_stop_error(e) else logger.warning
             log(f"[GlobalNet] listen state check failed; forced_reset={reset_ok}: {e}")
             return reset_ok
+
+        try:
+            clear = getattr(listener, "clear", None)
+            if callable(clear):
+                clear()
+        except Exception:
+            pass
 
         return True
 
@@ -835,6 +859,8 @@ class TabPoolManager:
     ISOLATED_CONTEXT_REBIND_GRACE_SEC = 20.0
     GET_TABS_FAILURE_COOLDOWN_SEC = 5.0
     GET_TABS_WARNING_INTERVAL_SEC = 10.0
+    ROUTE_CURSOR_LIMIT = 1000
+    MAINTENANCE_WORKER_LIMIT = 4
 
     @staticmethod
     def _to_bool(value: Any, default: bool = False) -> bool:
@@ -907,7 +933,11 @@ class TabPoolManager:
         self._isolated_context_by_raw_id: Dict[str, str] = {}
         self._orphaned_isolated_contexts: Dict[str, float] = {}
         self._round_robin_cursor: int = 0
-        self._route_round_robin_cursor: Dict[str, int] = {}
+        self._route_round_robin_cursor: OrderedDict[str, int] = OrderedDict()
+        self._maintenance_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(
+            max_workers=self.MAINTENANCE_WORKER_LIMIT,
+            thread_name_prefix="tab-maint",
+        )
 
         # 全局常驻网络监听（可配置）
         self._global_network_enabled = self._to_bool(
@@ -1121,12 +1151,13 @@ class TabPoolManager:
                     f"closed={closed} reason={reason or '-'}"
                 )
 
-        thread = threading.Thread(
-            target=_close_targets,
-            daemon=True,
-            name=f"tab-close-{targets[0][:8]}",
-        )
-        thread.start()
+        executor = self._maintenance_executor
+        if executor is None:
+            return
+        try:
+            executor.submit(_close_targets)
+        except RuntimeError as e:
+            logger.debug(f"[TabPool] maintenance submit failed (close:{targets[0][:8]}): {e}")
 
     def _arm_isolated_rebind_grace(self, session: TabSession, reason: str, detail: str) -> bool:
         now = time.time()
@@ -1471,6 +1502,9 @@ class TabPoolManager:
         current_index = int(session.persistent_index or 0)
         if route_domain:
             self._route_round_robin_cursor[route_domain] = current_index
+            self._route_round_robin_cursor.move_to_end(route_domain)
+            while len(self._route_round_robin_cursor) > self.ROUTE_CURSOR_LIMIT:
+                self._route_round_robin_cursor.popitem(last=False)
         else:
             self._round_robin_cursor = current_index
 
@@ -1653,12 +1687,13 @@ class TabPoolManager:
             except Exception as e:
                 logger.debug(f"[TabPool] evict session {session_key} failed: {e}")
 
-        thread = threading.Thread(
-            target=_evict,
-            daemon=True,
-            name=f"tab-evict-{session_key}",
-        )
-        thread.start()
+        executor = self._maintenance_executor
+        if executor is None:
+            return
+        try:
+            executor.submit(_evict)
+        except RuntimeError as e:
+            logger.debug(f"[TabPool] maintenance submit failed (evict:{session_key}): {e}")
 
     def _should_scan(self) -> bool:
         """检查是否需要扫描新标签页"""
@@ -1800,11 +1835,12 @@ class TabPoolManager:
                     )
                     logger.warning(f"[{session_id}] 标签页已关闭但仍在忙碌，标记为错误")
                     session.mark_error("标签页已被关闭")
+                    self._stop_global_monitor_for_session(session_id, reason="tab_closed", wait=True)
                 else:
                     logger.info(f"[{session_id}] 标签页已关闭，从池中移除")
+                    self._stop_global_monitor_for_session(session_id, reason="tab_closed", wait=True)
                     del self._tabs[session_id]
                     self._on_session_removed(session_id)
-                self._stop_global_monitor_for_session(session_id, reason="tab_closed")
 
                 # 清理映射
                 self._known_tab_ids.discard(raw_id)
@@ -2002,8 +2038,7 @@ class TabPoolManager:
             if self._shutdown:
                 return False
             changed = bool(self._check_stuck_tabs())
-            if changed:
-                self._cleanup_unhealthy_tabs()
+            self._cleanup_unhealthy_tabs()
             return changed
 
     def _cancel_active_request_for_session(
@@ -3061,14 +3096,19 @@ class TabPoolManager:
     def shutdown(self):
         monitor = None
         context_ids = set()
+        maintenance_executor = None
         with self._lock:
             self._shutdown = True
             monitor = self._global_network_monitor
             context_ids = set(self._isolated_context_by_raw_id.values())
             self._global_network_monitor = None
+            maintenance_executor = self._maintenance_executor
+            self._maintenance_executor = None
 
         if monitor:
             monitor.shutdown()
+        if maintenance_executor:
+            maintenance_executor.shutdown(wait=False, cancel_futures=True)
 
         with self._lock:
             for context_id in context_ids:

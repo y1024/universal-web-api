@@ -66,6 +66,19 @@ _VISIBILITY_EMULATION_SOURCE = r"""
 """.strip()
 
 
+def _clear_visibility_emulation_attrs(target: Any) -> None:
+    if target is None:
+        return
+    for attr in (
+        "_codex_visibility_emulation_source",
+        "_codex_visibility_emulation_script_id",
+    ):
+        try:
+            delattr(target, attr)
+        except Exception:
+            pass
+
+
 def install_visibility_emulation(tab: Any, owner: Any = None, *, reason: str = "") -> bool:
     """Best-effort patch for visibility/focus APIs on the current tab."""
     if tab is None:
@@ -74,11 +87,12 @@ def install_visibility_emulation(tab: Any, owner: Any = None, *, reason: str = "
     source = _VISIBILITY_EMULATION_SOURCE
     owner_attr = "_codex_visibility_emulation_source"
     script_id_attr = "_codex_visibility_emulation_script_id"
+    state_owner = tab
 
-    if owner is not None and getattr(owner, owner_attr, None) != source:
+    if getattr(state_owner, owner_attr, None) != source:
         try:
             result = tab.run_cdp("Page.addScriptToEvaluateOnNewDocument", source=source)
-            setattr(owner, owner_attr, source)
+            setattr(state_owner, owner_attr, source)
             script_id = ""
             if isinstance(result, dict):
                 script_id = (
@@ -90,7 +104,7 @@ def install_visibility_emulation(tab: Any, owner: Any = None, *, reason: str = "
             elif isinstance(result, (str, int, float)):
                 script_id = str(result)
             if script_id:
-                setattr(owner, script_id_attr, str(script_id))
+                setattr(state_owner, script_id_attr, str(script_id))
         except Exception as e:
             logger.debug_throttled(
                 "page_wake.visibility.install",
@@ -149,9 +163,16 @@ def restore_visibility_emulation(tab: Any, owner: Any = None, *, reason: str = "
     if tab is None:
         return False
 
-    if owner is not None:
-        script_id_attr = "_codex_visibility_emulation_script_id"
-        script_id = str(getattr(owner, script_id_attr, "") or "").strip()
+    script_ids = []
+    script_id_attr = "_codex_visibility_emulation_script_id"
+    for state_owner in (tab, owner):
+        if state_owner is None:
+            continue
+        script_id = str(getattr(state_owner, script_id_attr, "") or "").strip()
+        if script_id and script_id not in script_ids:
+            script_ids.append(script_id)
+
+    for script_id in script_ids:
         if script_id:
             try:
                 tab.run_cdp(
@@ -160,14 +181,10 @@ def restore_visibility_emulation(tab: Any, owner: Any = None, *, reason: str = "
                 )
             except Exception:
                 pass
-            try:
-                delattr(owner, script_id_attr)
-            except Exception:
-                pass
-        try:
-            delattr(owner, "_codex_visibility_emulation_source")
-        except Exception:
-            pass
+
+    _clear_visibility_emulation_attrs(tab)
+    if owner is not tab:
+        _clear_visibility_emulation_attrs(owner)
 
     try:
         tab.run_js(_VISIBILITY_EMULATION_RESTORE_SOURCE)

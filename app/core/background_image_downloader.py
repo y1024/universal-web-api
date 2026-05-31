@@ -11,6 +11,7 @@ import mimetypes
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -86,6 +87,7 @@ class BackgroundImageDownloader:
         *,
         max_workers: int = 4,
         min_bytes: int = 1000,
+        max_entries: int = 1000,
     ):
         self._save_dir = Path(save_dir)
         self._executor = ThreadPoolExecutor(
@@ -93,8 +95,9 @@ class BackgroundImageDownloader:
             thread_name_prefix="bg-image",
         )
         self._lock = threading.RLock()
-        self._entries: Dict[str, Dict[str, Any]] = {}
+        self._entries: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._min_bytes = max(1, int(min_bytes or 1))
+        self._max_entries = max(1, int(max_entries or 1))
 
     def start_download(
         self,
@@ -109,6 +112,8 @@ class BackgroundImageDownloader:
 
         with self._lock:
             entry = self._entries.get(normalized)
+            if entry is not None:
+                self._entries.move_to_end(normalized)
 
             if entry and str(entry.get("status") or "") == "done":
                 local_path = Path(str(entry.get("local_path") or ""))
@@ -132,6 +137,8 @@ class BackgroundImageDownloader:
                 "_event": threading.Event(),
             }
             self._entries[normalized] = entry
+            self._entries.move_to_end(normalized)
+            self._prune_entries_locked()
             entry["_future"] = self._executor.submit(
                 self._download_worker,
                 normalized,
@@ -155,6 +162,7 @@ class BackgroundImageDownloader:
             entry = self._entries.get(normalized)
             if entry is None:
                 return None
+            self._entries.move_to_end(normalized)
             event = entry.get("_event")
             status = str(entry.get("status") or "")
 
@@ -168,6 +176,7 @@ class BackgroundImageDownloader:
             latest = self._entries.get(normalized)
             if latest is None:
                 return None
+            self._entries.move_to_end(normalized)
             return self._snapshot_entry(latest)
 
     def register_downloaded_file(
@@ -220,6 +229,8 @@ class BackgroundImageDownloader:
                 entry["_event"] = event
             event.set()
             self._entries[normalized] = entry
+            self._entries.move_to_end(normalized)
+            self._prune_entries_locked()
             return self._snapshot_entry(entry)
 
     def _download_worker(
@@ -312,6 +323,7 @@ class BackgroundImageDownloader:
 
             entry.update(changes)
             entry["updated_at"] = time.time()
+            self._entries.move_to_end(normalized)
 
             event = entry.get("_event")
             if not isinstance(event, threading.Event):
@@ -321,6 +333,21 @@ class BackgroundImageDownloader:
             status = str(entry.get("status") or "")
             if status in {"done", "failed"}:
                 event.set()
+                self._prune_entries_locked()
+
+    def _prune_entries_locked(self) -> None:
+        overflow = len(self._entries) - self._max_entries
+        if overflow <= 0:
+            return
+
+        for key, entry in list(self._entries.items()):
+            if overflow <= 0:
+                break
+            status = str((entry or {}).get("status") or "")
+            if status in {"queued", "downloading"}:
+                continue
+            self._entries.pop(key, None)
+            overflow -= 1
 
     def _snapshot_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(entry, dict):
