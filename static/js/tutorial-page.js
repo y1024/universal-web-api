@@ -158,7 +158,8 @@
 
         async function loadSiteCatalog() {
             try {
-                const response = await fetch('/api/startup/controlled-browser-guide-data', { cache: 'no-store' });
+                const baseUrl = window.location.protocol === 'file:' ? 'http://127.0.0.1:8199' : '';
+                const response = await fetch(`${baseUrl}/api/startup/controlled-browser-guide-data`, { cache: 'no-store' });
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
                 }
@@ -172,8 +173,13 @@
                     })).filter(site => site.url && site.name)
                     : [];
             } catch (error) {
-                console.warn('loadSiteCatalog failed:', error);
-                sites = [];
+                console.log('loadSiteCatalog failed (using default fallback sites for offline rendering):', error.message || error);
+                sites = [
+                    { name: 'ChatGPT', id: 'chatgpt.com', url: 'https://chatgpt.com', domain: 'chatgpt.com' },
+                    { name: 'Claude', id: 'claude.ai', url: 'https://claude.ai', domain: 'claude.ai' },
+                    { name: 'Gemini', id: 'gemini.google.com', url: 'https://gemini.google.com', domain: 'gemini.google.com' },
+                    { name: 'DeepSeek', id: 'chat.deepseek.com', url: 'https://chat.deepseek.com', domain: 'chat.deepseek.com' }
+                ];
             }
 
             renderSiteGrid();

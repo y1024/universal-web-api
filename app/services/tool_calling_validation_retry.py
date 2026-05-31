@@ -75,16 +75,6 @@ def _get_tool_failure_degrade_enabled() -> bool:
     return raw_value not in {"0", "false", "no", "off"}
 
 
-def _get_tool_failure_degrade_message() -> str:
-    configured = str(os.getenv("TOOL_CALLING_DEGRADE_MESSAGE", "") or "").strip()
-    if configured:
-        return configured
-    return (
-        "Sorry, I ran into tool-call parsing issues. "
-        "Please rephrase or provide more specific details."
-    )
-
-
 def _inspect_tool_response(
     raw_text: str,
     parsed: Dict[str, Any],
@@ -348,6 +338,7 @@ def _build_partial_tool_success_response(
 def _build_tool_calling_degraded_response(
     parsed: Optional[Dict[str, Any]],
     inspection: Optional[Dict[str, Any]] = None,
+    failure_summary: str = "",
 ) -> Dict[str, Any]:
     if isinstance(inspection, dict):
         rejected_tool_calls = [
@@ -365,16 +356,12 @@ def _build_tool_calling_degraded_response(
                 "tool_calls": copy.deepcopy(rejected_tool_calls),
             }
 
-    content = ""
-    if isinstance(parsed, dict) and not parsed.get("tool_calls"):
-        content = str(parsed.get("content") or "").strip()
-    if not content:
-        content = _get_tool_failure_degrade_message()
-    return {
-        "mode": "final",
-        "content": content,
-        "tool_calls": [],
-    }
+    summary = str(failure_summary or "tool_call_validation_failed").strip()
+    logger.warning(
+        "[tool_calling] 修复耗尽后没有可保留的 tool_calls，拒绝降级为普通文本 "
+        f"原因={summary}"
+    )
+    raise RuntimeError(f"tool_call_validation_exhausted: {summary}")
 
 
 def _get_required_tool_name(tool_choice: Any) -> str:

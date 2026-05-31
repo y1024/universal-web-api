@@ -5,18 +5,219 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Universal Web-to-API 使用教程</title>
     <link rel="stylesheet" href="../css/tutorial.css?v=2.8.9">
-    <!-- 引入 Mermaid 支持渲染架构图 -->
-    <script src="https://unpkg.com/mermaid@10.1.0/dist/mermaid.min.js"></script>
-    <script>
-        document.addEventListener("DOMContentLoaded", function() {
-            if (typeof mermaid !== "undefined") {
-                mermaid.initialize({
-                    startOnLoad: true,
-                    theme: 'dark' // 配合网页暗色属性
-                });
+    <style>
+        /* 现代科技感架构拓扑图样式 */
+        .architecture-flow {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            padding: 24px 20px;
+            background: linear-gradient(135deg, rgba(16, 28, 48, 0.45) 0%, rgba(10, 18, 32, 0.75) 100%);
+            border: 1px solid rgba(125, 211, 252, 0.12);
+            border-radius: 16px;
+            margin-top: 15px;
+            font-family: inherit;
+            box-shadow: inset 0 0 20px rgba(56, 189, 248, 0.03), 0 10px 30px rgba(0, 0, 0, 0.25);
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .flow-row {
+            display: flex;
+            justify-content: center;
+            align-items: stretch;
+            gap: 20px;
+            width: 100%;
+        }
+
+        .flex-row-responsive {
+            flex-wrap: wrap;
+        }
+
+        @media (min-width: 768px) {
+            .flex-row-responsive {
+                flex-wrap: nowrap;
             }
-        });
-    </script>
+        }
+
+        /* 节点卡片样式 */
+        .flow-node {
+            position: relative;
+            flex: 1;
+            min-width: 240px;
+            max-width: 380px;
+            padding: 16px 20px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 6px;
+            text-align: left;
+        }
+
+        .flow-node:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 24px rgba(56, 189, 248, 0.15);
+            border-color: rgba(56, 189, 248, 0.4);
+            background: rgba(15, 23, 42, 0.8);
+        }
+
+        .node-icon {
+            font-size: 1.5rem;
+            line-height: 1;
+        }
+
+        .node-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: #f8fafc;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .node-path {
+            font-size: 0.82rem;
+            color: rgba(125, 211, 252, 0.85);
+            background: rgba(125, 211, 252, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: Consolas, monospace;
+            font-weight: normal;
+        }
+
+        .node-desc {
+            font-size: 0.88rem;
+            color: #9fb0c9;
+            line-height: 1.4;
+        }
+
+        .node-badge {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            font-size: 0.72rem;
+            background: rgba(148, 163, 184, 0.15);
+            color: #94a3b8;
+            padding: 1px 6px;
+            border-radius: 99px;
+            border: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        /* 节点主题色定制 */
+        .node-client { border-left: 4px solid #94a3b8; }
+        .node-route { border-left: 4px solid #f43f5e; }
+        .node-tabpool { border-left: 4px solid #06b6d4; }
+        .node-toolcall { border-left: 4px solid #f59e0b; }
+        .node-browser { border-left: 4px solid #3b82f6; }
+        .node-stream { border-left: 4px solid #10b981; }
+        .node-cmd { border-left: 4px solid #8b5cf6; }
+        .node-config { border-left: 4px solid #ec4899; }
+        .node-utils { border-left: 4px solid #6b7280; }
+
+        /* 箭头与连接线样式 */
+        .flow-arrow-down {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: rgba(125, 211, 252, 0.5);
+            margin: 4px 0;
+            text-align: center;
+            font-size: 0.9rem;
+        }
+
+        .arrow-text {
+            font-size: 0.78rem;
+            color: rgba(159, 176, 201, 0.85);
+            background: rgba(30, 41, 59, 0.5);
+            padding: 2px 12px;
+            border-radius: 99px;
+            border: 1px solid rgba(125, 211, 252, 0.12);
+            margin-bottom: 2px;
+        }
+
+        .arrow-symbol {
+            font-weight: bold;
+            animation: flowPulse 2s infinite ease-in-out;
+        }
+
+        .flow-split {
+            display: flex;
+            justify-content: space-around;
+            width: 100%;
+            max-width: 600px;
+            margin: 4px 0;
+        }
+
+        .flow-arrow-branch {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: rgba(125, 211, 252, 0.4);
+            flex: 1;
+        }
+
+        .branch-left { align-items: flex-end; padding-right: 30px; }
+        .branch-right { align-items: flex-start; padding-left: 30px; }
+
+        /* 底层支撑容器 */
+        .flow-subgraph {
+            width: 100%;
+            margin-top: 18px;
+            padding: 16px 20px;
+            background: rgba(15, 23, 42, 0.35);
+            border: 1px dashed rgba(148, 163, 184, 0.18);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            box-sizing: border-box;
+        }
+
+        .subgraph-title {
+            font-size: 0.95rem;
+            font-weight: 800;
+            color: rgba(159, 176, 201, 0.9);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding-bottom: 6px;
+            text-align: left;
+        }
+
+        .subgraph-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            justify-content: center;
+            width: 100%;
+        }
+
+        .subgraph-relations {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            justify-content: center;
+            padding: 10px;
+            background: rgba(8, 15, 30, 0.25);
+            border-radius: 8px;
+        }
+
+        .relation-item {
+            font-size: 0.8rem;
+            color: rgba(159, 176, 201, 0.75);
+            font-family: Consolas, monospace;
+        }
+
+        @keyframes flowPulse {
+            0%, 100% { opacity: 0.4; transform: translateY(0); }
+            50% { opacity: 1; transform: translateY(3px); }
+        }
+    </style>
 </head>
 <body>
 
@@ -156,23 +357,129 @@
 
             <div class="note" style="margin-top: 15px; padding: 20px;">
                 <p><strong>📐 项目模块设计与架构关系：</strong></p>
-                <div class="mermaid" style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 6px; overflow-x: auto;">
-                    graph TD
-                        User([客户端/用户]) -->|OpenAI/Anthropic/Codex API| Route[1. 接口与路由层 app/api]
-                        Route -->|会话分发/并发调度| TabPool[2. 标签页池与生命周期 app/core/tab_pool]
-                        Route -->|解析函数调用请求| ToolCall[5. 函数调用兼容层 app/services/tool_calling]
-                        TabPool -->|网页驱动/低熵控制| Browser[3. 网页自动化与执行引擎 app/core/workflow]
-                        Browser -->|注入与流式监听| Stream[4. 流式监控与响应解析 app/core/parsers]
-                        Browser -->|触发指令钩子| CmdEng[6. 指令引擎与拦截钩子 app/services/command_engine]
+                
+                <div class="architecture-flow">
+                    <!-- Level 1: 客户端与主接口 -->
+                    <div class="flow-row">
+                        <div class="flow-node node-client">
+                            <span class="node-badge">User</span>
+                            <div class="node-icon">👤</div>
+                            <div class="node-title">客户端 / 用户</div>
+                            <div class="node-desc">客户端应用、代码集成或自动化脚本</div>
+                        </div>
+                    </div>
+                    
+                    <div class="flow-arrow-down">
+                        <span class="arrow-text">OpenAI / Anthropic / Codex 接口请求</span>
+                        <span class="arrow-symbol">⬇️</span>
+                    </div>
+                    
+                    <!-- Level 2: 接口路由层 -->
+                    <div class="flow-row">
+                        <div class="flow-node node-route">
+                            <span class="node-badge">Layer 1</span>
+                            <div class="node-icon">🌐</div>
+                            <div class="node-title">1. 接口与路由层 <span class="node-path">app/api</span></div>
+                            <div class="node-desc">解析外部 API 接入请求，提供标准兼容路由与流式流控</div>
+                        </div>
+                    </div>
 
-                        subgraph 底层支撑
-                            Config[7. 配置与预设中心 app/services/config]
-                            Utils[8. 平台工具箱 app/utils & app/models]
-                        end
-
-                        Browser -.->|依赖| Config
-                        CmdEng -.->|读取/存储| Config
-                        Stream -.->|工具包| Utils
+                    <!-- 路由层分发 -->
+                    <div class="flow-split">
+                        <div class="flow-arrow-branch branch-left">
+                            <span class="arrow-text">会话分发 / 并发调度</span>
+                            <span class="arrow-symbol">↙️</span>
+                        </div>
+                        <div class="flow-arrow-branch branch-right">
+                            <span class="arrow-text">解析函数调用请求</span>
+                            <span class="arrow-symbol">↘️</span>
+                        </div>
+                    </div>
+                    
+                    <div class="flow-row flex-row-responsive">
+                        <!-- Level 3 Left: 标签页池 -->
+                        <div class="flow-node node-tabpool">
+                            <span class="node-badge">Layer 2</span>
+                            <div class="node-icon">🔄</div>
+                            <div class="node-title">2. 标签页池与生命周期 <span class="node-path">app/core/tab_pool</span></div>
+                            <div class="node-desc">标签页会话保活、检测、重连，维护跨请求的会话重用</div>
+                        </div>
+                        <!-- Level 3 Right: 函数调用 -->
+                        <div class="flow-node node-toolcall">
+                            <span class="node-badge">Layer 5</span>
+                            <div class="node-icon">🧩</div>
+                            <div class="node-title">5. 函数调用兼容层 <span class="node-path">app/services/tool_calling</span></div>
+                            <div class="node-desc">将 OpenAI tool_calls 转译，并在网页端自动分步执行后合并返回</div>
+                        </div>
+                    </div>
+                    
+                    <div class="flow-arrow-down" style="width: 100%; max-width: 380px; align-items: flex-start; padding-left: 20px; box-sizing: border-box;">
+                        <span class="arrow-text">网页驱动与交互操控</span>
+                        <span class="arrow-symbol" style="padding-left: 60px;">⬇️</span>
+                    </div>
+                    
+                    <!-- Level 4: 网页驱动与执行引擎 -->
+                    <div class="flow-row">
+                        <div class="flow-node node-browser">
+                            <span class="node-badge">Layer 3</span>
+                            <div class="node-icon">⚙️</div>
+                            <div class="node-title">3. 网页自动化与执行引擎 <span class="node-path">app/core/workflow</span></div>
+                            <div class="node-desc">底层基于 DrissionPage 操控，内置反爬指纹逃逸与高效低熵仿真操控</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 核心操作衍生 -->
+                    <div class="flow-split">
+                        <div class="flow-arrow-branch branch-left">
+                            <span class="arrow-text">注入与响应拦截</span>
+                            <span class="arrow-symbol">↙️</span>
+                        </div>
+                        <div class="flow-arrow-branch branch-right">
+                            <span class="arrow-text">拦截指令钩子</span>
+                            <span class="arrow-symbol">↘️</span>
+                        </div>
+                    </div>
+                    
+                    <div class="flow-row flex-row-responsive">
+                        <!-- Level 5 Left: 流式监控 -->
+                        <div class="flow-node node-stream">
+                            <span class="node-badge">Layer 4</span>
+                            <div class="node-icon">👁️</div>
+                            <div class="node-title">4. 流式监控与响应解析 <span class="node-path">app/core/parsers</span></div>
+                            <div class="node-desc">监听底层网络事件与 DOM 树变化，智能增量解析并实时流式推送</div>
+                        </div>
+                        <!-- Level 5 Right: 指令引擎 -->
+                        <div class="flow-node node-cmd">
+                            <span class="node-badge">Layer 6</span>
+                            <div class="node-icon">⌨️</div>
+                            <div class="node-title">6. 指令引擎与拦截钩子 <span class="node-path">app/services/command_engine</span></div>
+                            <div class="node-desc">提供自定义内置指令拦截（如附件验证、截屏命令），防注入与校验</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Bottom layer: 底层支撑 -->
+                    <div class="flow-subgraph">
+                        <div class="subgraph-title">🛡️ 底层核心支撑模块</div>
+                        <div class="subgraph-row">
+                            <div class="flow-node node-config">
+                                <span class="node-badge">Layer 7</span>
+                                <div class="node-icon">🔧</div>
+                                <div class="node-title">7. 配置与预设中心 <span class="node-path">app/services/config</span></div>
+                                <div class="node-desc">维护 sites.json 站点规则、环境状态检测，并支持热重载</div>
+                            </div>
+                            <div class="flow-node node-utils">
+                                <span class="node-badge">Layer 8</span>
+                                <div class="node-icon">🧰</div>
+                                <div class="node-title">8. 平台工具箱 <span class="node-path">app/utils & app/models</span></div>
+                                <div class="node-desc">日志存储与脱敏、多模态解析支持及全局公共数据模型</div>
+                            </div>
+                        </div>
+                        <div class="subgraph-relations">
+                            <div class="relation-item">🔗 执行引擎 ➜ 依赖 ➜ 配置与预设中心</div>
+                            <div class="relation-item">🔗 指令引擎 ➜ 读取/存储 ➜ 配置与预设中心</div>
+                            <div class="relation-item">🔗 流式监控 ➜ 工具包 ➜ 平台工具箱</div>
+                        </div>
+                    </div>
                 </div>
             </div>
 

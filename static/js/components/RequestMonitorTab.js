@@ -109,7 +109,10 @@ window.RequestMonitorTab = {
         toRecordView(record, index) {
             const source = record && typeof record === 'object' ? record : {}
             const domain = String(source.target_domain || source.route_domain || '未知域名').trim() || '未知域名'
-            const summarySource = source.summary || source.response_preview || source.response || source.error_message
+            const toolCallingErrorInfo = this.toolCallingErrorInfo(source)
+            const summarySource = toolCallingErrorInfo
+                ? toolCallingErrorInfo.summary
+                : (source.summary || source.response_preview || source.response || source.error_message)
             const success = !!source.success
             const historyKey = this.recordKey(source, index)
             return {
@@ -126,7 +129,8 @@ window.RequestMonitorTab = {
                 __finishedText: this.formatDateTime(source.finished_at),
                 __durationText: this.formatDurationMs(source.duration_ms),
                 __tokenText: this.tokenEstimate(source),
-                __tabLabel: this.tabLabel(source)
+                __tabLabel: this.tabLabel(source),
+                __toolCallingErrorInfo: toolCallingErrorInfo
             }
         },
         recordKey(record, index) {
@@ -254,6 +258,31 @@ window.RequestMonitorTab = {
             const text = String(value || '').replace(/\s+/g, ' ').trim()
             if (!text) return '暂无响应摘要'
             return text.length > max ? text.slice(0, max) + '...' : text
+        },
+        toolCallingErrorInfo(record) {
+            const source = record && typeof record === 'object' ? record : {}
+            const errorCode = String(source.error_code || source.status || '').trim()
+            const errorText = [
+                source.error_message,
+                source.error_stack,
+                source.summary,
+                source.response_preview,
+                source.response
+            ].map(value => String(value || '')).join('\n')
+            if (!errorText.includes('tool_call_validation_exhausted')) {
+                return null
+            }
+            const marker = 'tool_call_validation_exhausted:'
+            const markerIndex = errorText.indexOf(marker)
+            const detail = markerIndex >= 0
+                ? errorText.slice(markerIndex + marker.length).split('\n')[0].trim()
+                : ''
+            return {
+                code: errorCode || 'tool_calling_failed',
+                title: '工具调用重试耗尽',
+                summary: '工具调用重试耗尽：模型没有返回可执行的 tool_calls，系统已停止并返回错误，未降级为普通文本。',
+                detail: detail || '没有可保留的工具调用，已阻止纯文本兜底。'
+            }
         },
         getDetailText(record, key) {
             if (!record) return ''
@@ -482,7 +511,12 @@ window.RequestMonitorTab = {
                                     {{ showErrorStack ? '收起错误日志' : '查看完整错误日志' }}
                                 </button>
                             </div>
-                            <p class="mt-3 text-sm leading-6">{{ selectedRecord.error_message || '请求执行失败，暂无更多错误摘要。' }}</p>
+                            <p class="mt-3 text-sm leading-6">{{ selectedRecord.__toolCallingErrorInfo ? selectedRecord.__toolCallingErrorInfo.summary : (selectedRecord.error_message || '请求执行失败，暂无更多错误摘要。') }}</p>
+                            <div v-if="selectedRecord.__toolCallingErrorInfo"
+                                 class="mt-3 border-t border-rose-200/70 pt-3 text-xs leading-5 text-rose-700 dark:border-rose-400/25 dark:text-rose-100">
+                                <div class="font-semibold">{{ selectedRecord.__toolCallingErrorInfo.title }}</div>
+                                <div class="mt-1 opacity-90">{{ selectedRecord.__toolCallingErrorInfo.detail }}</div>
+                            </div>
                             <pre v-if="showErrorStack" class="mt-3 max-h-64 overflow-auto rounded-xl bg-white/80 p-3 text-xs leading-5 text-rose-900 dark:bg-slate-950/50 dark:text-rose-100">{{ selectedRecord.error_stack || selectedRecord.error_message || '暂无错误栈' }}</pre>
                         </div>
 

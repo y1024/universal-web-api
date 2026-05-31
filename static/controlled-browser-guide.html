@@ -630,7 +630,15 @@
                 state.sites = Array.isArray(payload.sites) ? payload.sites : state.sites;
                 if (payload.dashboard_url) state.dashboardUrl = payload.dashboard_url;
             } catch (error) {
-                console.warn('loadGuideData failed:', error);
+                console.log('loadGuideData failed (using default fallback sites):', error.message || error);
+                if (!state.sites || !state.sites.length) {
+                    state.sites = [
+                        { name: 'ChatGPT', domain: 'chatgpt.com', url: 'https://chatgpt.com' },
+                        { name: 'Claude', domain: 'claude.ai', url: 'https://claude.ai' },
+                        { name: 'Gemini', domain: 'gemini.google.com', url: 'https://gemini.google.com' },
+                        { name: 'DeepSeek', domain: 'chat.deepseek.com', url: 'https://chat.deepseek.com' }
+                    ];
+                }
             }
             renderSites();
             renderDashboardUrl();

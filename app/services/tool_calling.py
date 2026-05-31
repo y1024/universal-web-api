@@ -111,8 +111,8 @@ def complete_tool_calling_roundtrip(
                 f"最后错误={last_summary}"
             )
             if _get_tool_failure_degrade_enabled():
-                logger.warning("[tool_calling] 已进入失败降级路径")
-                return _build_tool_calling_degraded_response(last_parsed, inspection)
+                logger.warning("[tool_calling] 修复耗尽，尝试保留原始 tool_calls；不会降级为普通文本")
+                return _build_tool_calling_degraded_response(last_parsed, inspection, last_summary)
             raise RuntimeError(f"tool_call_validation_exhausted: {last_summary}")
 
         remaining_retries = total_attempts - attempt
@@ -149,8 +149,8 @@ def complete_tool_calling_roundtrip(
             pending_retry_messages = None
 
     if _get_tool_failure_degrade_enabled():
-        logger.warning("[tool_calling] 已进入失败降级路径")
-        return _build_tool_calling_degraded_response(last_parsed)
+        logger.warning("[tool_calling] 修复耗尽，尝试保留原始 tool_calls；不会降级为普通文本")
+        return _build_tool_calling_degraded_response(last_parsed, None, last_summary)
     raise RuntimeError(f"tool_call_validation_exhausted: {last_summary}")
 
 
@@ -217,8 +217,8 @@ async def complete_tool_calling_roundtrip_async(
                 f"最后错误={last_summary}"
             )
             if _get_tool_failure_degrade_enabled():
-                logger.warning("[tool_calling] 已进入失败降级路径")
-                return _build_tool_calling_degraded_response(last_parsed, inspection)
+                logger.warning("[tool_calling] 修复耗尽，尝试保留原始 tool_calls；不会降级为普通文本")
+                return _build_tool_calling_degraded_response(last_parsed, inspection, last_summary)
             raise RuntimeError(f"tool_call_validation_exhausted: {last_summary}")
 
         remaining_retries = total_attempts - attempt
@@ -255,8 +255,8 @@ async def complete_tool_calling_roundtrip_async(
             pending_retry_messages = None
 
     if _get_tool_failure_degrade_enabled():
-        logger.warning("[tool_calling] 已进入失败降级路径")
-        return _build_tool_calling_degraded_response(last_parsed)
+        logger.warning("[tool_calling] 修复耗尽，尝试保留原始 tool_calls；不会降级为普通文本")
+        return _build_tool_calling_degraded_response(last_parsed, None, last_summary)
     raise RuntimeError(f"tool_call_validation_exhausted: {last_summary}")
 
 __all__ = [
