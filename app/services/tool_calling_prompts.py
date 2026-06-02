@@ -22,6 +22,7 @@ from app.services.tool_calling_common import (
     _extract_schema_types,
     _format_tool_result_message,
     _prepare_tool_result_content,
+    _sanitize_tool_result_content,
     _serialize_content,
     get_tool_calling_allow_media_postprocess,
     get_tool_calling_sanitize_assistant_content_enabled,
@@ -204,6 +205,17 @@ def build_browser_messages_for_tools(
         }
     )
 
+    try:
+        logger.info(
+            "[IMAGE_FLOW_DIAG] backend.tool_calling.browser_messages | "
+            f"input_messages={len(messages or [])} "
+            f"browser_messages={len(browser_messages)} "
+            f"roles={[str(m.get('role', '')) for m in browser_messages if isinstance(m, dict)]} "
+            f"image_like={sum(1 for m in browser_messages if isinstance(m, dict) and ('image_url' in str(m.get('content', '')) or 'data:image' in str(m.get('content', ''))))}"
+        )
+    except Exception:
+        pass
+
     return browser_messages
 
 
@@ -236,13 +248,14 @@ def summarize_messages_for_debug(
             tool_call_count += len(tool_calls)
 
         serialized = _serialize_content(msg.get("content", ""))
+        preview_source = _sanitize_tool_result_content(serialized)
         total_chars += len(serialized)
         if "image_url" in serialized or "data:image" in serialized:
             image_like_messages += 1
 
         if len(samples) < sample_limit:
             samples.append(
-                f"#{idx}:{role}/len={len(serialized)}/preview={_debug_preview(serialized, 120)}"
+                f"#{idx}:{role}/len={len(serialized)}/preview={_debug_preview(preview_source, 120)}"
             )
 
     role_summary = ", ".join(

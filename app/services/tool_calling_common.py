@@ -156,7 +156,7 @@ def _sanitize_tool_result_content(content: str) -> str:
         return text
 
     text = re.sub(
-        r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{80,}",
+        r"(?i)data:(?:image|audio|video)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\r\n]{80,}",
         "[image omitted: data_uri]",
         text,
     )
@@ -184,7 +184,14 @@ def _sanitize_tool_result_content(content: str) -> str:
         flags=re.IGNORECASE,
     )
     text = re.sub(
-        r"\b[A-Za-z0-9+/=_-]{512,}\b",
+        r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{512,}(?![A-Za-z0-9+/=_-])",
+        "[base64 omitted]",
+        text,
+    )
+    text = re.sub(
+        r"(?<![A-Za-z0-9+/=_-])"
+        r"(?:[A-Za-z0-9+/=_-]{64,}[\r\n]+){7,}[A-Za-z0-9+/=_-]{64,}"
+        r"(?![A-Za-z0-9+/=_-])",
         "[base64 omitted]",
         text,
     )

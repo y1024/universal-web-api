@@ -42,6 +42,54 @@ class BrowserWorkflowMixin:
         return text
 
     @staticmethod
+    def _message_declares_image(message: Dict[str, Any]) -> bool:
+        if not isinstance(message, dict):
+            return False
+
+        content = message.get("content")
+        if isinstance(content, str):
+            stripped = content.strip()
+            if "image_url" not in stripped and "data:image" not in stripped:
+                return False
+            if stripped.startswith(("[", "{")):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, dict):
+                        parsed = [parsed]
+                    if isinstance(parsed, list):
+                        return BrowserWorkflowMixin._content_parts_declare_image(parsed)
+                except Exception:
+                    pass
+            return "base64," in stripped or "http://" in stripped or "https://" in stripped
+
+        return BrowserWorkflowMixin._content_parts_declare_image(content)
+
+    @staticmethod
+    def _content_parts_declare_image(content: Any) -> bool:
+        if not isinstance(content, (list, tuple)):
+            return False
+
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type", "") or "").strip().lower() != "image_url":
+                continue
+            image_url = item.get("image_url") or {}
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+            if str(url or "").strip():
+                return True
+        return False
+
+    @staticmethod
+    def _is_tool_output_format_reminder(message: Dict[str, Any]) -> bool:
+        if not isinstance(message, dict):
+            return False
+        content = message.get("content")
+        if not isinstance(content, str):
+            return False
+        return "[Tool Output Format Reminder]" in content
+
+    @staticmethod
     def _emit_request_block(emitted_blocks: set[int], block_no: int, title: str, detail: str = "") -> None:
         if block_no in emitted_blocks:
             return
@@ -1160,7 +1208,7 @@ class BrowserWorkflowMixin:
                                 deadline = time.time() + 20.0
                                 while time.time() < deadline and not effective_stop_checker():
                                     try:
-                                        if tab.ele(f"css:{input_selector}", timeout=0.5):
+                                        if tab.ele(input_selector, timeout=0.5):
                                             break
                                     except Exception:
                                         pass
@@ -1182,14 +1230,33 @@ class BrowserWorkflowMixin:
         image_source_messages = messages
         if not upload_history:
             last_user = None
+            last_user_with_image = None
             for m in reversed(messages):
-                if m.get("role") == "user":
+                if not isinstance(m, dict) or m.get("role") != "user":
+                    continue
+                if last_user is None:
                     last_user = m
+                    if self._message_declares_image(m):
+                        last_user_with_image = m
+                        break
+                    if not self._is_tool_output_format_reminder(m):
+                        break
+                    continue
+                if self._message_declares_image(m):
+                    last_user_with_image = m
                     break
-            image_source_messages = [last_user] if last_user else []
+            image_source_messages = [last_user_with_image or last_user] if (last_user_with_image or last_user) else []
 
         logger.debug(f"图片源消息数: {len(image_source_messages)}/{len(messages)}")
         user_images = extract_images_from_messages(image_source_messages)
+        logger.info(
+            "[IMAGE_FLOW_DIAG] backend.workflow.images | "
+            f"upload_history={upload_history} "
+            f"source_messages={len(image_source_messages)}/{len(messages)} "
+            f"roles={[str(m.get('role', '')) for m in image_source_messages if isinstance(m, dict)]} "
+            f"extracted={len(user_images)} "
+            f"paths={[str(path) for path in user_images[:3]]}"
+        )
 
         has_declared_image = False
         try:

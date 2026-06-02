@@ -479,7 +479,111 @@ _SENSITIVE_KEY_HINTS = (
     "csrf",
 )
 _REDACTED_TEXT = "******"
+
+
+def _redact_data_uri_for_log(match: re.Match) -> str:
+    media_type = str(match.group(1) or "media").lower()
+    mime_suffix = str(match.group(2) or "octet-stream").lower()
+    payload_len = len(str(match.group(3) or ""))
+    return f"data:{media_type}/{mime_suffix};base64,[omitted {payload_len} chars]"
+
+
+def _redact_long_base64_for_log(match: re.Match) -> str:
+    return f"[base64 omitted: {len(match.group(0))} chars]"
+
+
+_BASE64_LOG_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+_SENSITIVE_TEXT_SCAN_HINT_RE = re.compile(
+    r"(?i)data:(?:image|audio|video)/|bearer\s+|authorization|set-cookie|cookie|"
+    r"access_token|refresh_token|id_token|api_key|apikey|secret|password|token"
+)
+_SENSITIVE_TEXT_PRECHECK_MIN_CHARS = 4096
+_SENSITIVE_TEXT_LARGE_OMIT_THRESHOLD = 512 * 1024
+_SENSITIVE_TEXT_LARGE_EDGE_CHARS = 4096
+
+
+def _has_long_base64_candidate(text: str, min_chars: int = 1024) -> bool:
+    run_len = 0
+    for char in text:
+        if char in _BASE64_LOG_CHARS:
+            run_len += 1
+            if run_len >= min_chars:
+                return True
+        elif char in "\r\n" and run_len:
+            continue
+        else:
+            run_len = 0
+    return False
+
+
+def _redact_long_base64_runs_for_log(text: str, min_chars: int = 1024) -> str:
+    raw_text = str(text or "")
+    if not raw_text:
+        return raw_text
+
+    parts = []
+    copy_from = 0
+    run_start = None
+    run_payload_chars = 0
+
+    for index, char in enumerate(raw_text):
+        if char in _BASE64_LOG_CHARS:
+            if run_start is None:
+                run_start = index
+                run_payload_chars = 0
+            run_payload_chars += 1
+            continue
+
+        if char in "\r\n" and run_start is not None:
+            continue
+
+        if run_start is not None:
+            if run_payload_chars >= min_chars:
+                parts.append(raw_text[copy_from:run_start])
+                parts.append(f"[base64 omitted: {index - run_start} chars]")
+                copy_from = index
+            run_start = None
+            run_payload_chars = 0
+
+    if run_start is not None and run_payload_chars >= min_chars:
+        parts.append(raw_text[copy_from:run_start])
+        parts.append(f"[base64 omitted: {len(raw_text) - run_start} chars]")
+        copy_from = len(raw_text)
+
+    if not parts:
+        return raw_text
+    parts.append(raw_text[copy_from:])
+    return "".join(parts)
+
+
+def _should_scan_sensitive_text(text: str) -> bool:
+    if len(text) <= _SENSITIVE_TEXT_PRECHECK_MIN_CHARS:
+        return True
+    if _SENSITIVE_TEXT_SCAN_HINT_RE.search(text):
+        return True
+    return _has_long_base64_candidate(text)
+
+
 _SENSITIVE_TEXT_PATTERNS = (
+    (
+        re.compile(
+            r"(?i)data:(image|audio|video)/([a-zA-Z0-9.+-]{1,100});base64,"
+            r"([A-Za-z0-9+/=_\-\r\n]{64,})"
+        ),
+        _redact_data_uri_for_log,
+    ),
+    (
+        re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{1024,}(?![A-Za-z0-9+/=_-])"),
+        _redact_long_base64_for_log,
+    ),
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9+/=_-])"
+            r"(?:[A-Za-z0-9+/=_-]{64,}[\r\n]+){7,}[A-Za-z0-9+/=_-]{64,}"
+            r"(?![A-Za-z0-9+/=_-])"
+        ),
+        _redact_long_base64_for_log,
+    ),
     (
         re.compile(r"(?i)\b(Bearer)\s+([A-Za-z0-9._~+/=-]{8,})"),
         r"\1 ******",
@@ -528,8 +632,49 @@ def _sanitize_sensitive_text(text: str) -> str:
     sanitized = str(text or "")
     if not sanitized:
         return sanitized
-    for pattern, replacement in _SENSITIVE_TEXT_PATTERNS:
-        sanitized = pattern.sub(replacement, sanitized)
+
+    if len(sanitized) > _SENSITIVE_TEXT_LARGE_OMIT_THRESHOLD:
+        edge_chars = max(0, int(_SENSITIVE_TEXT_LARGE_EDGE_CHARS))
+        head = sanitized[:edge_chars]
+        tail = sanitized[-edge_chars:] if edge_chars else ""
+        omitted = max(0, len(sanitized) - len(head) - len(tail))
+        safe_head = _sanitize_sensitive_text(head)
+        safe_tail = _sanitize_sensitive_text(tail) if tail else ""
+        if safe_tail:
+            return (
+                f"{safe_head}... [omitted {omitted} chars from oversized log payload] "
+                f"...{safe_tail}"
+            )
+        return f"{safe_head}... [omitted {omitted} chars from oversized log payload]"
+
+    if not _should_scan_sensitive_text(sanitized):
+        return sanitized
+
+    lower_text = sanitized.lower()
+
+    # 1. 只有可能有 Base64 候选字符或包含 'data:' 才做前三个正则替换。
+    # 这样大幅度优化了绝大多数短普通日志的处理耗时。
+    if "data:" in lower_text or "base64" in lower_text or len(sanitized) >= 1024:
+        if "data:" in lower_text and "base64," in lower_text:
+            sanitized = _SENSITIVE_TEXT_PATTERNS[0][0].sub(_SENSITIVE_TEXT_PATTERNS[0][1], sanitized)
+            lower_text = sanitized.lower()
+        if len(sanitized) >= 1024 and _has_long_base64_candidate(sanitized):
+            sanitized = _redact_long_base64_runs_for_log(sanitized)
+            lower_text = sanitized.lower()
+
+    # 2. 仅在包含 bearer 时替换 Bearer token
+    if "bearer" in lower_text:
+        sanitized = _SENSITIVE_TEXT_PATTERNS[3][0].sub(_SENSITIVE_TEXT_PATTERNS[3][1], sanitized)
+
+    # 3. 仅在包含相关 header 名时替换 Auth, Cookie 等头部
+    if any(k in lower_text for k in ("authorization", "cookie", "set-cookie")):
+        sanitized = _SENSITIVE_TEXT_PATTERNS[4][0].sub(_SENSITIVE_TEXT_PATTERNS[4][1], sanitized)
+
+    # 4. 仅在包含敏感关键字时执行 query/json param 相关的敏感信息提取正则
+    if any(k in lower_text for k in ("access_token", "refresh_token", "id_token", "token", "api_key", "apikey", "key", "secret", "password", "passwd", "session", "csrf")):
+        for pattern, replacement in _SENSITIVE_TEXT_PATTERNS[5:]:
+            sanitized = pattern.sub(replacement, sanitized)
+
     return sanitized
 
 
@@ -578,20 +723,176 @@ def _record_request_id(record: logging.LogRecord) -> str:
     return str(getattr(record, "codex_request_id", "") or "SYSTEM")
 
 
+_REQUEST_SHORT_ID_PATTERN = re.compile(r"^req-(\d+)$", re.IGNORECASE)
+
+
+def _request_display_tag(request_id: Any) -> str:
+    raw = str(request_id or "").strip()
+    if not raw or raw.upper() == "SYSTEM":
+        return "SYSTEM"
+
+    match = _REQUEST_SHORT_ID_PATTERN.match(raw)
+    if match:
+        try:
+            return f"#{int(match.group(1)):03d}"
+        except Exception:
+            return f"#{match.group(1)}"
+
+    return raw if len(raw) <= 8 else f"#{raw[-6:]}"
+
+
+def _record_request_tag(record: logging.LogRecord) -> str:
+    return _request_display_tag(_record_request_id(record))
+
+
+def _compact_logger_name_impl(name: Any, max_chars: int = 16) -> str:
+    raw = str(name or "").strip().upper()
+    if not raw:
+        return ""
+    if len(raw) <= max_chars:
+        return raw
+
+    def cap(label: str) -> str:
+        label = str(label or "")
+        if len(label) <= max_chars:
+            return label
+        if max_chars <= 3:
+            return label[:max_chars]
+        head = max(1, (max_chars - 1) // 2)
+        tail = max(1, max_chars - head - 1)
+        return f"{label[:head]}~{label[-tail:]}"
+
+    parts = [part for part in raw.split(".") if part]
+    if len(parts) > 1:
+        prefix = ".".join(part[:1] for part in parts[:-1] if part)
+        tail = parts[-1]
+        candidate = f"{prefix}.{tail}" if prefix else tail
+        if len(candidate) <= max_chars:
+            return candidate
+
+        tail_budget = max(3, max_chars - len(prefix) - (1 if prefix else 0))
+        short_tail = tail[-tail_budget:]
+        return cap(f"{prefix}.{short_tail}" if prefix else short_tail)
+
+    if max_chars <= 3:
+        return raw[:max_chars]
+    return cap(raw)
+
+
+def _compact_logger_name(name: Any, max_chars: int = 16) -> str:
+    res = _compact_logger_name_impl(name, max_chars)
+    if len(res) <= max_chars:
+        return res
+    if max_chars <= 3:
+        return res[:max_chars]
+    head = max(1, (max_chars - 1) // 2)
+    tail = max(1, max_chars - head - 1)
+    return f"{res[:head]}~{res[-tail:]}"
+
+
 def _record_logger_name(record: logging.LogRecord) -> str:
-    return str(
+    return _compact_logger_name(
         getattr(record, "codex_logger_name", "") or getattr(record, "name", "") or ""
-    ).upper()[:8]
+    )
 
 
 def _record_kind(record: logging.LogRecord) -> str:
     return str(getattr(record, "codex_kind", "") or record.levelname or "INFO").upper()
 
 
+def _replace_log_tag(text: str, source_tag: str, target_tag: str) -> str:
+    if text.startswith(source_tag):
+        rest = text[len(source_tag):].lstrip()
+        return f"{target_tag} {rest}".rstrip()
+    return text
+
+
+def _normalize_log_display_expression(logger_name: str, message: str) -> str:
+    """Normalize legacy log expressions for display without changing raw logs."""
+    text = str(message or "")
+    if not text:
+        return text
+
+    input_tags = (
+        "[FILE_PASTE]",
+        "[CHUNKED_INPUT]",
+        "[CLIPBOARD_OK]",
+        "[VERIFY_OK]",
+        "[VERIFY_FAIL]",
+        "[VERIFY]",
+        "[INPUT_SNAPSHOT]",
+        "[STEALTH_VERIFY]",
+    )
+    for tag in input_tags:
+        normalized = _replace_log_tag(text, tag, "[INPUT]")
+        if normalized != text:
+            return normalized
+
+    for tag in ("[NetworkMonitor]", "[NETWORK_MONITOR]"):
+        normalized = _replace_log_tag(text, tag, "[MONIT]")
+        if normalized != text:
+            return normalized
+
+    for tag in ("[JS_EXEC]", "[CONTENT_PARSE]", "[PROBE]", "[IMAGE]", "[STEALTH_CLICK]", "[STEALTH]"):
+        normalized = _replace_log_tag(text, tag, "[PAGE]")
+        if normalized != text:
+            return normalized
+
+    if text.startswith("[REQUEST_TRANSPORT]"):
+        return _replace_log_tag(text, "[REQUEST_TRANSPORT]", "[ROUTE]")
+
+    if text.startswith("[Executor]"):
+        rest = text[len("[Executor]"):].lstrip()
+        target = "[MONIT]" if any(hint in rest for hint in ("抓流", "监听", "网络")) else "[PAGE]"
+        return f"{target} {rest}".rstrip()
+
+    if text.startswith("[TabPool]"):
+        return _replace_log_tag(text, "[TabPool]", "[POOL]")
+
+    tabpool_match = re.match(r"^TabPool\s*(?:→|->)\s*(.+)$", text, re.S)
+    if tabpool_match:
+        return f"[POOL] 标签页已被占用: tab_id={tabpool_match.group(1)}"
+
+    if text.startswith("TabPoolManager "):
+        return f"[POOL] {text}"
+
+    wait_done_match = re.match(r"^等待结束\s*(?:→|->)\s*(.+)$", text, re.S)
+    if wait_done_match:
+        return f"[POOL] 标签页等待结束: {wait_done_match.group(1)}"
+
+    if text.startswith("排队等待 "):
+        return f"[POOL] {text}"
+
+    if text.startswith("等待标签页 ") or text.startswith("等待域名路由 "):
+        return f"[POOL] {text}"
+
+    assign_match = re.match(r"^标签页 (.+) 分配编号 #(\d+)$", text)
+    if assign_match:
+        session_id, index_no = assign_match.groups()
+        return f"[POOL] 标签页分配编号: tab_id={session_id}, idx=#{index_no}"
+
+    if text.startswith("发送成功"):
+        return f"[SEND] {text}"
+
+    if text == "浏览器连接成功" or text == "关闭浏览器连接":
+        return f"[SYS] {text}"
+
+    if logger_name == "REQUEST" and text == "创建":
+        return "[ROUTE] 请求上下文已创建"
+
+    if logger_name == "API.CHAT" and text == "开始":
+        return "[ROUTE] 聊天补全请求开始处理"
+
+    return text
+
+
 def _record_display_message(record: logging.LogRecord) -> str:
     message = str(getattr(record, "codex_display_message_text", "") or "")
     if not message:
         message = str(record.getMessage() or "")
+    original_message = str(getattr(record, "codex_original_message_text", "") or "")
+    if message == original_message or not original_message:
+        message = _normalize_log_display_expression(_record_logger_name(record), message)
     return _sanitize_sensitive_text(message)
 
 
@@ -606,9 +907,9 @@ def _format_log_display_line(
     now = datetime.datetime.fromtimestamp(
         float(getattr(record, "created", time.time()) or time.time())
     ).strftime("%H:%M:%S")
-    request_id = _record_request_id(record)
+    request_tag = _record_request_tag(record)
     logger_name = _record_logger_name(record)
-    prefix = f"{now} │ {request_id:<8} │ {logger_name:<8} │ "
+    prefix = f"{now} │ {request_tag:<8} │ {logger_name:<8} │ "
     body, truncated = _truncate_long_message(str(message or ""), max_chars)
     body = body.replace("\n", "\n" + " " * len(prefix))
     return f"{prefix}{body}", truncated
@@ -640,6 +941,7 @@ class _WebLogHandler(logging.Handler):
             )
             logger_name = _record_logger_name(record)
             request_id = _record_request_id(record)
+            request_tag = _record_request_tag(record)
             kind = _record_kind(record)
             log_collector.add({
                 "timestamp": float(getattr(record, "created", time.time()) or time.time()),
@@ -652,6 +954,7 @@ class _WebLogHandler(logging.Handler):
                 "message_alias": message_text if message_text != original_message_text else "",
                 "logger": logger_name,
                 "request_id": request_id,
+                "request_tag": request_tag,
                 "truncated": bool(message_truncated or original_truncated or line_truncated),
             })
         except Exception:
@@ -775,16 +1078,22 @@ class _FileLogFormatter(logging.Formatter):
     """文件日志使用结构化字段，避免控制台前缀被再次包裹。"""
 
     def __init__(self):
-        super().__init__("%(asctime)s | %(levelname)s | %(name)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+        super().__init__(
+            "%(asctime)s | %(levelname)s | %(request_tag)s | %(name)s | %(message)s",
+            "%Y-%m-%d %H:%M:%S",
+        )
 
     def format(self, record: logging.LogRecord) -> str:
         original_message = str(
             getattr(record, "codex_original_message_text", "") or record.getMessage() or ""
         )
-        message = _sanitize_sensitive_text(original_message)
+        message = _sanitize_sensitive_text(
+            _normalize_log_display_expression(_record_logger_name(record), original_message)
+        )
         prefix = (
             f"{self.formatTime(record, self.datefmt)} | "
             f"{record.levelname} | "
+            f"{_record_request_tag(record)} | "
             f"{_record_logger_name(record) or record.name} | "
         )
         formatted = f"{prefix}{message.replace(chr(10), chr(10) + ' ' * len(prefix))}"
@@ -923,6 +1232,10 @@ _FILE_PASTE_TEMP_FILE_PATTERN = re.compile(r"^\[FILE_PASTE\] 临时文件: (.+)$
 _STEALTH_SEND_RETRY_PATTERN = re.compile(
     r"^\[STEALTH\] 发送重试 #(\d+) \(elapsed=([\d.]+)s\)$"
 )
+_STEALTH_SEND_RETRY_SIMPLE_PATTERN = re.compile(r"^\[STEALTH\] 发送重试 #(\d+)$")
+_STEALTH_WARMUP_DONE_PATTERN = re.compile(
+    r"^\[STEALTH\] 页面预热完成: moves=(\d+), origin=\(([-\d]+),([-\d]+)\), elapsed=([\d.]+)s$"
+)
 _STEALTH_REVIEW_DELAY_PATTERN = re.compile(
     r"^\[STEALTH\] 粘贴后阅读延迟 ([\d.]+)s \(文本长度=(\d+)\)$"
 )
@@ -949,6 +1262,12 @@ _SEND_ATTACHMENT_READY_PATTERN = re.compile(
 _SEND_ATTACHMENT_SETTLE_PATTERN = re.compile(
     r"^\[SEND\] 附件刚上传完成，额外等待解析稳定 ([\d.]+)s$"
 )
+_SEND_RETRY_ACTION_PATTERN = re.compile(
+    r"^\[SEND\] 执行发送重试动作 \(elapsed=([\d.]+)s, action=(.+)\)$"
+)
+_SEND_RETRY_WINDOW_PATTERN = re.compile(
+    r"^\[SEND\] 发送未成功，进入重试窗口 \(max_wait=([\d.]+)s, action=(.+)\)$"
+)
 
 
 def _bool_phrase(raw_value: str, true_text: str, false_text: str) -> str:
@@ -957,7 +1276,7 @@ def _bool_phrase(raw_value: str, true_text: str, false_text: str) -> str:
 
 def _split_suppressed_suffix(text: str) -> tuple[str, int]:
     raw_text = str(text or "")
-    prefix_match = re.match(r"^(\[[^\]]+\])\s+\[折叠(\d+)\]\s+(.+)$", raw_text, re.S)
+    prefix_match = re.match(r"^(\[[^\]]+\])\s+\[已折叠 (\d+) 条\]\s+(.+)$", raw_text, re.S)
     if prefix_match:
         leading_tag, suppressed, rest = prefix_match.groups()
         return f"{leading_tag} {rest}", int(suppressed or 0)
@@ -971,7 +1290,7 @@ def _add_suppressed_marker(text: str, suppressed_count: int) -> str:
     raw_text = str(text or "")
     if suppressed_count <= 0 or not raw_text:
         return raw_text
-    marker = f"[折叠{suppressed_count}]"
+    marker = f"[已折叠 {suppressed_count} 条]"
     tag_match = re.match(r"^(\[[^\]]+\])\s*(.*)$", raw_text, re.S)
     if tag_match:
         leading_tag, rest = tag_match.groups()
@@ -989,6 +1308,8 @@ def _cuteify_info_message(logger_name: str, message_text: str) -> str:
     text = str(message_text or "")
     name = str(logger_name or "").upper().strip()
     if not text or not bool(BrowserConstants.get("LOG_INFO_CUTE_MODE")):
+        return text
+    if len(text) > 800:
         return text
 
     if name == "REQUEST":
@@ -1020,7 +1341,7 @@ def _cuteify_info_message(logger_name: str, message_text: str) -> str:
     chunked_done_match = _CHUNKED_DONE_PATTERN.match(text)
     if chunked_done_match:
         total_chunks, total_len = chunked_done_match.groups()
-        return f"都分好了喵，一共 {total_chunks} 块，共 {total_len} 字符喵"
+        return f"小鹿把内容都分块写进去啦（共 {total_chunks} 块，共 {total_len} 字符）喵"
 
     verify_exact_match = _VERIFY_OK_EXACT_PATTERN.match(text)
     if verify_exact_match:
@@ -1045,7 +1366,7 @@ def _cuteify_info_message(logger_name: str, message_text: str) -> str:
     if text == "[CLIPBOARD_OK] 重试成功":
         return "剪贴板这次重试成功啦喵"
     if text == "[CLIPBOARD_OK] 重试成功（富文本匹配）":
-        return "剪贴板这次重试成功啦喵（富文本内容也对上了）"
+        return "小鹿重新贴了一下，这次内容（富文本格式）终于对上啦喵"
 
     if text == "浏览器连接成功":
         return "浏览器已经顺利连上了喵"
@@ -1055,9 +1376,51 @@ def _cuteify_info_message(logger_name: str, message_text: str) -> str:
         return "消息已经顺利发出去啦喵"
     if text == "发送成功（附件场景，已避免重复点击发送按钮）":
         return "附件场景也顺利发出去了喵，而且乖乖避开了重复点击发送按钮"
-    send_retry_match = _SEND_SUCCESS_RETRY_PATTERN.match(text)
-    if send_retry_match:
-        return f"消息补发成功啦喵（等了 {send_retry_match.group(1)}s 终于发出去了）"
+    network_finish_new_match = re.match(
+        r"^\[NetworkMonitor\] 网络流监听正常完成 "
+        r"\(检测到结束标志, 历时=([\d.]+)s, 捕获响应=(\d+), 产出文本块=(\d+), 提取字符数=(\d+)\)$",
+        text,
+    )
+    if network_finish_new_match:
+        duration, responses, _, _ = network_finish_new_match.groups()
+        return f"小鹿盯完这轮监听流程啦，顺利收工喵（历时 {duration}s，抓取响应数 {responses}）"
+
+    return text
+
+
+def _cuteify_warning_message(logger_name: str, message_text: str) -> str:
+    text = str(message_text or "")
+    if not text or not bool(BrowserConstants.get("LOG_INFO_CUTE_MODE")):
+        return text
+    if len(text) > 800:
+        return text
+
+    send_retry_window_match = _SEND_RETRY_WINDOW_PATTERN.match(text)
+    if send_retry_window_match:
+        max_wait, action = send_retry_window_match.groups()
+        return f"小鹿发现发送还没确认，准备进入补发观察窗口（最长 {max_wait}s，动作 {action}）喵"
+
+    send_retry_action_match = _SEND_RETRY_ACTION_PATTERN.match(text)
+    if send_retry_action_match:
+        elapsed, action = send_retry_action_match.groups()
+        return f"小鹿发现消息没动静，又轻轻试了一次发送动作（已等待 {elapsed}s，动作 {action}）喵"
+
+    attachment_retry_match = re.match(
+        r"^\[SEND\] 附件发送首轮未确认，准备自动重试 "
+        r"\(attempt=(\d+)/(\d+), interval=([\d.]+)s\)$",
+        text,
+    )
+    if attachment_retry_match:
+        attempt, max_attempts, interval = attachment_retry_match.groups()
+        return f"小鹿还没看到附件发送确认，准备第 {attempt}/{max_attempts} 次补发（间隔 {interval}s）喵"
+
+    attachment_retry_stop_match = re.match(
+        r"^\[SEND\] 附件重试停止 \(reason=(.+), attempt=(\d+)/(\d+)\)$",
+        text,
+    )
+    if attachment_retry_stop_match:
+        reason, attempt, max_attempts = attachment_retry_stop_match.groups()
+        return f"小鹿停止附件补发啦（原因 {reason}，进度 {attempt}/{max_attempts}）喵"
 
     return text
 
@@ -1065,6 +1428,8 @@ def _cuteify_info_message(logger_name: str, message_text: str) -> str:
 def _cuteify_debug_message(logger_name: str, message_text: str) -> str:
     raw_text = str(message_text or "")
     if not raw_text or not bool(BrowserConstants.get("LOG_DEBUG_CUTE_MODE")):
+        return raw_text
+    if len(raw_text) > 800:
         return raw_text
 
     text, suppressed_count = _split_suppressed_suffix(raw_text)
@@ -1177,7 +1542,7 @@ def _cuteify_debug_message(logger_name: str, message_text: str) -> str:
 
     network_silence_match = re.match(r"^\[NetworkMonitor\] 静默超时 \(([\d.]+)s\)，结束监听$", text)
     if network_silence_match:
-        return cute(f"小鹿等了 {network_silence_match.group(1)}s 都没新动静喵，准备收监听了")
+        return cute(f"小鹿等了 {network_silence_match.group(1)}s 发现页面安静下来了，收起监听网啦喵")
 
     network_non_target_match = re.match(
         r"^\[NetworkMonitor\] 非流式目标响应，跳过解析 \(count=(\d+), url=(.*)\)$",
@@ -1225,6 +1590,32 @@ def _cuteify_debug_message(logger_name: str, message_text: str) -> str:
         return cute("小鹿确认第一条有效流响应到啦喵")
     if text == "[NetworkMonitor] 检测到结束标志，完成监听":
         return cute("小鹿看到结束标记啦，这轮监听可以收尾了喵")
+
+    network_lock_match = re.match(
+        r"^\[NetworkMonitor\] 成功锁定流目标响应 "
+        r"\(status=(\d+), method=(.*), url=(.*), 初始长度=(\d+) 字符\)$",
+        text,
+    )
+    if network_lock_match:
+        status, method, url, body_size = network_lock_match.groups()
+        return cute(f"小鹿已经盯上目标请求啦，正在努力把它捞出来喵（状态 {status}，初始长度 {body_size} 字符）")
+
+    network_growth_new_match = re.match(
+        r"^\[NetworkMonitor\] 流响应增长中 \(当前大小=(\d+) 字节\)$",
+        text,
+    )
+    if network_growth_new_match:
+        body_size = network_growth_new_match.group(1)
+        return cute(f"小鹿看到响应正文还在继续长大喵（已接收 {body_size} 字节）")
+
+    network_wait_parser_match = re.match(
+        r"^\[NetworkMonitor\] 等待流式文本解析产出 "
+        r"\(已捕获流长度=(\d+), 已静默等待=([\d.]+)s/上限=([\d.]+)s\)$",
+        text,
+    )
+    if network_wait_parser_match:
+        body_len, idle_sec, limit_sec = network_wait_parser_match.groups()
+        return cute(f"小鹿正在努力拆包中，再给小鹿一点时间确认有效内容喵（已捕获 {body_len} 字节，已静默等待 {idle_sec}s）")
 
     file_paste_signal_match = _FILE_PASTE_UPLOAD_SIGNAL_PATTERN.match(text)
     if file_paste_signal_match:
@@ -1352,6 +1743,11 @@ def _cuteify_debug_message(logger_name: str, message_text: str) -> str:
         retry_count, elapsed = stealth_retry_match.groups()
         return cute(f"小鹿又悄悄帮你重试了一次发送喵（第 {retry_count} 次，已经等了 {elapsed}s）")
 
+    stealth_retry_simple_match = _STEALTH_SEND_RETRY_SIMPLE_PATTERN.match(text)
+    if stealth_retry_simple_match:
+        retry_count = stealth_retry_simple_match.group(1)
+        return cute(f"小鹿发现消息没动静，又轻轻点了一下发送按钮（第 {retry_count} 次）喵")
+
     stealth_clipboard_no_click_match = _STEALTH_CLIPBOARD_PASTE_NOCLICK_PATTERN.match(text)
     if stealth_clipboard_no_click_match:
         return cute(
@@ -1418,7 +1814,15 @@ def _cuteify_debug_message(logger_name: str, message_text: str) -> str:
         return cute("小鹿先活动活动爪子喵，准备开始低熵操作啦")
     if text.startswith("[STEALTH] 页面预热完成（") and text.endswith(" 次移动）"):
         move_count = text.removeprefix("[STEALTH] 页面预热完成（").removesuffix(" 次移动）")
-        return cute(f"小鹿热身完毕喵，一共晃了 {move_count} 次小步子")
+        return cute(f"小鹿活动了一下手脚，在页面上悄悄晃了 {move_count} 次小步子喵")
+
+    stealth_warmup_done_match = _STEALTH_WARMUP_DONE_PATTERN.match(text)
+    if stealth_warmup_done_match:
+        move_count, origin_x, origin_y, elapsed = stealth_warmup_done_match.groups()
+        return cute(
+            f"小鹿活动了一下手脚，在页面上悄悄晃了 {move_count} 次小步子"
+            f"（起点 {origin_x},{origin_y}，耗时 {elapsed}s）喵"
+        )
 
     stealth_warmup_fail_match = re.match(r"^\[STEALTH\] 页面预热异常（可忽略）: (.+)$", text, re.S)
     if stealth_warmup_fail_match:
@@ -1670,8 +2074,7 @@ class SecureLogger:
     }
 
     def __init__(self, name: str, level: Optional[int] = None):
-        # 截取前8位并大写，保证对齐
-        self._name = name.upper()[:8]
+        self._name = _compact_logger_name(name)
         
         # 如果未指定级别，从环境变量获取
         if level is None:
@@ -1775,6 +2178,8 @@ class SecureLogger:
             display_message_text = _cuteify_info_message(self._name, original_message_text)
         elif upper_level_key == "DEBUG":
             display_message_text = _cuteify_debug_message(self._name, original_message_text)
+        elif upper_level_key == "WARNING":
+            display_message_text = _cuteify_warning_message(self._name, original_message_text)
         self._logger.log(
             level,
             original_message_text,

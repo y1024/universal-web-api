@@ -1884,6 +1884,7 @@ class TextInputHandler:
             "last_state": {},
         }
 
+        filepath = None
         try:
             ele.click()
             self._smart_delay(0.15, 0.35)
@@ -1912,7 +1913,7 @@ class TextInputHandler:
                 logger.error("[FILE_PASTE] failed to create temp file")
                 return False
 
-            logger.debug(f"[FILE_PASTE] temp file: {filepath}")
+            logger.debug(f"[FILE_PASTE] temp file: temp/{os.path.basename(filepath)}")
             self._last_file_upload_path = filepath
             expected_names = [
                 os.path.basename(filepath),
@@ -2010,6 +2011,13 @@ class TextInputHandler:
         except Exception as e:
             logger.error(f"[FILE_PASTE] file paste failed: {e}")
             return False
+        finally:
+            if filepath and os.path.exists(filepath):
+                try:
+                    os.unlink(filepath)
+                    logger.debug(f"[FILE_PASTE] temp file deleted: temp/{os.path.basename(filepath)}")
+                except Exception as unlink_err:
+                    logger.debug(f"[FILE_PASTE] failed to delete temp file: {unlink_err}")
 
     def fill_via_clipboard_no_click(self, ele, text: str):
         """

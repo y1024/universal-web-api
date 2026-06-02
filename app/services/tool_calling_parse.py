@@ -11,6 +11,15 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+try:
+    from defusedxml import ElementTree as SafeET
+    from defusedxml.common import DefusedXmlException
+except Exception:  # pragma: no cover - optional dependency fallback
+    SafeET = None
+
+    class DefusedXmlException(Exception):
+        pass
+
 from app.services.tool_calling_common import (
     _LEGACY_XML_ARG_TAG,
     _LEGACY_XML_CALL_TAG,
@@ -709,6 +718,9 @@ def _close_unmatched_json_delimiters(text: str) -> str:
     return _sanitize_truncated_json_tail(repaired)
 
 
+_TRUNCATED_JSON_LITERALS = {"t", "tr", "tru", "f", "fa", "fal", "fals", "n", "nu", "nul"}
+
+
 def _sanitize_truncated_json_tail(text: str) -> str:
     repaired = str(text or "")
     if not repaired:
@@ -717,40 +729,137 @@ def _sanitize_truncated_json_tail(text: str) -> str:
     previous = None
     while repaired != previous:
         previous = repaired
-        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
-        repaired = re.sub(
-            r'(\{)\s*"[^"]*"\s*:\s*((?:[}\]])+\s*)$',
-            r"\1\2",
-            repaired,
-        )
-        repaired = re.sub(
-            r',\s*"[^"]*"\s*:\s*((?:[}\]])+\s*)$',
-            r"\1",
-            repaired,
-        )
-        repaired = re.sub(
-            r'(\{)\s*"[^"]*"\s*((?:[}\]])+\s*)$',
-            r"\1\2",
-            repaired,
-        )
-        repaired = re.sub(
-            r',\s*"[^"]*"\s*((?:[}\]])+\s*)$',
-            r"\1",
-            repaired,
-        )
-        repaired = re.sub(
-            r'(\{)\s*"[^"]*"\s*:\s*(?:t|tr|tru|f|fa|fal|fals|n|nu|nul)\s*((?:[}\]])+\s*)$',
-            r"\1\2",
-            repaired,
-        )
-        repaired = re.sub(
-            r',\s*"[^"]*"\s*:\s*(?:t|tr|tru|f|fa|fal|fals|n|nu|nul)\s*((?:[}\]])+\s*)$',
-            r"\1",
-            repaired,
-        )
+        repaired = _remove_trailing_commas_before_closers(repaired)
+        repaired = _remove_truncated_json_members_before_closers(repaired)
         repaired = re.sub(r"[:,]\s*$", "", repaired)
 
     return repaired
+
+
+def _remove_trailing_commas_before_closers(text: str) -> str:
+    value = str(text or "")
+    if not value:
+        return value
+
+    repaired: List[str] = []
+    index = 0
+    in_string = False
+    escape = False
+    while index < len(value):
+        ch = value[index]
+        if in_string:
+            repaired.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if ch == '"':
+            repaired.append(ch)
+            in_string = True
+            index += 1
+            continue
+
+        if ch != ",":
+            repaired.append(ch)
+            index += 1
+            continue
+
+        scan = index + 1
+        while scan < len(value) and value[scan].isspace():
+            scan += 1
+        if scan < len(value) and value[scan] in "}]":
+            index += 1
+            continue
+
+        repaired.append(ch)
+        index += 1
+
+    return "".join(repaired)
+
+
+def _remove_truncated_json_members_before_closers(text: str) -> str:
+    value = str(text or "")
+    if not value:
+        return value
+
+    content_end = len(value)
+    while content_end > 0 and value[content_end - 1].isspace():
+        content_end -= 1
+
+    close_start = content_end
+    while close_start > 0 and value[close_start - 1] in "}]":
+        close_start -= 1
+
+    if close_start == content_end:
+        return value
+
+    prefix = value[:close_start]
+    suffix = value[close_start:content_end]
+    tail = value[content_end:]
+    boundary = _find_last_json_member_boundary(prefix)
+    if boundary == -1:
+        return value
+
+    boundary_char = prefix[boundary]
+    if boundary_char not in "{,":
+        return value
+
+    candidate = prefix[boundary + 1 :]
+    if not _looks_like_truncated_json_object_member(candidate):
+        return value
+
+    if boundary_char == "{":
+        return prefix[: boundary + 1] + suffix + tail
+    return prefix[:boundary] + suffix + tail
+
+
+def _find_last_json_member_boundary(text: str) -> int:
+    in_string = False
+    escape = False
+    boundary = -1
+    for index, ch in enumerate(str(text or "")):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+        if ch in "{,":
+            boundary = index
+    return boundary
+
+
+def _looks_like_truncated_json_object_member(fragment: str) -> bool:
+    value = str(fragment or "").lstrip()
+    if not value or value[0] != '"':
+        return False
+
+    key_end = _find_string_end(value, 0)
+    if key_end == -1:
+        return False
+
+    tail = value[key_end + 1 :].lstrip()
+    if not tail:
+        return True
+    if tail[0] != ":":
+        return False
+
+    value_tail = tail[1:].lstrip()
+    if not value_tail:
+        return True
+
+    return value_tail in _TRUNCATED_JSON_LITERALS
 
 
 def _escape_control_chars_in_json_strings(text: str) -> str:
@@ -1036,6 +1145,9 @@ _TOOL_XML_STRING_PARAM_NAMES = {
     "question",
 }
 
+_TOOL_XML_MAX_CHARS = 200_000
+_TOOL_XML_FORBIDDEN_DECL_RE = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
+
 
 def _mask_ignored_tool_markup_regions(text: str) -> str:
     if not text:
@@ -1196,6 +1308,17 @@ def _repair_missing_tool_xml_wrapper(text: str) -> str:
 
 def _normalize_tool_xml_markup(text: str) -> str:
     return str(text or "")
+
+
+def _safe_xml_fromstring(text: str) -> ET.Element:
+    value = str(text or "")
+    if len(value) > _TOOL_XML_MAX_CHARS:
+        raise ET.ParseError("tool XML block exceeds maximum length")
+    if _TOOL_XML_FORBIDDEN_DECL_RE.search(value):
+        raise ET.ParseError("DTD and entity declarations are not allowed in tool XML")
+    if SafeET is not None:
+        return SafeET.fromstring(value)
+    return ET.fromstring(value)
 
 
 def _xml_local_name(tag: Any) -> str:
@@ -1370,8 +1493,8 @@ def _parse_wrapped_xml_tool_calls(
 ) -> List[Dict[str, Any]]:
     normalized = _normalize_tool_xml_markup(text)
     try:
-        root = ET.fromstring(normalized)
-    except ET.ParseError:
+        root = _safe_xml_fromstring(normalized)
+    except (ET.ParseError, DefusedXmlException):
         return []
 
     if _xml_local_name(root.tag) not in {_PREFERRED_XML_WRAPPER_TAG, _LEGACY_XML_WRAPPER_TAG}:

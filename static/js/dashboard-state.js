@@ -226,6 +226,9 @@ function saveStoredSitesCache(sites, currentDomain) {
             if (this.logLevelFilter === 'ALL') {
                 return this.logs;
             }
+            if (this.logLevelFilter === 'INFO') {
+                return this.logs.filter(log => log.level === 'INFO' || log.level === 'OK');
+            }
             return this.logs.filter(log => log.level === this.logLevelFilter);
         },
 

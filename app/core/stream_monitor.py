@@ -280,6 +280,7 @@ class StreamMonitor:
         self._generating_checker: Optional[GeneratingStatusCache] = None
         self._expect_image_output = False
         self._prefetched_image_urls: set[str] = set()
+        self._last_visual_reply_log_info = None
 
     def _sanitize_stream_text(self, text: str) -> str:
         if not text:
@@ -346,17 +347,20 @@ class StreamMonitor:
 
         scored.sort(key=lambda item: item[:4], reverse=True)
         best = scored[0]
-        logger.debug_throttled(
-            "latest_visual_reply_selection",
-            "[latest_visual_reply] 选中视觉最新回复容器: "
-            f"index={best[4]}, column={column}, bottom={best[0]:.1f}, left={best[5]:.1f}, total={len(elements)}",
-            interval_sec=5.0
-        )
+        
+        current_log_info = (best[4], column, f"{best[0]:.1f}", f"{best[5]:.1f}", len(elements))
+        if self._last_visual_reply_log_info != current_log_info:
+            self._last_visual_reply_log_info = current_log_info
+            logger.debug(
+                "[latest_visual_reply] 选中视觉最新回复容器: "
+                f"index={best[4]}, column={column}, bottom={best[0]:.1f}, left={best[5]:.1f}, total={len(elements)}"
+            )
         target = best[6]
         return target, self.extractor.get_anchor(target)
 
     def monitor(self, selector: str, user_input: str = "",
                 completion_id: Optional[str] = None) -> Generator[str, None, None]:
+        self._last_visual_reply_log_info = None
         logger.debug("流式监听启动")
         logger.debug(f"[MONITOR] selector_raw={selector!r}, image_enabled={self._image_extraction_enabled}")
         

@@ -359,6 +359,10 @@ class DeepBrowserExtractor(BaseExtractor):
         'css:.response-content-markdown',
         'css:.message-content',
     ]
+    CONTENT_CHILD_SELECTOR_COMBINED = (
+        'css:.markdown-body, .prose, .turn-content, '
+        '.response-content-markdown, .message-content'
+    )
 
     def find_content_node(self, element) -> Any:
         """
@@ -398,24 +402,26 @@ class DeepBrowserExtractor(BaseExtractor):
             pass
         
         # ===== 向下查找（只在必要时执行）=====
-        for child_selector in self.CONTENT_CHILD_SELECTORS:
+        try:
+            children = element.eles(self.CONTENT_CHILD_SELECTOR_COMBINED, timeout=0.08)
+            if children and not isinstance(children, list):
+                children = [children]
+        except Exception:
+            children = []
+
+        for child in (children or [])[:8]:
             try:
-                child = element.ele(child_selector, timeout=0.05)
-                if child:
-                    # 额外检查：不要选中段落元素
-                    try:
-                        child_class = child.attr('class') or ""
-                        if 'paragraph' in child_class:
-                            continue
-                    except Exception:
-                        pass
-                    
-                    child_text = child.run_js("return this.textContent || this.innerText || ''")
-                    if child_text and len(str(child_text).strip()) > 0:
-                        return child
+                if not child:
+                    continue
+                child_class = child.attr('class') or ""
+                if 'paragraph' in child_class:
+                    continue
+                child_text = child.run_js("return this.textContent || this.innerText || ''")
+                if child_text and len(str(child_text).strip()) > 0:
+                    return child
             except Exception:
                 pass
-        
+
         return element
 
     def extract_text(self, element) -> str:

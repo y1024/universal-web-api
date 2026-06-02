@@ -25,6 +25,14 @@ from app.core.config import get_logger, _request_context
 logger = get_logger("REQUEST")
 
 
+def _get_positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+    return value if value > 0 else default
+
+
 class RequestStatus(Enum):
     """请求状态枚举"""
     QUEUED = "queued"
@@ -116,7 +124,7 @@ class RequestManager:
     _instance_lock = threading.Lock()
         
     # 僵尸请求超时时间（秒）- 超过此时间的 RUNNING 请求将被强制清理
-    ZOMBIE_TTL = 3600
+    ZOMBIE_TTL = _get_positive_int_env("REQUEST_ZOMBIE_TTL", 600)
     def __new__(cls):
         if cls._instance is None:
             with cls._instance_lock:

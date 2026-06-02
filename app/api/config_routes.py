@@ -10,6 +10,7 @@ Responsibilities:
 """
 
 import copy
+import asyncio
 import json
 import time
 from typing import Optional, Dict, Any
@@ -619,7 +620,11 @@ async def test_workflow_editor_steps(
         data = await request.json()
         logger.debug(f"[WFE_TEST] direct api request keys={sorted(list(data.keys()))}")
         browser_instance = get_browser(auto_connect=True)
-        result = _execute_workflow_editor_test_payload(browser_instance, data)
+        result = await asyncio.to_thread(
+            _execute_workflow_editor_test_payload,
+            browser_instance,
+            data,
+        )
         result.pop("_tab_ref", None)
         return result
 

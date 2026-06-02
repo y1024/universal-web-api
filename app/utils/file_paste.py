@@ -28,6 +28,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 TEMP_DIR = _PROJECT_ROOT / "temp"
 
 
+def _temp_log_label(filepath: str) -> str:
+    """Return a short temp-file label for logs without exposing absolute paths."""
+    name = Path(str(filepath or "")).name
+    return f"temp/{name}" if name else "temp/<unknown>"
+
+
 def ensure_temp_dir() -> Path:
     """确保 temp 目录存在"""
     TEMP_DIR.mkdir(exist_ok=True)
@@ -56,7 +62,7 @@ def cleanup_temp_dir():
                     shutil.rmtree(item)
                     count += 1
             except Exception as e:
-                logger.debug(f"清理临时文件失败: {item} - {e}")
+                logger.debug(f"清理临时文件失败: {_temp_log_label(str(item))} - {e}")
         
         if count > 0:
             logger.info(f"已清理 {count} 个临时文件")
@@ -91,7 +97,7 @@ def create_temp_txt(text: str, prefix: str = "paste_") -> Optional[str]:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(text)
         
-        logger.debug(f"临时文件已创建: {filepath} ({len(text)} 字符)")
+        logger.debug(f"临时文件已创建: {_temp_log_label(filepath)} ({len(text)} 字符)")
         return filepath
     
     except Exception as e:
@@ -117,11 +123,11 @@ def copy_file_to_clipboard(filepath: str) -> bool:
     try:
         abs_path = os.path.abspath(filepath)
         if not os.path.exists(abs_path):
-            logger.error(f"文件不存在: {abs_path}")
+            logger.error(f"文件不存在: {_temp_log_label(abs_path)}")
             return False
 
         copy_file_to_native_clipboard(abs_path)
-        logger.debug(f"文件已复制到剪贴板: {abs_path}")
+        logger.debug(f"文件已复制到剪贴板: {_temp_log_label(abs_path)}")
         return True
 
     except ClipboardUnsupportedError:

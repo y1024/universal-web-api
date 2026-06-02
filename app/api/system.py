@@ -898,24 +898,8 @@ async def save_update_preserve(
 
 # ================= 调试 API =================
 
-@router.post("/api/debug/test-selector")
-async def test_selector(
-    request: Request,
-    authenticated: bool = Depends(verify_auth)
-):
-    """测试选择器是否有效"""
-    if not AppConfig.is_debug():
-        raise HTTPException(status_code=403, detail="调试功能未启用")
-
+def _run_selector_test(selector: str, timeout: Any = 2, highlight: bool = False) -> Dict[str, Any]:
     try:
-        data = await request.json()
-        selector = data.get("selector", "")
-        timeout = data.get("timeout", 2)
-        highlight = data.get("highlight", False)
-
-        if not selector:
-            raise HTTPException(status_code=400, detail="缺少 selector")
-
         browser = get_browser()
 
         with browser.get_temporary_tab() as tab:
@@ -1052,6 +1036,26 @@ async def test_selector(
     except Exception as e:
         logger.error(f"测试选择器失败: {e}")
         return {"success": False, "count": 0, "message": str(e)}
+
+
+@router.post("/api/debug/test-selector")
+async def test_selector(
+    request: Request,
+    authenticated: bool = Depends(verify_auth)
+):
+    """测试选择器是否有效"""
+    if not AppConfig.is_debug():
+        raise HTTPException(status_code=403, detail="调试功能未启用")
+
+    data = await request.json()
+    selector = data.get("selector", "")
+    timeout = data.get("timeout", 2)
+    highlight = data.get("highlight", False)
+
+    if not selector:
+        raise HTTPException(status_code=400, detail="缺少 selector")
+
+    return await asyncio.to_thread(_run_selector_test, selector, timeout, highlight)
 
 
 @router.get("/api/debug/request-status")

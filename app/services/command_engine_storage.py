@@ -76,7 +76,7 @@ class CommandEngineStorageMixin:
                 self._commands_cache = commands_snapshot
                 return True
         except Exception as e:
-            logger.error(f"????????: {e}")
+            logger.error(f"保存命令配置失败: {e}")
             return False
 
     def _normalize_group_name(self, group_name: Any) -> str:

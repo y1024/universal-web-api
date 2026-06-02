@@ -396,7 +396,7 @@ async def lifespan(app: FastAPI):
     try:
         
         browser = get_browser(auto_connect=False)
-        health = browser.health_check()
+        health = await asyncio.to_thread(browser.health_check)
     
         if health["connected"]:
             startup_blank_tab_id = _capture_startup_blank_tab_id(browser)

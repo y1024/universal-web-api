@@ -230,8 +230,61 @@ class BrowserConnectionMixin:
         except Exception as e:
             return f"tab_pool=error({e})"
 
+    @staticmethod
+    def _get_watchdog_float_env(name: str, default: float, minimum: float = 0.5) -> float:
+        try:
+            value = float(os.getenv(name, str(default)))
+        except Exception:
+            return default
+        return max(float(minimum), value)
+
+    def _has_recent_watchdog_activity(self) -> bool:
+        now = time.time()
+        recent_window = self._get_watchdog_float_env(
+            "BROWSER_WATCHDOG_RECENT_ACTIVITY_WINDOW",
+            60.0,
+            minimum=1.0,
+        )
+
+        try:
+            from app.services.request_manager import request_manager
+
+            status = request_manager.get_status()
+            if int(status.get("running_count", 0) or 0) > 0:
+                self._last_watchdog_activity_at = now
+                return True
+        except Exception:
+            return True
+
+        try:
+            pool = self._tab_pool
+            sessions = pool.get_sessions_snapshot() if pool is not None else []
+            for session in sessions:
+                status_value = getattr(getattr(session, "status", None), "value", "")
+                if status_value == "busy":
+                    self._last_watchdog_activity_at = now
+                    return True
+        except Exception:
+            return True
+
+        last_activity = float(getattr(self, "_last_watchdog_activity_at", 0.0) or 0.0)
+        return bool(last_activity and now - last_activity < recent_window)
+
+    def _get_connection_watchdog_interval(self) -> float:
+        active_interval = self._get_watchdog_float_env(
+            "BROWSER_WATCHDOG_ACTIVE_INTERVAL",
+            1.0,
+            minimum=0.5,
+        )
+        idle_interval = self._get_watchdog_float_env(
+            "BROWSER_WATCHDOG_IDLE_INTERVAL",
+            5.0,
+            minimum=active_interval,
+        )
+        return active_interval if self._has_recent_watchdog_activity() else idle_interval
+
     def _connection_watchdog_loop(self) -> None:
-        while not self._watchdog_stop.wait(1.0):
+        while not self._watchdog_stop.wait(self._get_connection_watchdog_interval()):
             try:
                 pool = self._tab_pool
                 if pool is not None:
@@ -417,4 +470,3 @@ class BrowserConnectionMixin:
             logger.debug(f"页面状态检查异常: {e}")
         
         return result
-

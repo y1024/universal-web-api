@@ -34,6 +34,8 @@ class DOMDirectExtractor(BaseExtractor):
     @classmethod
     def get_description(cls) -> str:
         return "直接读取 DOM textContent（轻量级，不支持复杂格式）"
+
+    CONTENT_CHILD_SELECTOR_COMBINED = 'css:.markdown, .prose, [class*="content"]'
     
     # ============ 提取逻辑 ============
     
@@ -134,27 +136,23 @@ class DOMDirectExtractor(BaseExtractor):
         if not element:
             return element
         
-        # 常见的内容容器选择器
-        content_selectors = [
-            'css:.markdown',
-            'css:.prose',
-            'css:[class*="content"]',
-        ]
-        
-        for selector in content_selectors:
+        try:
+            children = element.eles(self.CONTENT_CHILD_SELECTOR_COMBINED, timeout=0.08)
+            if children and not isinstance(children, list):
+                children = [children]
+        except Exception:
+            children = []
+
+        for child in (children or [])[:8]:
             try:
-                child = element.ele(selector, timeout=0.05)
-                if child:
-                    # 检查是否有内容
-                    try:
-                        text = child.run_js("return this.textContent || ''")
-                        if text and len(str(text).strip()) > 0:
-                            return child
-                    except Exception:
-                        pass
+                if not child:
+                    continue
+                text = child.run_js("return this.textContent || ''")
+                if text and len(str(text).strip()) > 0:
+                    return child
             except Exception:
                 pass
-        
+
         return element
     
     # ============ 辅助方法 ============

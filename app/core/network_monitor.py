@@ -9,6 +9,7 @@ app/core/network_monitor.py - 网络响应拦截监听器
 """
 
 import time
+import logging
 import json
 import re
 from typing import Generator, Optional, Dict, Callable, Any
@@ -103,6 +104,8 @@ class NetworkMonitor:
     DEFAULT_INITIAL_TARGET_BODY_WAIT = 4.0  # 首个目标响应空 body 时的补等宽限
     MAX_LISTEN_RESTARTS = 3                # 监听状态异常后的最大重建次数
     CANCEL_CHECK_SLICE = 1.0              # 长等待期间的取消检查切片（秒）
+    ACTIVE_STREAM_RESPONSE_POLL_TIMEOUT = 0.01  # 锁定 SSE 后仅快速扫队列，不阻塞吐出
+    LISTEN_RESTART_BACKOFF = 0.1          # 异常重建后的最小退避，避免忙循环
     
     def __init__(self, tab, formatter: SSEFormatter,
                  parser: ResponseParser,
@@ -132,7 +135,7 @@ class NetworkMonitor:
             "hard_timeout",
             self.DEFAULT_HARD_TIMEOUT
         )
-        
+
         self._listen_pattern = network_config.get("listen_pattern", "")
         self._stream_match_pattern = network_config.get(
             "stream_match_pattern",
@@ -200,6 +203,7 @@ class NetworkMonitor:
         self._pre_started = False
         # 状态追踪
         self._is_listening = False
+        self._cdp_session_listening = False
         self._total_chunks = 0
         self._total_content_chars = 0
         self._prefetched_responses = []
@@ -384,6 +388,10 @@ class NetworkMonitor:
             or ("NoneType" in err_text and "is_running" in err_text)
         )
 
+    def _sleep_after_listen_restart(self, attempts: int) -> None:
+        delay = min(0.5, self.LISTEN_RESTART_BACKOFF * max(1, int(attempts or 1)))
+        time.sleep(delay)
+
     def _start_listen(self):
         if not self._listen_pattern:
             raise NetworkMonitorError("listen_pattern 未配置")
@@ -471,6 +479,7 @@ class NetworkMonitor:
                     self._ensure_listening("poll_send_activity_restart")
                 except Exception:
                     return {"seen": False, "matched": False, "error": err_text}
+                self._sleep_after_listen_restart(1)
                 return {"seen": False, "matched": False, "error": err_text}
             return {"seen": False, "matched": False, "error": err_text}
 
@@ -478,6 +487,7 @@ class NetworkMonitor:
         deadline = time.time() + max(0.01, float(timeout or 0.01))
         saw_any_response = False
         last_event: Dict[str, Any] = {}
+        listen_restart_attempts = 0
 
         while True:
             counters = self._read_listen_counters()
@@ -505,10 +515,21 @@ class NetworkMonitor:
             except Exception as e:
                 err_text = str(e)
                 if self._is_restartable_listen_error(err_text):
+                    listen_restart_attempts += 1
+                    if listen_restart_attempts > self.MAX_LISTEN_RESTARTS:
+                        return {
+                            "seen": saw_any_response,
+                            "matched": False,
+                            "error": (
+                                f"监听状态恢复失败（已重试 {self.MAX_LISTEN_RESTARTS} 次）: {err_text}"
+                            ),
+                            **counters,
+                        }
                     try:
                         self._ensure_listening("poll_send_activity_wait_restart")
                     except Exception:
                         return {"seen": saw_any_response, "matched": False, "error": err_text, **counters}
+                    self._sleep_after_listen_restart(listen_restart_attempts)
                     continue
                 return {"seen": saw_any_response, "matched": False, "error": err_text, **counters}
             if response in (None, False):
@@ -1171,7 +1192,10 @@ class NetworkMonitor:
                 break
 
             # 设置超时时间
-            timeout = self._first_response_timeout if not has_seen_stream_target else self._response_interval
+            if active_stream_response is not None:
+                timeout = self.ACTIVE_STREAM_RESPONSE_POLL_TIMEOUT
+            else:
+                timeout = self._first_response_timeout if not has_seen_stream_target else self._response_interval
 
             # 等待响应
             try:
@@ -1192,6 +1216,7 @@ class NetworkMonitor:
                         f"({listen_restart_attempts}/{self.MAX_LISTEN_RESTARTS})"
                     )
                     self._ensure_listening("wait_restart")
+                    self._sleep_after_listen_restart(listen_restart_attempts)
                     continue
                 raise NetworkMonitorError(err_text) from e
 
@@ -1215,8 +1240,8 @@ class NetworkMonitor:
                         last_activity_time = time.time()
                         logger.debug_throttled(
                             f"network.active_stream_growth.{id(self)}",
-                            "[NetworkMonitor] 流响应增长 "
-                            f"(source={next_source}, body={len(next_body)} chars)",
+                            "[NetworkMonitor] 流响应增长中 "
+                            f"(当前大小={len(next_body)} 字节)",
                             interval_sec=10.0,
                         )
                         try:
@@ -1239,7 +1264,10 @@ class NetworkMonitor:
                         self._last_stream_event = dict(active_stream_event or {})
                         self._last_stream_raw_body = str(active_stream_body or "")
                         self._last_stream_parse_result = dict(parse_result or {})
-                        self._record_parse_result_media(parse_result)
+                        try:
+                            self._record_parse_result_media(parse_result)
+                        except Exception as media_exc:
+                            logger.debug(f"[NetworkMonitor] 媒体结果记录失败（忽略）: {media_exc}")
                         try:
                             media_state = self.parser.get_media_generation_state(
                                 raw_response=active_stream_body,
@@ -1259,7 +1287,7 @@ class NetworkMonitor:
 
                         if done:
                             completed_by_done = True
-                            logger.debug("[NetworkMonitor] 检测到结束标志，完成监听")
+                            logger._logger.log(logging.DEBUG - 5, "[NetworkMonitor] 检测到结束标志，完成监听")
                             break
 
                         continue
@@ -1298,10 +1326,9 @@ class NetworkMonitor:
                     )
                     logger.debug_throttled(
                         f"network.wait_first_content.{id(self)}",
-                        "[NetworkMonitor] 等待首段正文 "
-                        f"(idle={silence_duration:.1f}s, "
-                        f"limit={effective_silence_threshold:.1f}s, "
-                        f"body_len={len(active_stream_body or '')})",
+                        "[NetworkMonitor] 等待流式文本解析产出 "
+                        f"(已捕获流长度={len(active_stream_body or '')}, "
+                        f"已静默等待={silence_duration:.1f}s/上限={effective_silence_threshold:.1f}s)",
                         interval_sec=10.0,
                     )
 
@@ -1340,7 +1367,7 @@ class NetworkMonitor:
             # 标记已收到响应（在读取 body 之前！）
             if not has_received_response:
                 has_received_response = True
-                logger.debug("[NetworkMonitor] 已捕获到首次响应")
+                logger._logger.log(logging.DEBUG - 5, "[NetworkMonitor] 已捕获到首次响应")
             total_responses += 1
             last_activity_time = time.time()
             listen_restart_attempts = 0
@@ -1355,7 +1382,7 @@ class NetworkMonitor:
 
             if self.parser.get_id() == "event_only":
                 if total_responses == 1:
-                    logger.debug("[NetworkMonitor] event-only 已捕获到首个网络事件")
+                    logger._logger.log(logging.DEBUG - 5, "[NetworkMonitor] event-only 已捕获到首个网络事件")
                 last_activity_time = time.time()
                 continue
 
@@ -1371,19 +1398,18 @@ class NetworkMonitor:
 
             if not has_seen_stream_target:
                 has_seen_stream_target = True
-                logger.debug("[NetworkMonitor] 已捕获到首个流目标响应")
+                logger._logger.log(logging.DEBUG - 5, "[NetworkMonitor] 已捕获到首个流目标响应")
             stream_target_hits += 1
 
-            logger.debug_throttled(
-                "network.stream_target_hit",
+            logger._logger.log(
+                logging.DEBUG - 5,
                 "[NetworkMonitor] 命中流目标 "
                 f"(status={event.get('status')}, method={event.get('method')}, "
-                f"url={event.get('url', '')[:120]}, count={stream_target_hits})",
-                interval_sec=3.0,
+                f"url={event.get('url', '')[:120]}, count={stream_target_hits})"
             )
 
             if stream_target_hits == 1:
-                logger.debug("[NetworkMonitor] 已捕获到首个有效流响应")
+                logger._logger.log(logging.DEBUG - 5, "[NetworkMonitor] 已捕获到首个有效流响应")
             last_activity_time = time.time()
             active_stream_response = None
             active_stream_event = dict(event or {})
@@ -1463,13 +1489,19 @@ class NetworkMonitor:
                 )
                 continue
 
-            logger.debug_throttled(
-                "network.body_captured",
-                f"[NetworkMonitor] 捕获响应 "
-                f"(responses={total_responses}, targets={stream_target_hits}, "
-                f"source={raw_body_source}, size={len(raw_body)} chars)",
-                interval_sec=3.0,
-            )
+            if stream_target_hits == 1:
+                logger.info(
+                    "[NetworkMonitor] 成功锁定流目标响应 "
+                    f"(status={event.get('status')}, method={event.get('method')}, "
+                    f"url={event.get('url', '')[:120]}, 初始长度={len(raw_body)} 字符)"
+                )
+            else:
+                logger.debug_throttled(
+                    "network.body_captured",
+                    f"[NetworkMonitor] 持续捕获流响应分块 "
+                    f"(targets={stream_target_hits}, source={raw_body_source}, 长度={len(raw_body)} 字符)",
+                    interval_sec=5.0,
+                )
 
             status_code = self._extract_http_status(event)
             if status_code >= 400 and self._extract_http_error_detail(raw_body):
@@ -1522,7 +1554,10 @@ class NetworkMonitor:
             self._last_stream_event = dict(event or {})
             self._last_stream_raw_body = str(raw_body or "")
             self._last_stream_parse_result = dict(parse_result or {})
-            self._record_parse_result_media(parse_result)
+            try:
+                self._record_parse_result_media(parse_result)
+            except Exception as media_exc:
+                logger.debug(f"[NetworkMonitor] 媒体结果记录失败（忽略）: {media_exc}")
             try:
                 media_state = self.parser.get_media_generation_state(
                     raw_response=raw_body,
@@ -1551,15 +1586,14 @@ class NetworkMonitor:
 
             if done:
                 completed_by_done = True
-                logger.debug("[NetworkMonitor] 检测到结束标志，完成监听")
+                logger._logger.log(logging.DEBUG - 5, "[NetworkMonitor] 检测到结束标志，完成监听")
                 break
 
-        logger.debug(
-            "[NetworkMonitor] 监听结束 "
-            f"(responses={total_responses}, targets={stream_target_hits}, "
-            f"chunks={self._total_chunks}, chars={self._total_content_chars}, "
-            f"non_target={non_target_skips}, empty_body={empty_body_skips}, "
-            f"duration={time.time() - phase_start:.1f}s)"
+        logger.info(
+            "[NetworkMonitor] 网络流监听正常完成 "
+            f"(检测到结束标志, 历时={time.time() - phase_start:.1f}s, "
+            f"捕获响应={total_responses}, 产出文本块={self._total_chunks}, "
+            f"提取字符数={self._total_content_chars})"
         )
 
     def get_media_generation_state(self) -> Dict[str, Any]:
@@ -1641,7 +1675,7 @@ class NetworkMonitor:
             self._last_stream_media_items.append(normalized)
             if media_type == "image" and normalized.get("kind") == "url":
                 self._prefetch_image_url(normalized.get("url"))
-        
+
     def _clear_cached_results(self, *, include_media: bool = False) -> None:
         self._prefetched_responses = []
         self._last_stream_event = {}
@@ -1658,23 +1692,35 @@ class NetworkMonitor:
     def _cleanup(self, *, include_media: bool = False):
         """
         清理：停止网络监听并释放额外的 CDP session
-        
+
         tab.listen.stop() 内部会：
         1. 移除所有 Network.* 事件回调
         2. 关闭独立的 Driver 连接（释放额外的 CDP session）
-        
+
         这会关闭 Target.attachToTarget 创建的额外 session，
         消除 Network.enable 的全局副作用。
         """
         if self._is_listening:
             try:
                 self._safe_stop_listen()
-                self._is_listening = False
-                self._pre_started = False
-                logger.debug("[NetworkMonitor] 已停止监听（CDP session 已释放）")
+                logger._logger.log(logging.DEBUG - 5, "[NetworkMonitor] 已停止监听（listen 已释放）")
             except Exception as e:
                 logger.debug(f"[NetworkMonitor] 停止监听失败: {e}")
-        
+            finally:
+                self._is_listening = False
+                self._pre_started = False
+
+            try:
+                if getattr(self, "_cdp_session_listening", False):
+                    network = getattr(self.tab, "network", None)
+                    stop_interception = getattr(network, "stop_interception", None)
+                    if callable(stop_interception):
+                        stop_interception()
+                    self._cdp_session_listening = False
+                    logger._logger.log(logging.DEBUG - 5, "[NetworkMonitor] 已停止 CDP interception")
+            except Exception as e:
+                logger.debug(f"[NetworkMonitor] 停止 CDP interception 失败: {e}")
+
         # 即使 _is_listening 已经是 False，也尝试确保 listen 已停止
         # （防止异常路径导致状态不一致）
         elif self._listen_is_active():

@@ -57,3 +57,7 @@ git提交.py
 
 download_images/
 image/
+
+# Agent 协作与网桥配置文件
+agent_collaboration_rules.md
+.agent_bridge.json

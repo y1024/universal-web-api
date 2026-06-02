@@ -7,10 +7,18 @@ window.LogsTab = {
         paused: { type: Boolean, default: false }
     },
     emits: ['clear', 'change-filter', 'toggle-pause'],
+    data() {
+        return {
+            expandedRawLogs: {}
+        };
+    },
     computed: {
         filteredLogs() {
             if (this.filter === 'ALL') {
                 return this.logs;
+            }
+            if (this.filter === 'INFO') {
+                return this.logs.filter(log => log.level === 'INFO' || log.level === 'OK');
             }
             return this.logs.filter(log => log.level === this.filter);
         }
@@ -18,6 +26,26 @@ window.LogsTab = {
     methods: {
         getLogText(log) {
             return log.messageText || log.message || '';
+        },
+
+        getRawLogText(log) {
+            return log.originalMessageText || log.message || this.getLogText(log);
+        },
+
+        hasRawLogText(log) {
+            return Boolean(log && log.messageAlias && this.getRawLogText(log));
+        },
+
+        isRawExpanded(log) {
+            return Boolean(this.expandedRawLogs[String(log.id)]);
+        },
+
+        toggleRawLog(log) {
+            const key = String(log.id);
+            this.expandedRawLogs = {
+                ...this.expandedRawLogs,
+                [key]: !this.expandedRawLogs[key]
+            };
         },
 
         isKeyCmdLog(message) {
@@ -135,14 +163,20 @@ window.LogsTab = {
                         <span v-if="log.logger" class="px-1.5 py-0.5 rounded bg-white/70 dark:bg-gray-900/40 text-gray-600 dark:text-gray-300">
                             {{ log.logger }}
                         </span>
-                        <span v-if="log.requestId" class="px-1.5 py-0.5 rounded bg-white/70 dark:bg-gray-900/40 text-gray-500 dark:text-gray-400">
-                            {{ log.requestId }}
+                        <span v-if="log.requestTag || log.requestId" class="px-1.5 py-0.5 rounded bg-white/70 dark:bg-gray-900/40 text-gray-500 dark:text-gray-400">
+                            {{ log.requestTag || log.requestId }}
                         </span>
                     </div>
-                    <div class="mt-1 dark:text-gray-200 break-all whitespace-pre-wrap"
-                         :title="log.messageAlias ? ('原文：' + (log.originalMessageText || '')) : ''">
-                        {{ getLogText(log) }}
+                    <div class="mt-1 dark:text-gray-200 break-all whitespace-pre-wrap">
+                        <span>{{ getLogText(log) }}</span>
+                        <button v-if="hasRawLogText(log)"
+                                @click="toggleRawLog(log)"
+                                class="ml-2 inline-flex items-center rounded border border-gray-300 px-1.5 py-0.5 text-xs text-gray-600 hover:bg-white/70 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-900/50">
+                            {{ isRawExpanded(log) ? '收起原文' : '展开原文' }}
+                        </button>
                     </div>
+                    <pre v-if="hasRawLogText(log) && isRawExpanded(log)"
+                         class="mt-2 max-h-64 overflow-auto rounded bg-gray-950 p-2 text-xs text-gray-100 whitespace-pre-wrap break-words select-all">{{ getRawLogText(log) }}</pre>
                 </div>
                 <div v-if="filteredLogs.length === 0" 
                      class="text-center text-gray-400 dark:text-gray-500 py-8">

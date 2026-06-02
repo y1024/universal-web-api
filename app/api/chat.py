@@ -48,6 +48,32 @@ router = APIRouter()
 STREAM_QUEUE_POLL_TIMEOUT = 0.5
 SSE_HEARTBEAT_INTERVAL = 15.0
 
+
+def _put_worker_queue_item(
+    chunk_queue: queue.Queue,
+    ctx: RequestContext,
+    item: Any,
+    *,
+    final: bool = False,
+) -> bool:
+    """Put worker output with bounded backpressure and cancellation awareness."""
+    deadline = time.monotonic() + 5.0 if final else None
+
+    while final or not ctx.should_stop():
+        try:
+            chunk_queue.put(item, timeout=STREAM_QUEUE_POLL_TIMEOUT)
+            return True
+        except queue.Full:
+            if final:
+                if ctx.should_stop() or (deadline is not None and time.monotonic() >= deadline):
+                    return False
+                continue
+            if ctx.should_stop():
+                return False
+
+    return False
+
+
 def _extract_stream_error_message(chunk: Any) -> str:
     if not isinstance(chunk, str) or not chunk.startswith("data: "):
         return ""
@@ -1203,18 +1229,20 @@ async def _stream_with_lifecycle(
                         else:
                             logger.info(f"工作线程检测到取消: {cancel_reason}")
                         break
-                    chunk_queue.put(chunk)
+                    if not _put_worker_queue_item(chunk_queue, ctx, chunk):
+                        logger.debug("工作线程停止入队，结束流式生产")
+                        break
 
             except Exception as e:
                 logger.error(f"工作线程异常: {e}")
-                chunk_queue.put(("ERROR", str(e)))
+                _put_worker_queue_item(chunk_queue, ctx, ("ERROR", str(e)), final=True)
             finally:
                 if gen is not None:
                     try:
                         gen.close()
                     except Exception as e:
                         logger.debug(f"关闭工作流生成器失败（忽略）: {e}")
-                chunk_queue.put(None)
+                _put_worker_queue_item(chunk_queue, ctx, None, final=True)
                 logger.debug("工作线程结束")
 
         worker_thread = threading.Thread(target=worker, daemon=True)

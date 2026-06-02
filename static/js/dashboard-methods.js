@@ -534,6 +534,7 @@
                             kind: String(kind || '').toUpperCase(),
                             logger: log.logger || '',
                             requestId: log.request_id || 'SYSTEM',
+                            requestTag: log.request_tag || log.request_id || 'SYSTEM',
                             message: log.display_message || log.message || messageText,
                             messageText,
                             originalMessageText: log.original_message_text || messageText,
