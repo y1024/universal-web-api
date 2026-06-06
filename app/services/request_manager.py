@@ -98,6 +98,20 @@ class RequestContext:
             if reason:
                 self.cancel_reason = reason
     
+    
+    def mark_completed(self):
+        with self._lock:
+            if self.status == RequestStatus.RUNNING:
+                self.status = RequestStatus.COMPLETED
+            self.finished_at = time.time()
+    
+    def mark_failed(self, reason: str = None):
+        with self._lock:
+            self.status = RequestStatus.FAILED
+            self.finished_at = time.time()
+            if reason:
+                self.cancel_reason = reason
+    
     def get_duration(self) -> float:
         end = self.finished_at or time.time()
         start = self.started_at or self.created_at
@@ -125,6 +139,7 @@ class RequestManager:
         
     # 僵尸请求超时时间（秒）- 超过此时间的 RUNNING 请求将被强制清理
     ZOMBIE_TTL = _get_positive_int_env("REQUEST_ZOMBIE_TTL", 600)
+
     def __new__(cls):
         if cls._instance is None:
             with cls._instance_lock:
@@ -149,7 +164,10 @@ class RequestManager:
         self._monitor_history: List[Dict[str, Any]] = []
         self._history_lock = threading.Lock()
         self._history_save_lock = threading.Lock()
+
         self.total_requests = 0
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
         self._load_stats()
         self._load_history()
         
@@ -163,6 +181,8 @@ class RequestManager:
                 with open(self._stats_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.total_requests = data.get("total_requests", 0)
+                    self.total_input_tokens = data.get("total_input_tokens", 0)
+                    self.total_output_tokens = data.get("total_output_tokens", 0)
         except Exception as e:
             logger.debug(f"加载状态失败: {e}")
 
@@ -170,7 +190,11 @@ class RequestManager:
         try:
             os.makedirs(os.path.dirname(self._stats_file), exist_ok=True)
             with open(self._stats_file, "w", encoding="utf-8") as f:
-                json.dump({"total_requests": self.total_requests}, f)
+                json.dump({
+                    "total_requests": self.total_requests,
+                    "total_input_tokens": self.total_input_tokens,
+                    "total_output_tokens": self.total_output_tokens
+                }, f)
         except Exception as e:
             logger.debug(f"保存状态失败: {e}")
 
@@ -187,6 +211,13 @@ class RequestManager:
                     if isinstance(item, dict)
                 ]
                 self._monitor_history = self._sort_history_records(normalized_records)[-200:]
+                
+                # 如果没有持久化的 token 统计，从已有的 200 条历史请求中求和做初次填充
+                if self.total_input_tokens == 0 and self.total_output_tokens == 0:
+                    for record in self._monitor_history:
+                        estimate = record.get("token_estimate") or {}
+                        self.total_input_tokens += estimate.get("prompt", 0)
+                        self.total_output_tokens += estimate.get("response", 0)
         except Exception as e:
             logger.debug(f"加载请求历史失败: {e}")
             self._monitor_history = []
@@ -218,6 +249,9 @@ class RequestManager:
         text = "" if value is None else str(value)
         if not text:
             return ""
+
+        if "[内容已截断，原始长度" in text:
+            return text
 
         data_uri_pattern = re.compile(
             r"data:(?:image|audio|video)/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]{1024,}",
@@ -484,6 +518,17 @@ class RequestManager:
         model = str(payload_dict.get("model") or "").strip()
         resolved_preset = str(preset_name or payload_dict.get("preset_name") or "").strip()
 
+        # 计算完整、未截断的 Prompt 估算 Token
+        raw_prompt_for_tokens = ""
+        if isinstance(messages, list):
+            raw_prompt_for_tokens = "\n\n".join(
+                f"{msg.get('role', 'message')}: {self._content_to_text(msg.get('content'))}"
+                for msg in messages if isinstance(msg, dict)
+            )
+        else:
+            raw_prompt_for_tokens = str(messages or "")
+        prompt_tokens = self._estimate_tokens(raw_prompt_for_tokens)
+
         with ctx._lock:
             ctx.monitor.update({
                 "endpoint": endpoint,
@@ -496,6 +541,7 @@ class RequestManager:
                 "is_stream": is_stream,
                 "is_multimodal": self._has_multimodal_payload(messages),
                 "prompt": prompt_text,
+                "prompt_tokens": prompt_tokens,
                 "payload": self._sanitize_for_storage(payload_dict),
             })
 
@@ -569,6 +615,9 @@ class RequestManager:
         sanitized_payload = self._sanitize_for_storage(payload)
         payload_error_code = self._extract_error_code(payload)
 
+        # 计算完整、未截断的 Completion 估算 Token
+        response_tokens = self._estimate_tokens(text)
+
         with ctx._lock:
             if text:
                 ctx.monitor["response_text"] = self._sanitize_text_for_storage(text, max_chars=30000)
@@ -577,6 +626,7 @@ class RequestManager:
                 ctx.monitor["has_response_media"] = True
                 ctx.monitor["is_multimodal"] = True
             ctx.monitor["response_payload"] = sanitized_payload
+            ctx.monitor["response_tokens"] = response_tokens
             if payload_error_code or error_code:
                 ctx.monitor["error_code"] = payload_error_code or error_code
 
@@ -618,8 +668,13 @@ class RequestManager:
         response_text = self._sanitize_text_for_storage(response_text, max_chars=30000)
         prompt_text = self._sanitize_text_for_storage(monitor.get("prompt", ""), max_chars=20000)
 
-        prompt_tokens = self._estimate_tokens(prompt_text)
-        response_tokens = self._estimate_tokens(response_text)
+        prompt_tokens = monitor.get("prompt_tokens")
+        if prompt_tokens is None:
+            prompt_tokens = self._estimate_tokens(prompt_text)
+
+        response_tokens = monitor.get("response_tokens")
+        if response_tokens is None:
+            response_tokens = self._estimate_tokens(response_text)
         media_items = monitor.get("media_items") if isinstance(monitor.get("media_items"), list) else []
         has_meaningful_response = bool(response_text.strip()) or len(media_items) > 0
 
@@ -677,6 +732,11 @@ class RequestManager:
             },
         }
         record = self._normalize_history_record(record)
+
+        with self._requests_lock:
+            self.total_input_tokens += prompt_tokens
+            self.total_output_tokens += response_tokens
+            threading.Thread(target=self._save_stats, daemon=True).start()
 
         with self._history_lock:
             self._monitor_history.append(record)

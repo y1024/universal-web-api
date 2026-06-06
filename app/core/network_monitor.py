@@ -1609,6 +1609,12 @@ class NetworkMonitor:
     def get_stream_media_items(self) -> list[Dict[str, Any]]:
         return [dict(item) for item in (self._last_stream_media_items or []) if isinstance(item, dict)]
 
+    def get_total_content_chars(self) -> int:
+        try:
+            return max(0, int(self._total_content_chars or 0))
+        except Exception:
+            return 0
+
     def _prefetch_image_url(self, url: str) -> bool:
         normalized = normalize_remote_image_url(url)
         if not normalized or normalized in self._prefetched_image_urls:

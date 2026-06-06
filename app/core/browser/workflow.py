@@ -1239,8 +1239,6 @@ class BrowserWorkflowMixin:
                     if self._message_declares_image(m):
                         last_user_with_image = m
                         break
-                    if not self._is_tool_output_format_reminder(m):
-                        break
                     continue
                 if self._message_declares_image(m):
                     last_user_with_image = m

@@ -3016,7 +3016,8 @@ class TabPoolManager:
 
         matches: List[TabSession] = []
         for session in self._tabs.values():
-            _current_url, actual_domain = session.get_cached_route_snapshot()
+            current_url = session._safe_get_url()
+            actual_domain = session._refresh_current_domain(current_url)
             if route_domain_matches(target, actual_domain):
                 matches.append(session)
 
@@ -3154,7 +3155,8 @@ class TabPoolManager:
 
         matches: List[TabSession] = []
         for session in self._tabs.values():
-            current_url, _actual_domain = session.get_cached_route_snapshot()
+            current_url = session._safe_get_url()
+            session._refresh_current_domain(current_url)
             if tab_url_matches(target, current_url):
                 matches.append(session)
 
@@ -3589,7 +3591,7 @@ class TabPoolManager:
 
         result = []
         for session in sessions:
-            info = session.get_info(use_cached_url=True)
+            info = session.get_info()
             tab_route_prefix = f"/tab/{session.persistent_index}"
             route_domain = str(info.get("route_domain") or "").strip()
             domain_route_prefix = f"/url/{route_domain}" if route_domain else ""
@@ -3671,7 +3673,7 @@ class TabPoolManager:
             known_raw_tabs = len(self._known_tab_ids)
             last_scan = round(time.time() - self._last_scan_time, 1)
 
-        tabs_info = [s.get_info(use_cached_url=True) for s in sessions]
+        tabs_info = [s.get_info() for s in sessions]
 
         return {
             "total": total,

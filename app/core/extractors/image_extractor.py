@@ -533,7 +533,7 @@ class ImageExtractor:
             is_quiet = bool(final_config.get("quiet", False))
             if not is_quiet or len(images) > 0:
                 logger.debug(
-                    f"提取完成: {len(images)} 张图片 (selector={js_opts['selector']}, "
+                    f"图片查找完成: {len(images)} 张图片 (selector={js_opts['selector']}, "
                     f"scope={scope}, nodes={node_count})"
                 )
                 for img in images[:5]:  # 最多记录前 5 张

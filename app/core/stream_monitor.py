@@ -120,6 +120,8 @@ class StreamContext:
         self.output_target_count = 0
         self.pending_new_anchor = None
         self.pending_new_anchor_seen = 0
+        self.network_sent_content_length = 0
+        self.from_send_baseline = False
 
     def reset_for_new_target(self):
         """切换到新目标节点时重置状态"""
@@ -130,6 +132,24 @@ class StreamContext:
         self.active_turn_baseline_len = 0
         self.content_ever_changed = False
         # v5.5: 不重置 images_detected，保持图片检测状态
+
+    def apply_network_sent_offset(self, sent_length: int, current_text: str = "") -> bool:
+        try:
+            sent_length = max(0, int(sent_length or 0))
+        except Exception:
+            sent_length = 0
+        if sent_length <= 0:
+            return False
+
+        if len(current_text or "") < int(self.active_turn_baseline_len or 0) + sent_length:
+            return False
+
+        self.sent_content_length = sent_length
+        self.network_sent_content_length = sent_length
+        self.max_seen_text = current_text or self.max_seen_text
+        self.last_stable_text = current_text or self.last_stable_text
+        self.content_ever_changed = True
+        return True
 
     def calculate_diff(self, current_text: str) -> Tuple[str, bool, Optional[str]]:
         """v5 增强版 diff：支持前缀校验"""
@@ -281,6 +301,7 @@ class StreamMonitor:
         self._expect_image_output = False
         self._prefetched_image_urls: set[str] = set()
         self._last_visual_reply_log_info = None
+        self._pending_send_baseline: Optional[Dict[str, Any]] = None
 
     def _sanitize_stream_text(self, text: str) -> str:
         if not text:
@@ -358,8 +379,34 @@ class StreamMonitor:
         target = best[6]
         return target, self.extractor.get_anchor(target)
 
-    def monitor(self, selector: str, user_input: str = "",
-                completion_id: Optional[str] = None) -> Generator[str, None, None]:
+    def capture_send_baseline(self, selector: str) -> Dict[str, Any]:
+        """Capture the DOM reply baseline immediately after a submit action."""
+        self._last_visual_reply_log_info = None
+        baseline = self._get_latest_message_snapshot(selector)
+        self._pending_send_baseline = dict(baseline or {})
+        self._pending_send_baseline["_captured_after_send"] = True
+        self._pending_send_baseline["_captured_at"] = time.time()
+        logger.debug(
+            "[DOM_BASELINE] 已捕获发送后 DOM 基线: "
+            f"count={int(baseline.get('groups_count', 0) or 0)}, "
+            f"text_len={int(baseline.get('text_len', 0) or 0)}, "
+            f"images={int(baseline.get('image_count', 0) or 0)}"
+        )
+        return dict(self._pending_send_baseline or {})
+
+    def consume_send_baseline(self) -> Optional[Dict[str, Any]]:
+        baseline = self._pending_send_baseline
+        self._pending_send_baseline = None
+        return dict(baseline) if isinstance(baseline, dict) else None
+
+    def monitor(
+        self,
+        selector: str,
+        user_input: str = "",
+        completion_id: Optional[str] = None,
+        baseline_snapshot: Optional[Dict[str, Any]] = None,
+        sent_content_length: int = 0,
+    ) -> Generator[str, None, None]:
         self._last_visual_reply_log_info = None
         logger.debug("流式监听启动")
         logger.debug(f"[MONITOR] selector_raw={selector!r}, image_enabled={self._image_extraction_enabled}")
@@ -385,7 +432,21 @@ class StreamMonitor:
         )
 
         # ===== 阶段 0：instant baseline =====
-        ctx.instant_baseline = self._get_latest_message_snapshot(selector)
+        if baseline_snapshot is None:
+            baseline_snapshot = self.consume_send_baseline()
+
+        if isinstance(baseline_snapshot, dict) and baseline_snapshot:
+            ctx.instant_baseline = dict(baseline_snapshot)
+            ctx.from_send_baseline = bool(ctx.instant_baseline.get("_captured_after_send"))
+            logger.debug(
+                "[DOM_BASELINE] 使用预捕获发送基线: "
+                f"count={int(ctx.instant_baseline.get('groups_count', 0) or 0)}, "
+                f"text_len={int(ctx.instant_baseline.get('text_len', 0) or 0)}, "
+                f"network_sent={max(0, int(sent_content_length or 0))}"
+            )
+        else:
+            ctx.instant_baseline = self._get_latest_message_snapshot(selector)
+        ctx.baseline_snapshot = ctx.instant_baseline
         ctx.instant_last_node_len = ctx.instant_baseline.get('text_len', 0)
         ctx.baseline_image_count = ctx.instant_baseline.get('image_count', 0)  # 🆕
         
@@ -412,6 +473,16 @@ class StreamMonitor:
             instant_count = ctx.instant_baseline['groups_count']
 
             if current_count == instant_count + 1:
+                if ctx.from_send_baseline:
+                    logger.debug(
+                        "[DOM_BASELINE] 发送基线后检测到新输出节点，直接进入 DOM 接管"
+                    )
+                    ctx.user_msg_confirmed = True
+                    ctx.user_baseline = current_snapshot
+                    ctx.active_turn_started = True
+                    ctx.active_turn_baseline_len = 0
+                    break
+
                 logger.debug(f"用户消息上屏 ({instant_count} -> {current_count})")
                 ctx.user_msg_confirmed = True
                 ctx.user_baseline = current_snapshot
@@ -496,6 +567,22 @@ class StreamMonitor:
 
         # ===== 阶段 3：增量输出 =====
         if ctx.active_turn_started:
+            if sent_content_length:
+                current_snapshot = self._get_latest_message_snapshot(selector)
+                current_text = current_snapshot.get("text", "") or ""
+                seed_len = max(0, int(sent_content_length or 0))
+                if ctx.apply_network_sent_offset(seed_len, current_text):
+                    logger.debug(
+                        "[DOM_FALLBACK] 已同步网络偏移: "
+                        f"baseline_len={ctx.active_turn_baseline_len}, "
+                        f"sent={ctx.sent_content_length}, current_len={len(current_text)}"
+                    )
+                else:
+                    logger.debug(
+                        "[DOM_FALLBACK] 网络偏移暂不适用，DOM 当前文本较短: "
+                        f"baseline_len={ctx.active_turn_baseline_len}, "
+                        f"sent={seed_len}, current_len={len(current_text)}"
+                    )
             yield from self._stream_output_phase(selector, ctx, completion_id=completion_id)
         else:
             logger.warning("[Exit] 未检测到 AI 回复，退出监控")
@@ -797,6 +884,16 @@ class StreamMonitor:
                         has_output = False
                         last_text_len = current_text_len
                         last_image_count = current_image_count
+                        if ctx.network_sent_content_length > 0:
+                            if ctx.apply_network_sent_offset(
+                                ctx.network_sent_content_length,
+                                current_text,
+                            ):
+                                has_output = True
+                                logger.debug(
+                                    "[DOM_FALLBACK] 新输出节点已继承网络偏移: "
+                                    f"sent={ctx.sent_content_length}, current_len={current_text_len}"
+                                )
 
                         if not current_text:
                             time.sleep(0.2)
@@ -887,6 +984,10 @@ class StreamMonitor:
             silence_threshold = BrowserConstants.STREAM_SILENCE_THRESHOLD
             silence_threshold_fallback = BrowserConstants.STREAM_SILENCE_THRESHOLD_FALLBACK
             stable_count_threshold = BrowserConstants.STREAM_STABLE_COUNT_THRESHOLD
+            if ctx.network_sent_content_length > 0:
+                silence_threshold = min(float(silence_threshold), 1.2)
+                silence_threshold_fallback = min(float(silence_threshold_fallback), 2.0)
+                stable_count_threshold = min(int(stable_count_threshold), 2)
             image_mode_enabled = self._expect_image_output
             no_visible_progress = (
                 image_mode_enabled

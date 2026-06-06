@@ -73,7 +73,7 @@
           "network": {
             "listen_pattern": "GenerateContent",
             "parser": "aistudio",
-            "silence_threshold": 3,
+            "silence_threshold": 6,
             "response_interval": 0.5
           }
         },
@@ -857,7 +857,7 @@
             "stream_match_mode": "regex",
             "stream_match_pattern": "/_/BardChatUi/data/assistant\\.lamda\\.BardFrontendService/StreamGenerate(?:$|[?#])",
             "parser": "gemini",
-            "silence_threshold": 3,
+            "silence_threshold": 6,
             "response_interval": 1
           }
         },
@@ -1131,7 +1131,7 @@
             "stream_match_mode": "regex",
             "stream_match_pattern": "/_/BardChatUi/data/assistant\\.lamda\\.BardFrontendService/StreamGenerate(?:$|[?#])",
             "parser": "gemini",
-            "silence_threshold": 3,
+            "silence_threshold": 6,
             "response_interval": 1
           }
         },

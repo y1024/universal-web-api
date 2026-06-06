@@ -12,6 +12,7 @@ import json
 import os
 import copy
 import re
+import threading
 from app.core.config import get_logger
 from typing import Dict, Optional, List, Any
 from urllib.parse import urljoin
@@ -135,6 +136,7 @@ class ConfigEngine:
     def __init__(self):
         self.config_file = ConfigConstants.CONFIG_FILE
         self.local_sites_file = ConfigConstants.SITES_LOCAL_FILE
+        self._io_lock = threading.RLock()
         self.last_mtime = 0.0
         self.last_local_mtime = 0.0
         self.sites: Dict[str, SiteConfig] = {}
@@ -166,6 +168,10 @@ class ConfigEngine:
     # ================= 配置加载与保存 =================
     
     def _load_config(self):
+        with self._io_lock:
+            return self._load_config_locked()
+
+    def _load_config_locked(self):
         """初始化加载配置文件"""
         if not os.path.exists(self.config_file):
             logger.info(f"配置文件 {self.config_file} 不存在，将创建新文件")
@@ -215,6 +221,10 @@ class ConfigEngine:
             logger.error(f"检查文件变化失败: {e}")
 
     def reload_config(self):
+        with self._io_lock:
+            return self._reload_config_locked()
+
+    def _reload_config_locked(self):
         """重新加载配置（Hot Reload）"""
         if not os.path.exists(self.config_file):
             logger.warning("重载失败：配置文件不存在")
@@ -255,6 +265,10 @@ class ConfigEngine:
         return self._save_config()
     
     def _save_config(self) -> bool:
+        with self._io_lock:
+            return self._save_config_locked()
+
+    def _save_config_locked(self) -> bool:
         """保存配置文件（原子写入版）"""
         tmp_file = self.config_file + ".tmp"
         
@@ -308,6 +322,10 @@ class ConfigEngine:
             return False
 
     def _load_local_site_overrides(self) -> Dict[str, str]:
+        with self._io_lock:
+            return self._load_local_site_overrides_locked()
+
+    def _load_local_site_overrides_locked(self) -> Dict[str, str]:
         """加载本地站点覆盖配置，并保留未识别字段。"""
         if not os.path.exists(self.local_sites_file):
             self.last_local_mtime = 0.0
@@ -433,6 +451,10 @@ class ConfigEngine:
             logger.debug(f"已应用 {applied} 个本地默认预设覆盖")
 
     def _save_local_site_overrides(self) -> bool:
+        with self._io_lock:
+            return self._save_local_site_overrides_locked()
+
+    def _save_local_site_overrides_locked(self) -> bool:
         """保存本地站点覆盖配置。"""
         tmp_file = self.local_sites_file + ".tmp"
         self._prune_default_preset_maps()
@@ -975,18 +997,19 @@ class ConfigEngine:
 
     def set_site_advanced_config(self, domain: str, config: Dict[str, Any]) -> bool:
         """设置站点级高级配置。"""
-        self.refresh_if_changed()
+        with self._io_lock:
+            self.refresh_if_changed()
 
-        site = self.sites.get(domain)
-        if not site:
-            logger.warning(f"站点不存在: {domain}")
-            return False
+            site = self.sites.get(domain)
+            if not site:
+                logger.warning(f"站点不存在: {domain}")
+                return False
 
-        existing = site.get("advanced") if isinstance(site.get("advanced"), dict) else {}
-        normalized = self._normalize_site_advanced_config(config or {}, base_config=existing)
+            existing = site.get("advanced") if isinstance(site.get("advanced"), dict) else {}
+            normalized = self._normalize_site_advanced_config(config or {}, base_config=existing)
 
-        site["advanced"] = normalized
-        return self._save_config()
+            site["advanced"] = normalized
+            return self._save_config_locked()
 
     def set_preset_advanced_config(
         self,
@@ -995,31 +1018,34 @@ class ConfigEngine:
         preset_name: str = None,
     ) -> bool:
         """设置当前预设的工作流时序类高级配置。"""
-        self.refresh_if_changed()
+        with self._io_lock:
+            self.refresh_if_changed()
 
-        data = self._get_site_data(domain, preset_name)
-        if data is None:
-            logger.warning(f"站点或预设不存在: {domain}/{preset_name}")
-            return False
+            data = self._get_site_data(domain, preset_name)
+            if data is None:
+                logger.warning(f"站点或预设不存在: {domain}/{preset_name}")
+                return False
 
-        site_base = self.get_site_advanced_config(domain)
-        normalized = self._normalize_site_advanced_config(
-            config or {},
-            base_config=site_base,
-        )
+            stored = copy.deepcopy(data.get("advanced") or {})
+            if not isinstance(stored, dict):
+                stored = {}
 
-        stored = copy.deepcopy(data.get("advanced") or {})
-        if not isinstance(stored, dict):
-            stored = {}
+            normalized = self._normalize_site_advanced_config(
+                config or {},
+                base_config=stored,
+            )
 
-        provided_keys = set((config or {}).keys()) if isinstance(config, dict) else set()
-        for key in PRESET_ADVANCED_FIELDS:
-            if key == "url_transition_wait_patterns" and key not in provided_keys:
-                continue
-            stored[key] = normalized[key]
+            provided_keys = {
+                key
+                for key in ((config or {}).keys() if isinstance(config, dict) else set())
+                if key in PRESET_ADVANCED_FIELDS
+            }
+            for key in PRESET_ADVANCED_FIELDS:
+                if key in provided_keys:
+                    stored[key] = normalized[key]
 
-        data["advanced"] = stored
-        return self._save_config()
+            data["advanced"] = stored
+            return self._save_config_locked()
 
     def set_default_preset(self, domain: str, preset_name: str) -> bool:
         """设置指定站点的默认预设"""

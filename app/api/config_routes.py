@@ -257,7 +257,12 @@ async def set_site_advanced_config(
     if domain not in config_engine.sites:
         raise HTTPException(status_code=404, detail=f"配置不存在: {domain}")
 
-    payload = {
+    provided_fields = getattr(body, "model_fields_set", None)
+    if provided_fields is None:
+        provided_fields = getattr(body, "__fields_set__", set())
+    preset_name = str(body.preset_name or "").strip()
+
+    all_payload = {
         "independent_cookies": bool(body.independent_cookies),
         "independent_cookies_auto_takeover": bool(body.independent_cookies_auto_takeover),
         "input_box_stability_wait_enabled": bool(body.input_box_stability_wait_enabled),
@@ -267,18 +272,22 @@ async def set_site_advanced_config(
         "send_confirmation_check_enabled": bool(body.send_confirmation_check_enabled),
         "send_confirmation_check_timeout": float(body.send_confirmation_check_timeout),
     }
-    provided_fields = getattr(body, "model_fields_set", None)
-    if provided_fields is None:
-        provided_fields = getattr(body, "__fields_set__", set())
     if "url_transition_wait_patterns" in provided_fields:
-        payload["url_transition_wait_patterns"] = [
+        all_payload["url_transition_wait_patterns"] = [
             str(pattern or "").strip()
             for pattern in (body.url_transition_wait_patterns or [])
             if str(pattern or "").strip()
         ]
+    if preset_name:
+        payload = {
+            key: value
+            for key, value in all_payload.items()
+            if key in provided_fields
+        }
+    else:
+        payload = all_payload
 
     try:
-        preset_name = str(body.preset_name or "").strip()
         if preset_name:
             success = config_engine.set_preset_advanced_config(
                 domain,

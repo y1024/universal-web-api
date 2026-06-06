@@ -10,6 +10,7 @@ app/utils/file_paste.py - 文件粘贴工具
 import os
 import tempfile
 import shutil
+import time
 from app.core.config import get_logger
 from pathlib import Path
 from typing import Optional
@@ -29,6 +30,32 @@ TEMP_DIR = _PROJECT_ROOT / "temp"
 TRANSCODED_CACHE_DIR = _PROJECT_ROOT / "download_images" / "_transcoded"
 
 
+def _get_temp_cleanup_min_age_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("TEMP_CLEANUP_MIN_AGE_SECONDS", "3600")))
+    except Exception:
+        return 3600.0
+
+
+TEMP_CLEANUP_MIN_AGE_SECONDS = _get_temp_cleanup_min_age_seconds()
+
+
+def _is_path_old_enough_for_cleanup(path: Path, now: float) -> bool:
+    try:
+        if now - path.stat().st_mtime < TEMP_CLEANUP_MIN_AGE_SECONDS:
+            return False
+        if path.is_dir():
+            for child in path.rglob("*"):
+                try:
+                    if now - child.stat().st_mtime < TEMP_CLEANUP_MIN_AGE_SECONDS:
+                        return False
+                except Exception:
+                    return False
+        return True
+    except Exception:
+        return False
+
+
 def _temp_log_label(filepath: str) -> str:
     """Return a short temp-file label for logs without exposing absolute paths."""
     name = Path(str(filepath or "")).name
@@ -43,14 +70,15 @@ def ensure_temp_dir() -> Path:
 
 def cleanup_temp_dir():
     """
-    清理 temp 目录中的所有内容
-    
+    清理 temp 目录中的过期内容
+
     调用时机：
     - 程序启动时
     - 程序退出时
     """
     try:
         count = 0
+        now = time.time()
         for target_dir, label_prefix in (
             (TEMP_DIR, "temp"),
             (TRANSCODED_CACHE_DIR, "download_images/_transcoded"),
@@ -59,6 +87,8 @@ def cleanup_temp_dir():
                 continue
             for item in target_dir.iterdir():
                 try:
+                    if not _is_path_old_enough_for_cleanup(item, now):
+                        continue
                     if item.is_file():
                         item.unlink()
                         count += 1

@@ -803,6 +803,8 @@ class WorkflowExecutorActionMixin:
                         else:
                             ele.click()
 
+                if target_key == "send_btn":
+                    self._capture_dom_send_baseline("click")
                 self._smart_delay(
                     BrowserConstants.ACTION_DELAY_MIN,
                     BrowserConstants.ACTION_DELAY_MAX
@@ -1315,7 +1317,7 @@ class WorkflowExecutorActionMixin:
                     if (sel) {
                         el = document.querySelector(sel);
                     }
-                    if (!el) {
+                    if (!el && !sel) {
                         el = document.querySelector('textarea, [contenteditable="true"], input[type="text"]');
                     }
                     if (!el) return 0;
@@ -1339,7 +1341,7 @@ class WorkflowExecutorActionMixin:
             if after_len == 0 and before_len > 0:
                 return True
             if before_len <= 0:
-                return False
+                return after_len == 0
             if after_len <= int(before_len * 0.4):
                 return True
             return False
@@ -1575,8 +1577,12 @@ class WorkflowExecutorActionMixin:
 
             try:
                 latest_url = str(self.tab.url or "")
-            except Exception:
-                latest_url = ""
+            except Exception as exc:
+                logger.warning(
+                    "[TRANSITION_ERROR] 等待新建对话 URL 切换时读取当前 URL 失败，触发工作流重试: "
+                    f"before={self._compact_log_value(previous_url, 140)}, error={exc}"
+                )
+                raise WorkflowError("new_chat_transition_url_unavailable") from exc
 
             if latest_url and latest_url != previous_url:
                 logger.info(

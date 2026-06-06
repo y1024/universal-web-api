@@ -97,7 +97,12 @@ function saveStoredSitesCache(sites, currentDomain) {
             systemStats: {
                 memory_mb: 0,
                 disk_status: '加载中...',
-                total_requests: 0
+                total_requests: 0,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                cpu_percent: 0,
+                project_cpu: 0,
+                memory_percent: 0
             },
 
             // 认证
@@ -195,7 +200,7 @@ function saveStoredSitesCache(sites, currentDomain) {
                 error: ''
             },
             updateCheckTimer: null,
-            switchingTag: null,           // 正在切换的 tag
+            switchingTag: null,           // 正在切换ηγ tag
             switchStatusPolling: null,    // 轮询定时器
             showChangelogModal: false,
             changelogContent: '',

@@ -1264,14 +1264,9 @@ def _find_project_browser_root_processes(
             if process_type:
                 continue
 
-            user_data_dir = _extract_process_flag_value(cmdline, "--user-data-dir")
-            proc_profile_norm = _normalize_path_for_compare(user_data_dir)
             proc_debug_port = _extract_process_flag_value(cmdline, "--remote-debugging-port")
             if not (
-                profile_root_norm
-                and proc_profile_norm
-                and proc_profile_norm == profile_root_norm
-                and debug_port
+                debug_port
                 and proc_debug_port == debug_port
             ):
                 continue
@@ -1308,6 +1303,97 @@ def _get_project_memory_mb() -> float:
 
         return round(total_bytes / (1024 * 1024), 1)
     except Exception:
+        return 0.0
+
+
+_PROJECT_PROCESS_CACHE: Dict[int, _psutil.Process] = {}
+_PROJECT_PROCESS_CACHE_LOCK: Optional[Any] = None
+
+
+def _get_project_cpu_percent() -> float:
+    """估算本项目（包含主 Python 进程及其下所有 Chrome 调试浏览器进程）的总 CPU 占比，除以核心数折算为 0-100% 格式。"""
+    global _PROJECT_PROCESS_CACHE, _PROJECT_PROCESS_CACHE_LOCK
+
+    if _PROJECT_PROCESS_CACHE_LOCK is None:
+        import threading
+        _PROJECT_PROCESS_CACHE_LOCK = threading.Lock()
+
+    try:
+        project_dir = Path(__file__).resolve().parents[2]
+        main_pid = _os.getpid()
+
+        with _PROJECT_PROCESS_CACHE_LOCK:
+            if main_pid not in _PROJECT_PROCESS_CACHE:
+                try:
+                    _PROJECT_PROCESS_CACHE[main_pid] = _psutil.Process(main_pid)
+                except Exception:
+                    pass
+
+            main_proc = _PROJECT_PROCESS_CACHE.get(main_pid)
+            if not main_proc:
+                return 0.0
+
+            try:
+                python_descendants = main_proc.children(recursive=True)
+            except Exception:
+                python_descendants = []
+
+            python_descendant_pids = {
+                int(child.pid)
+                for child in python_descendants
+                if getattr(child, "pid", None) is not None
+            }
+
+            browser_roots = _find_project_browser_root_processes(
+                main_proc,
+                project_dir=project_dir,
+                python_descendant_pids=python_descendant_pids,
+            )
+
+            # 收集所有相关的当前活跃 PID
+            target_pids = {main_pid}
+            target_pids.update(python_descendant_pids)
+
+            for b_proc in browser_roots:
+                try:
+                    target_pids.add(int(b_proc.pid))
+                    for child in b_proc.children(recursive=True):
+                        if getattr(child, "pid", None) is not None:
+                            target_pids.add(int(child.pid))
+                except Exception:
+                    pass
+
+            # 更新/清理 Process 缓存，只保留活跃的进程以防止内存泄露
+            new_cache = {}
+            for pid in target_pids:
+                if pid in _PROJECT_PROCESS_CACHE:
+                    new_cache[pid] = _PROJECT_PROCESS_CACHE[pid]
+                else:
+                    try:
+                        new_cache[pid] = _psutil.Process(pid)
+                    except Exception:
+                        pass
+            _PROJECT_PROCESS_CACHE = new_cache
+
+            # 复制一份用于在锁外进行计算，防阻塞
+            processes_to_measure = list(_PROJECT_PROCESS_CACHE.items())
+
+        # 在锁外调用 cpu_percent 以提升并发性能并减少锁定时间
+        seen_pids = set()
+        total_cpu = 0.0
+        for pid, proc in processes_to_measure:
+            try:
+                if pid in seen_pids:
+                    continue
+                seen_pids.add(pid)
+                total_cpu += proc.cpu_percent(interval=None)
+            except Exception:
+                pass
+
+        cpu_count = _psutil.cpu_count() or 1
+        return round(total_cpu / cpu_count, 1)
+    except Exception as e:
+        logger.error(f"[CPU_DEBUG] 计算 CPU 失败: {e}")
         return 0.0
 
 
@@ -1396,6 +1482,11 @@ _SYSTEM_STATS_CACHE = {
         "memory_mb": 0.0,
         "disk_status": "0 MB",
         "total_requests": 0,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "cpu_percent": 0.0,
+        "project_cpu": 0.0,
+        "memory_percent": 0.0,
     },
 }
 _DISK_USAGE_CACHE = {
@@ -1422,19 +1513,34 @@ def _get_project_disk_usage_mb_cached(ttl_seconds: float = 60.0) -> float:
     return disk_mb
 
 
-def _get_system_stats_payload_cached(ttl_seconds: float = 10.0) -> Dict[str, Any]:
+def _get_system_stats_payload_cached(ttl_seconds: float = 2.0) -> Dict[str, Any]:
     now = time.monotonic()
     cached_payload = _SYSTEM_STATS_CACHE.get("payload") or {}
     if now < float(_SYSTEM_STATS_CACHE.get("expires_at", 0.0) or 0.0):
         return dict(cached_payload)
 
+    cpu_percent = 0.0
+    project_cpu = 0.0
+    memory_percent = 0.0
+    try:
+        cpu_percent = float(_psutil.cpu_percent(interval=None) or 0.0)
+        memory_percent = float(_psutil.virtual_memory().percent or 0.0)
+        project_cpu = float(_get_project_cpu_percent() or 0.0)
+    except Exception:
+        pass
+
     payload = {
         "memory_mb": _get_project_memory_mb(),
         "disk_status": _format_disk_usage(_get_project_disk_usage_mb_cached()),
         "total_requests": int(getattr(request_manager, "total_requests", 0) or 0),
+        "total_input_tokens": int(getattr(request_manager, "total_input_tokens", 0) or 0),
+        "total_output_tokens": int(getattr(request_manager, "total_output_tokens", 0) or 0),
+        "cpu_percent": cpu_percent,
+        "project_cpu": project_cpu,
+        "memory_percent": memory_percent,
     }
     _SYSTEM_STATS_CACHE["payload"] = payload
-    _SYSTEM_STATS_CACHE["expires_at"] = now + max(1.0, float(ttl_seconds or 10.0))
+    _SYSTEM_STATS_CACHE["expires_at"] = now + max(0.5, float(ttl_seconds or 2.0))
     return dict(payload)
 
 

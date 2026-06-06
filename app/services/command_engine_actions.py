@@ -520,13 +520,16 @@ return (() => {
         random_radius = max(0, self._coerce_int(action.get("random_radius", 4), 4))
         deadline = time.time() + timeout_sec
         last_probe: Any = None
+        last_error = ""
 
         while time.time() < deadline:
             try:
                 probe = session.tab.run_js(self._captcha_click_point_script())
             except Exception as e:
-                logger.warning(f"[CMD] 人机验证目标探测失败: {e}")
-                return {"ok": False, "error": f"captcha_probe_failed:{e}"}
+                last_error = f"captcha_probe_failed:{e}"
+                logger.warning(f"[CMD] 人机验证目标探测失败，继续重试: {e}")
+                time.sleep(0.25)
+                continue
 
             last_probe = probe
             if isinstance(probe, dict) and probe.get("ok"):
@@ -539,6 +542,11 @@ return (() => {
                 if random_radius > 0:
                     click_x += random.randint(-random_radius, random_radius)
                     click_y += random.randint(-max(1, random_radius // 2), max(1, random_radius // 2))
+                viewport = probe.get("viewport") if isinstance(probe.get("viewport"), dict) else {}
+                viewport_width = max(1, int(viewport.get("width") or 1))
+                viewport_height = max(1, int(viewport.get("height") or 1))
+                click_x = max(0, min(viewport_width - 1, click_x))
+                click_y = max(0, min(viewport_height - 1, click_y))
 
                 try:
                     from app.utils.human_mouse import cdp_precise_click, smooth_move_mouse
@@ -550,17 +558,18 @@ return (() => {
                     )
                     success = bool(cdp_precise_click(session.tab, click_x, click_y))
                 except Exception as e:
-                    logger.warning(f"[CMD] 人机验证 CDP 点击失败: {e}")
-                    return {"ok": False, "error": f"captcha_click_failed:{e}", "probe": probe}
+                    last_error = f"captcha_click_failed:{e}"
+                    logger.warning(f"[CMD] 人机验证 CDP 点击失败，继续重试: {e}")
+                    time.sleep(0.25)
+                    continue
 
                 if not success:
-                    return {
-                        "ok": False,
-                        "error": "captcha_click_failed",
-                        "x": click_x,
-                        "y": click_y,
-                        "probe": probe,
-                    }
+                    last_error = "captcha_click_failed"
+                    logger.warning(
+                        f"[CMD] 人机验证 CDP 点击未确认，继续重试: x={click_x}, y={click_y}"
+                    )
+                    time.sleep(0.25)
+                    continue
 
                 logger.info(
                     f"[CMD] 已点击人机验证目标: kind={probe.get('kind')}, "
@@ -579,7 +588,7 @@ return (() => {
         logger.warning(f"[CMD] 未找到可点击的人机验证目标: last={str(last_probe)[:160]}")
         return {
             "ok": False,
-            "error": "captcha_target_not_found",
+            "error": last_error or "captcha_target_not_found",
             "last_probe": last_probe,
         }
 

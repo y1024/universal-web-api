@@ -5,7 +5,16 @@ window.RequestMonitorTab = {
         detailLoading: { type: Object, default: () => ({}) },
         systemStats: {
             type: Object,
-            default: () => ({ memory_mb: 0, disk_status: '未知', total_requests: 0 })
+            default: () => ({
+                memory_mb: 0,
+                disk_status: '未知',
+                total_requests: 0,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                cpu_percent: 0,
+                project_cpu: 0,
+                memory_percent: 0
+            })
         },
         loading: { type: Boolean, default: false },
         error: { type: String, default: '' }
@@ -85,6 +94,26 @@ window.RequestMonitorTab = {
         selectedTimingText() {
             if (!this.selectedRecord) return ''
             return '排队等待: ' + this.formatDurationMs(this.selectedRecord.queue_ms) + ' + 生成耗时: ' + this.formatDurationMs(this.selectedRecord.generation_ms)
+        },
+        inputRatio() {
+            const total = (this.systemStats.total_input_tokens || 0) + (this.systemStats.total_output_tokens || 0)
+            return total ? Math.round((this.systemStats.total_input_tokens / total) * 100) : 50
+        },
+        outputRatio() {
+            const total = (this.systemStats.total_input_tokens || 0) + (this.systemStats.total_output_tokens || 0)
+            return total ? (100 - this.inputRatio) : 50
+        },
+        avgDuration() {
+            const items = this.sortedRecords || []
+            let total = 0
+            let count = 0
+            items.forEach(item => {
+                if (item && item.success) {
+                    count += 1
+                    total += Number(item.duration_ms || 0)
+                }
+            })
+            return count ? Math.round(total / count) : 0
         }
     },
     watch: {
@@ -335,7 +364,7 @@ window.RequestMonitorTab = {
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                         <h2 class="text-xl font-bold text-slate-950 dark:text-white">📊 请求监控</h2>
-                        <p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">最近 200 条请求，已自动过滤超大 Base64 图片数据。</p>
+                        <p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">最近 200 条请求，已自动过滤超大 Base64 图片数据并进行智能输入输出统计。</p>
                     </div>
                     <button @click="refresh"
                             :disabled="loading"
@@ -347,44 +376,116 @@ window.RequestMonitorTab = {
 
                 <div v-if="error"
                      class="rounded-2xl border border-rose-200 bg-rose-50/90 px-4 py-3 text-sm text-rose-700 shadow-sm backdrop-blur dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200">
-                    {{ error }}
+                     {{ error }}
                 </div>
 
-                <section class="grid gap-4 xl:grid-cols-[1.05fr_1fr_1.45fr]">
-                    <article class="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
-                        <div class="flex items-center justify-between">
-                            <div>
-                                <div class="text-[11px] uppercase text-slate-400 dark:text-slate-500">系统占用</div>
-                                <div class="mt-2 text-3xl font-bold text-slate-950 dark:text-white">{{ formatNumber(systemStats.memory_mb) }} MB</div>
-                            </div>
-                            <div class="rounded-2xl bg-blue-50 px-3 py-2 text-2xl dark:bg-blue-500/10">💻</div>
+                <!-- 顶部 4 KPI 卡片横向排列 -->
+                <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <!-- KPI 卡片 1: 系统负载 -->
+                    <article class="relative rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
+                        <div>
+                            <div class="text-[11px] uppercase text-slate-400 dark:text-slate-500">系统负载</div>
+                            <div class="mt-2 text-3xl font-bold text-slate-950 dark:text-white">{{ systemStats.cpu_percent }}% <span class="text-xs font-normal text-slate-400">CPU</span></div>
                         </div>
-                        <div class="mt-4 grid grid-cols-2 gap-2 text-sm">
-                            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-950/50">
-                                <div class="text-[11px] text-slate-400 dark:text-slate-500">硬盘状态</div>
-                                <div class="mt-1 truncate font-semibold text-slate-700 dark:text-slate-200" :title="systemStats.disk_status">{{ systemStats.disk_status }}</div>
+                        <div class="absolute top-3.5 right-3.5 w-8 h-8 flex items-center justify-center rounded-lg bg-blue-50 text-base dark:bg-blue-500/10">💻</div>
+                        <div class="mt-4 space-y-2 text-xs">
+                            <div>
+                                <div class="flex items-center justify-between text-[11px] mb-0.5">
+                                    <span class="text-slate-400 dark:text-slate-500">系统 CPU 占用</span>
+                                    <span class="font-medium text-slate-700 dark:text-slate-200">{{ systemStats.cpu_percent }}%</span>
+                                </div>
+                                <div class="w-full bg-slate-100 dark:bg-slate-800 h-1 rounded-full overflow-hidden">
+                                    <div class="bg-blue-500 h-full rounded-full transition-all duration-300" :style="{ width: systemStats.cpu_percent + '%' }"></div>
+                                </div>
                             </div>
-                            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-950/50">
-                                <div class="text-[11px] text-slate-400 dark:text-slate-500">整体请求数</div>
-                                <div class="mt-1 font-semibold text-slate-700 dark:text-slate-200">{{ formatNumber(systemStats.total_requests) }}</div>
+                            <div>
+                                <div class="flex items-center justify-between text-[11px] mb-0.5">
+                                    <span class="text-slate-400 dark:text-slate-500">反代进程 CPU</span>
+                                    <span class="font-medium text-slate-700 dark:text-slate-200">{{ systemStats.project_cpu }}%</span>
+                                </div>
+                                <div class="w-full bg-slate-100 dark:bg-slate-800 h-1 rounded-full overflow-hidden">
+                                    <div class="bg-indigo-500 h-full rounded-full transition-all duration-300" :style="{ width: systemStats.project_cpu + '%' }"></div>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="flex items-center justify-between text-[11px] mb-0.5">
+                                    <span class="text-slate-400 dark:text-slate-500">反代内存 / 系统占比</span>
+                                    <span class="font-medium text-slate-700 dark:text-slate-200">{{ formatNumber(systemStats.memory_mb) }} MB ({{ systemStats.memory_percent }}%)</span>
+                                </div>
+                                <div class="w-full bg-slate-100 dark:bg-slate-800 h-1 rounded-full overflow-hidden">
+                                    <div class="bg-purple-500 h-full rounded-full transition-all duration-300" :style="{ width: systemStats.memory_percent + '%' }"></div>
+                                </div>
                             </div>
                         </div>
                     </article>
 
+                    <!-- KPI 卡片 2: 运行统计 -->
+                    <article class="relative rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
+                        <div>
+                            <div class="text-[11px] uppercase text-slate-400 dark:text-slate-500">运行统计</div>
+                            <div class="mt-2 text-3xl font-bold text-slate-950 dark:text-white">{{ formatNumber(systemStats.total_requests) }} <span class="text-xs font-normal text-slate-400">次请求</span></div>
+                        </div>
+                        <div class="absolute top-3.5 right-3.5 w-8 h-8 flex items-center justify-center rounded-lg bg-indigo-50 text-base dark:bg-indigo-500/10">📦</div>
+                        <div class="mt-4 space-y-2.5 text-xs">
+                            <div class="rounded-xl bg-slate-50/80 px-3 py-1.5 dark:bg-slate-950/40">
+                                <div class="text-[10px] text-slate-400 dark:text-slate-500">项目磁盘占用</div>
+                                <div class="mt-0.5 font-semibold text-slate-700 dark:text-slate-200 truncate" :title="systemStats.disk_status">{{ systemStats.disk_status }}</div>
+                            </div>
+                            <div class="rounded-xl bg-slate-50/80 px-3 py-1.5 dark:bg-slate-950/40">
+                                <div class="text-[10px] text-slate-400 dark:text-slate-500">成功平均耗时 (样本)</div>
+                                <div class="mt-0.5 font-semibold text-slate-700 dark:text-slate-200">{{ formatDurationMs(avgDuration) }}</div>
+                            </div>
+                        </div>
+                    </article>
+
+                    <!-- KPI 卡片 3: Token 分开统计 -->
+                    <article class="relative rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
+                        <div>
+                            <div class="text-[11px] uppercase text-slate-400 dark:text-slate-500">Token 吞吐量</div>
+                            <div class="mt-2 text-3xl font-bold text-slate-950 dark:text-white">{{ formatNumber(systemStats.total_input_tokens + systemStats.total_output_tokens) }} <span class="text-xs font-normal text-slate-400">Tokens</span></div>
+                        </div>
+                        <div class="absolute top-3.5 right-3.5 w-8 h-8 flex items-center justify-center rounded-lg bg-emerald-50 text-base dark:bg-emerald-500/10">🎫</div>
+                        <div class="mt-4 space-y-2 text-xs">
+                            <div class="flex items-center justify-between">
+                                <span class="text-slate-400 dark:text-slate-500 flex items-center gap-1">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block"></span> 累计输入 (Prompt)
+                                </span>
+                                <span class="font-bold text-blue-600 dark:text-blue-400">{{ formatNumber(systemStats.total_input_tokens) }}</span>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-slate-400 dark:text-slate-500 flex items-center gap-1">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span> 累计输出 (Completion)
+                                </span>
+                                <span class="font-bold text-emerald-600 dark:text-emerald-400">{{ formatNumber(systemStats.total_output_tokens) }}</span>
+                            </div>
+                            <div class="mt-1">
+                                <div class="flex items-center justify-between text-[10px] text-slate-400 dark:text-slate-500 mb-0.5">
+                                    <span>输入: {{ inputRatio }}%</span>
+                                    <span>输出: {{ outputRatio }}%</span>
+                                </div>
+                                <div class="w-full h-1.5 rounded-full overflow-hidden flex bg-slate-100 dark:bg-slate-800">
+                                    <div class="bg-blue-500 h-full transition-all duration-300" :style="{ width: inputRatio + '%' }"></div>
+                                    <div class="bg-emerald-500 h-full transition-all duration-300" :style="{ width: outputRatio + '%' }"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </article>
+
+                    <!-- KPI 卡片 4: 成功率统计 -->
                     <article class="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
                         <div class="flex items-start justify-between gap-3">
                             <div>
                                 <div class="text-[11px] uppercase text-slate-400 dark:text-slate-500">全局请求成功率</div>
-                                <div class="mt-2 flex items-end gap-2">
-                                    <span :class="['text-5xl font-black', globalSuccessRate >= 90 ? 'text-emerald-500' : (globalSuccessRate >= 70 ? 'text-amber-500' : 'text-rose-500')]">{{ globalSuccessRate }}%</span>
-                                    <span class="pb-2 text-sm text-slate-400">{{ rateBadge(globalSuccessRate) }}</span>
+                                <div class="mt-2 flex items-end gap-1.5">
+                                    <span :class="['text-3xl font-black', globalSuccessRate >= 90 ? 'text-emerald-500' : (globalSuccessRate >= 70 ? 'text-amber-500' : 'text-rose-500')]">{{ globalSuccessRate }}%</span>
+                                    <span class="pb-1 text-sm text-slate-400">{{ rateBadge(globalSuccessRate) }}</span>
                                 </div>
                             </div>
-                            <div class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                            <div class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
                                 样本 {{ sortedRecords.length }}
                             </div>
                         </div>
-                        <div class="mt-4 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                        <div class="mt-3.5 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                             <div :class="['h-full rounded-full transition-all', rateToneClass(globalSuccessRate)]"
                                  :style="{ width: globalSuccessRate + '%' }"></div>
                         </div>
@@ -393,23 +494,95 @@ window.RequestMonitorTab = {
                             <span class="rounded-full bg-rose-50 px-2.5 py-1 text-rose-700 dark:bg-rose-500/10 dark:text-rose-200">失败 {{ failureCount }}</span>
                         </div>
                     </article>
+                </section>
 
-                    <article class="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
-                        <div class="mb-3 flex items-center justify-between">
+                <!-- 底部双栏排版布局：左侧为请求历史，右侧为分站点成功率统计 -->
+                <section class="grid gap-4 lg:grid-cols-[2.2fr_1fr]">
+                    <!-- 左栏：历史请求列表 -->
+                    <div class="rounded-2xl border border-slate-200 bg-white/80 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70 overflow-hidden flex flex-col">
+                        <div class="flex items-center justify-between border-b border-slate-200 px-4 py-3 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/40">
                             <div>
-                                <div class="text-[11px] uppercase text-slate-400 dark:text-slate-500">分站点成功率统计</div>
-                                <div class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">按域名聚合</div>
+                                <h3 class="text-sm font-bold text-slate-950 dark:text-white">历史请求列表</h3>
+                                <p class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-500">默认展示最新 20 条，点击条目查看完整上下文。</p>
                             </div>
-                            <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">Top 10</span>
+                            <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-300">{{ visibleRecords.length }} / {{ sortedRecords.length }}</span>
                         </div>
-                        <div v-if="domainStats.length" class="space-y-2">
+
+                        <div class="space-y-2 p-3 overflow-y-auto max-h-[42rem]">
+                            <button v-for="record in visibleRecords"
+                                    :key="record.__historyKey"
+                                    @click="openRecord(record)"
+                                    :class="['w-full rounded-2xl border px-3 py-3 text-left shadow-sm transition', record.__statusClasses]">
+                                <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                    <div class="min-w-0 flex-1">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold ring-1', record.__statusPillClasses]">
+                                                {{ record.__statusIcon }} {{ record.__statusText }}
+                                            </span>
+                                            <span class="truncate text-sm font-semibold text-slate-900 dark:text-white">{{ record.__domain }}</span>
+                                            <span class="text-xs text-slate-400">/</span>
+                                            <span class="text-xs text-slate-500 dark:text-slate-400">{{ record.preset_name || '默认预设' }}</span>
+                                            <span class="rounded-full bg-white/70 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-950/40 dark:text-slate-400">{{ record.__tabLabel }}</span>
+                                            <span v-if="record.is_multimodal" class="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600 dark:bg-blue-500/10 dark:text-blue-200">🖼️ 多模态</span>
+                                        </div>
+                                        <p class="mt-2 truncate text-sm text-slate-600 dark:text-slate-300">{{ record.__summaryText }}</p>
+                                        <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400 dark:text-slate-500">
+                                            <span>开始 {{ record.__startedText }}</span>
+                                            <span>结束 {{ record.__finishedText }}</span>
+                                            <span>{{ record.request_type || '请求' }}</span>
+                                        </div>
+                                    </div>
+                                    <!-- 右侧耗时与 Token 统计 (输入输出分开) -->
+                                    <div class="flex shrink-0 flex-row items-center justify-between gap-3 lg:flex-col lg:items-end">
+                                        <div class="text-2xl font-black text-slate-900 dark:text-white">{{ record.__durationText }}</div>
+                                        <div class="text-[10px] text-slate-400 dark:text-slate-500 flex flex-col items-end gap-0.5 font-semibold">
+                                            <span class="flex items-center gap-1">
+                                                <span class="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block"></span>
+                                                输入: {{ formatNumber(record.token_estimate ? record.token_estimate.prompt : 0) }}
+                                            </span>
+                                            <span class="flex items-center gap-1">
+                                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
+                                                输出: {{ formatNumber(record.token_estimate ? record.token_estimate.response : 0) }}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </button>
+
+                            <div v-if="!visibleRecords.length"
+                                 class="rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 px-4 py-10 text-center text-sm text-slate-400 dark:border-slate-700 dark:bg-slate-950/30 dark:text-slate-500">
+                                暂无请求历史
+                            </div>
+
+                            <button v-if="hasMoreRecords"
+                                    @click="loadMore"
+                                    class="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-2 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-200 dark:hover:bg-slate-800">
+                                加载更多
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 右栏：分站点成功率统计 (Top 10) -->
+                    <article class="rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70 overflow-hidden flex flex-col h-fit">
+                        <div class="mb-3 flex items-center justify-between pb-2 border-b dark:border-gray-700 bg-slate-50/10 dark:bg-slate-900/20">
+                            <div>
+                                <h3 class="text-sm font-bold text-slate-950 dark:text-white">分站点成功率统计</h3>
+                                <p class="mt-0.5 text-[10px] text-slate-400 dark:text-slate-500">按域名聚合统计成功率</p>
+                            </div>
+                            <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">Top 10</span>
+                        </div>
+                        <div v-if="domainStats.length" class="space-y-2 overflow-y-auto max-h-[42rem] pr-1">
                             <div v-for="item in domainStats" :key="item.domain" class="rounded-xl bg-slate-50/80 px-3 py-2 dark:bg-slate-950/40">
                                 <div class="flex items-center justify-between gap-3 text-xs">
-                                    <span class="min-w-0 truncate font-medium text-slate-700 dark:text-slate-200">{{ item.domain }}</span>
-                                    <span class="shrink-0 text-slate-500 dark:text-slate-400">{{ item.rate }}% {{ rateBadge(item.rate) }}</span>
+                                    <span class="min-w-0 truncate font-semibold text-slate-700 dark:text-slate-200" :title="item.domain">{{ item.domain }}</span>
+                                    <span class="shrink-0 text-slate-500 dark:text-slate-400 font-bold">{{ item.rate }}% {{ rateBadge(item.rate) }}</span>
                                 </div>
-                                <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200/80 dark:bg-slate-800">
+                                <div class="mt-2 h-1 overflow-hidden rounded-full bg-slate-200/80 dark:bg-slate-800">
                                     <div :class="['h-full rounded-full', rateToneClass(item.rate)]" :style="{ width: item.rate + '%' }"></div>
+                                </div>
+                                <div class="mt-1 flex justify-between text-[9px] text-slate-400">
+                                    <span>成功: {{ item.success }} 次</span>
+                                    <span>失败: {{ item.failed }} 次</span>
                                 </div>
                             </div>
                         </div>
@@ -418,61 +591,9 @@ window.RequestMonitorTab = {
                         </div>
                     </article>
                 </section>
-
-                <section class="rounded-2xl border border-slate-200 bg-white/80 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
-                    <div class="flex items-center justify-between border-b border-slate-200 px-4 py-3 dark:border-slate-700">
-                        <div>
-                            <h3 class="text-base font-bold text-slate-950 dark:text-white">历史请求列表</h3>
-                            <p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">默认展示最新 20 条，点击条目查看完整上下文。</p>
-                        </div>
-                        <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-300">{{ visibleRecords.length }} / {{ sortedRecords.length }}</span>
-                    </div>
-
-                    <div class="space-y-2 p-3">
-                        <button v-for="record in visibleRecords"
-                                :key="record.__historyKey"
-                                @click="openRecord(record)"
-                                :class="['w-full rounded-2xl border px-3 py-3 text-left shadow-sm transition', record.__statusClasses]">
-                            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                                <div class="min-w-0 flex-1">
-                                    <div class="flex flex-wrap items-center gap-2">
-                                        <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold ring-1', record.__statusPillClasses]">
-                                            {{ record.__statusIcon }} {{ record.__statusText }}
-                                        </span>
-                                        <span class="truncate text-sm font-semibold text-slate-900 dark:text-white">{{ record.__domain }}</span>
-                                        <span class="text-xs text-slate-400">/</span>
-                                        <span class="text-xs text-slate-500 dark:text-slate-400">{{ record.preset_name || '默认预设' }}</span>
-                                        <span class="rounded-full bg-white/70 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-950/40 dark:text-slate-400">{{ record.__tabLabel }}</span>
-                                        <span v-if="record.is_multimodal" class="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600 dark:bg-blue-500/10 dark:text-blue-200">🖼️ 多模态</span>
-                                    </div>
-                                    <p class="mt-2 truncate text-sm text-slate-600 dark:text-slate-300">{{ record.__summaryText }}</p>
-                                    <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400 dark:text-slate-500">
-                                        <span>开始 {{ record.__startedText }}</span>
-                                        <span>结束 {{ record.__finishedText }}</span>
-                                        <span>{{ record.request_type || '请求' }}</span>
-                                    </div>
-                                </div>
-                                <div class="flex shrink-0 flex-row items-center justify-between gap-3 lg:flex-col lg:items-end">
-                                    <div class="text-2xl font-black text-slate-900 dark:text-white">{{ record.__durationText }}</div>
-                                    <div class="text-[11px] text-slate-400 dark:text-slate-500">{{ record.__tokenText }} tokens</div>
-                                </div>
-                            </div>
-                        </button>
-
-                        <div v-if="!visibleRecords.length"
-                             class="rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 px-4 py-10 text-center text-sm text-slate-400 dark:border-slate-700 dark:bg-slate-950/30 dark:text-slate-500">
-                            暂无请求历史
-                        </div>
-
-                        <button v-if="hasMoreRecords"
-                                @click="loadMore"
-                                class="w-full rounded-xl border border-slate-200 bg-white/80 px-4 py-2 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-200 dark:hover:bg-slate-800">
-                            加载更多
-                        </button>
-                    </div>
-                </section>
             </div>
 
+            <!-- 请求详情抽屉 -->
             <div v-if="selectedRecord"
                  class="fixed inset-0 z-50 flex justify-end bg-slate-950/55 p-3 backdrop-blur-sm"
                  @click.self="closeRecord">
@@ -520,7 +641,8 @@ window.RequestMonitorTab = {
                             <pre v-if="showErrorStack" class="mt-3 max-h-64 overflow-auto rounded-xl bg-white/80 p-3 text-xs leading-5 text-rose-900 dark:bg-slate-950/50 dark:text-rose-100">{{ selectedRecord.error_stack || selectedRecord.error_message || '暂无错误栈' }}</pre>
                         </div>
 
-                        <div class="mb-4 grid gap-3 sm:grid-cols-4">
+                        <!-- 详情属性网格 (修改为 5 列，展示输入和输出 Token) -->
+                        <div class="mb-4 grid gap-3 sm:grid-cols-5">
                             <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40">
                                 <div class="text-[11px] text-slate-400 dark:text-slate-500">排队等待</div>
                                 <div class="mt-1 text-lg font-bold text-slate-900 dark:text-white">{{ formatDurationMs(selectedRecord.queue_ms) }}</div>
@@ -530,11 +652,15 @@ window.RequestMonitorTab = {
                                 <div class="mt-1 text-lg font-bold text-slate-900 dark:text-white">{{ formatDurationMs(selectedRecord.generation_ms) }}</div>
                             </div>
                             <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40">
-                                <div class="text-[11px] text-slate-400 dark:text-slate-500">Token 估算</div>
-                                <div class="mt-1 text-lg font-bold text-slate-900 dark:text-white">{{ tokenEstimate(selectedRecord) }}</div>
+                                <div class="text-[11px] text-slate-400 dark:text-slate-500">输入 Token (Prompt)</div>
+                                <div class="mt-1 text-lg font-bold text-blue-600 dark:text-blue-400">{{ formatNumber(selectedRecord.token_estimate ? selectedRecord.token_estimate.prompt : 0) }}</div>
                             </div>
                             <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40">
-                                <div class="text-[11px] text-slate-400 dark:text-slate-500">开始 / 结束</div>
+                                <div class="text-[11px] text-slate-400 dark:text-slate-500">输出 Token (Completion)</div>
+                                <div class="mt-1 text-lg font-bold text-emerald-600 dark:text-emerald-400">{{ formatNumber(selectedRecord.token_estimate ? selectedRecord.token_estimate.response : 0) }}</div>
+                            </div>
+                            <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40">
+                                <div class="text-[11px] text-slate-400 dark:text-slate-500">开始 / 结束时间</div>
                                 <div class="mt-1 text-xs font-semibold leading-5 text-slate-700 dark:text-slate-200">{{ formatTime(selectedRecord.started_at || selectedRecord.created_at) }} - {{ formatTime(selectedRecord.finished_at) }}</div>
                             </div>
                         </div>

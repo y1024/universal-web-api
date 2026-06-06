@@ -137,7 +137,7 @@ def _schedule_route_worker_delayed_retire(
     ).start()
 
 
-def _cleanup_route_worker_thread(
+async def _cleanup_route_worker_thread(
     worker_thread: Optional[threading.Thread],
     ctx: RequestContext,
     *,
@@ -155,7 +155,7 @@ def _cleanup_route_worker_thread(
         join_timeout = 5.0
         retire_reason = "worker_cleanup_timeout"
 
-    worker_thread.join(timeout=join_timeout)
+    await asyncio.to_thread(worker_thread.join, timeout=join_timeout)
     if worker_thread.is_alive():
         if fast_returned_on_audio:
             _schedule_route_worker_delayed_retire(worker_thread, ctx, retire_reason)
@@ -177,7 +177,7 @@ def _put_route_worker_queue_item(
         ctx,
         item,
         final=final,
-        poll_timeout=STREAM_QUEUE_POLL_TIMEOUT,
+        poll_timeout=0.01 if ctx.should_stop() else STREAM_QUEUE_POLL_TIMEOUT,
     )
 
 
@@ -1051,6 +1051,12 @@ async def chat_with_tab(
     browser = get_browser(auto_connect=False)
     tab_info = _get_tab_info_by_index(browser, tab_index)
     ctx = request_manager.create_request()
+    try:
+        raw_input_len = sum(len(str(msg.get("content") or "")) for msg in body.messages if isinstance(msg, dict))
+        logger.info(f"[DIAG] 接收到的原始请求 messages 总字符长度: {raw_input_len} 字符, 消息数: {len(body.messages)}")
+    except Exception as e:
+        logger.debug(f"[DIAG] 估算原始请求长度失败: {e}")
+
     request_manager.record_request_input(
         ctx,
         body.model_dump(),
@@ -1118,6 +1124,12 @@ async def chat_with_route_domain(
         raise HTTPException(status_code=500, detail="resolved_tab_index_invalid")
 
     ctx = request_manager.create_request()
+    try:
+        raw_input_len = sum(len(str(msg.get("content") or "")) for msg in body.messages if isinstance(msg, dict))
+        logger.info(f"[DIAG] 接收到的原始请求 messages 总字符长度: {raw_input_len} 字符, 消息数: {len(body.messages)}")
+    except Exception as e:
+        logger.debug(f"[DIAG] 估算原始请求长度失败: {e}")
+
     request_manager.record_request_input(
         ctx,
         body.model_dump(),
@@ -1201,6 +1213,12 @@ async def chat_with_exact_tab_url(
         selector="exact_url",
     )
     ctx = request_manager.create_request()
+    try:
+        raw_input_len = sum(len(str(msg.get("content") or "")) for msg in body.messages if isinstance(msg, dict))
+        logger.info(f"[DIAG] 接收到的原始请求 messages 总字符长度: {raw_input_len} 字符, 消息数: {len(body.messages)}")
+    except Exception as e:
+        logger.debug(f"[DIAG] 估算原始请求长度失败: {e}")
+
     request_manager.record_request_input(
         ctx,
         body.model_dump(),
@@ -1260,6 +1278,12 @@ async def chat_with_exact_tab_url_and_preset(
     )
 
     ctx = request_manager.create_request()
+    try:
+        raw_input_len = sum(len(str(msg.get("content") or "")) for msg in body.messages if isinstance(msg, dict))
+        logger.info(f"[DIAG] 接收到的原始请求 messages 总字符长度: {raw_input_len} 字符, 消息数: {len(body.messages)}")
+    except Exception as e:
+        logger.debug(f"[DIAG] 估算原始请求长度失败: {e}")
+
     request_manager.record_request_input(
         ctx,
         body.model_dump(),
@@ -1416,7 +1440,7 @@ async def _stream_with_tab_index(
         yield _pack_error(f"执行错误: {str(e)}", "internal_error")
 
     finally:
-        _cleanup_route_worker_thread(
+        await _cleanup_route_worker_thread(
             worker_thread,
             ctx,
             fast_returned_on_audio=fast_returned_on_audio,
@@ -1627,7 +1651,7 @@ async def _stream_with_route_domain(
         yield _pack_error(f"执行错误: {str(e)}", "internal_error")
 
     finally:
-        _cleanup_route_worker_thread(
+        await _cleanup_route_worker_thread(
             worker_thread,
             ctx,
             fast_returned_on_audio=fast_returned_on_audio,
@@ -1836,7 +1860,7 @@ async def _stream_with_exact_url(
         yield _pack_error(f"执行错误: {str(e)}", "internal_error")
 
     finally:
-        _cleanup_route_worker_thread(
+        await _cleanup_route_worker_thread(
             worker_thread,
             ctx,
             fast_returned_on_audio=fast_returned_on_audio,
@@ -2274,7 +2298,7 @@ async def _complete_tool_calling_with_tab_index(
             except asyncio.CancelledError:
                 pass
         worker_thread = worker_state.get("thread")
-        _cleanup_route_worker_thread(worker_thread, ctx)
+        await _cleanup_route_worker_thread(worker_thread, ctx)
         worker_state["thread"] = None
         worker_state["label"] = None
         request_manager.finish_request(ctx, success=(ctx.status == RequestStatus.COMPLETED))
@@ -2336,7 +2360,7 @@ async def _complete_tool_calling_with_route_domain(
             except asyncio.CancelledError:
                 pass
         worker_thread = worker_state.get("thread")
-        _cleanup_route_worker_thread(worker_thread, ctx)
+        await _cleanup_route_worker_thread(worker_thread, ctx)
         worker_state["thread"] = None
         worker_state["label"] = None
         request_manager.finish_request(ctx, success=(ctx.status == RequestStatus.COMPLETED))
@@ -2398,7 +2422,7 @@ async def _complete_tool_calling_with_exact_url(
             except asyncio.CancelledError:
                 pass
         worker_thread = worker_state.get("thread")
-        _cleanup_route_worker_thread(worker_thread, ctx)
+        await _cleanup_route_worker_thread(worker_thread, ctx)
         worker_state["thread"] = None
         worker_state["label"] = None
         request_manager.finish_request(ctx, success=(ctx.status == RequestStatus.COMPLETED))

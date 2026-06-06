@@ -1141,6 +1141,14 @@ class BrowserMediaMixin:
             except Exception as e:
                 logger.warning(f"data uri 落盘失败（已忽略）: {e}")
 
+            # 汇总并打印多模态媒体提取完成的日志
+            final_images = [item for item in media_items if item.get("media_type") == "image"]
+            final_videos = [item for item in media_items if item.get("media_type") == "video"]
+            final_audios = [item for item in media_items if item.get("media_type") == "audio"]
+            logger.debug(
+                f"提取完成: {len(final_images)} 张图片, {len(final_videos)} 个视频, {len(final_audios)} 个音频"
+            )
+
             return media_items
             
         except Exception as e:

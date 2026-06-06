@@ -1100,6 +1100,12 @@ async def chat_completions(
         )
 
     ctx = request_manager.create_request()
+    try:
+        raw_input_len = sum(len(str(msg.get("content") or "")) for msg in body.messages if isinstance(msg, dict))
+        logger.info(f"[DIAG] 接收到的原始请求 messages 总字符长度: {raw_input_len} 字符, 消息数: {len(body.messages)}")
+    except Exception as e:
+        logger.debug(f"[DIAG] 估算原始请求长度失败: {e}")
+
     request_manager.record_request_input(
         ctx,
         body.model_dump(),
@@ -1333,7 +1339,7 @@ async def _stream_with_lifecycle(
     finally:
         if worker_thread and worker_thread.is_alive():
             ctx.request_cancel("cleanup")
-            worker_thread.join(timeout=5.0)
+            await asyncio.to_thread(worker_thread.join, timeout=5.0)
             if worker_thread.is_alive():
                 _retire_bound_tab_after_worker_leak(ctx, "worker_cleanup_timeout")
 
@@ -1551,7 +1557,7 @@ async def _complete_tool_calling_with_lifecycle(
         worker_thread = worker_state.get("thread")
         if isinstance(worker_thread, threading.Thread) and worker_thread.is_alive():
             ctx.request_cancel("cleanup")
-            worker_thread.join(timeout=5.0)
+            await asyncio.to_thread(worker_thread.join, timeout=5.0)
             if worker_thread.is_alive():
                 _retire_bound_tab_after_worker_leak(ctx, "worker_cleanup_timeout")
         worker_state["thread"] = None

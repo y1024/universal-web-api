@@ -477,6 +477,46 @@ class WorkflowExecutor(
             logger.debug(f"[Executor] 网络事件上报失败（忽略）: {e}")
             return False
 
+    def _capture_dom_send_baseline(self, reason: str = "") -> None:
+        if self._stream_monitor is None:
+            return
+        selector = str((self._selectors or {}).get("result_container") or "").strip()
+        if not selector:
+            return
+        try:
+            self._stream_monitor.capture_send_baseline(selector)
+            logger.debug(f"[Executor] 已预捕获 DOM 发送基线 ({reason or 'send'})")
+        except Exception as e:
+            logger.debug(f"[Executor] 预捕获 DOM 发送基线失败（忽略）: {e}")
+
+    def _build_dom_fallback_kwargs(self) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {}
+        try:
+            if self._stream_monitor is not None:
+                baseline = self._stream_monitor.consume_send_baseline()
+                if baseline:
+                    kwargs["baseline_snapshot"] = baseline
+        except Exception as e:
+            logger.debug(f"[Executor] 读取 DOM 发送基线失败（忽略）: {e}")
+
+        try:
+            if self._network_monitor is not None:
+                sent_chars = self._network_monitor.get_total_content_chars()
+                if sent_chars > 0:
+                    kwargs["sent_content_length"] = sent_chars
+        except Exception as e:
+            logger.debug(f"[Executor] 读取网络已发送长度失败（忽略）: {e}")
+
+        if kwargs:
+            baseline = kwargs.get("baseline_snapshot") or {}
+            logger.debug(
+                "[Executor] DOM 回退参数已准备: "
+                f"baseline={bool(baseline)}, "
+                f"baseline_len={int(baseline.get('text_len', 0) or 0) if isinstance(baseline, dict) else 0}, "
+                f"network_sent={int(kwargs.get('sent_content_length') or 0)}"
+            )
+        return kwargs
+
     def _focus_last_input_for_attachment_paste(self) -> bool:
         """Re-focus the active composer before Ctrl+V image paste."""
         ele = getattr(self, "_last_input_element", None)
@@ -876,10 +916,12 @@ class WorkflowExecutor(
                             f"[Executor] 网络监听超时，回退到 DOM 模式: {e}"
                         )
                         # 回退到 DOM 监听
+                        dom_fallback_kwargs = self._build_dom_fallback_kwargs()
                         yield from self._stream_monitor.monitor(
                             selector=selector,
                             user_input=user_input,
-                            completion_id=self._completion_id
+                            completion_id=self._completion_id,
+                            **dom_fallback_kwargs,
                         )
                         self._last_stream_media_state = {}
                         self._last_stream_media_items = []
@@ -890,10 +932,12 @@ class WorkflowExecutor(
                             f"[Executor] 网络监听错误，回退到 DOM 模式: {e}"
                         )
                         # 回退到 DOM 监听
+                        dom_fallback_kwargs = self._build_dom_fallback_kwargs()
                         yield from self._stream_monitor.monitor(
                             selector=selector,
                             user_input=user_input,
-                            completion_id=self._completion_id
+                            completion_id=self._completion_id,
+                            **dom_fallback_kwargs,
                         )
                         self._last_stream_media_state = {}
                         self._last_stream_media_items = []
@@ -957,6 +1001,8 @@ class WorkflowExecutor(
                 self.tab.actions.key_up(key)
             else:
                 self.tab.actions.key_down(key).key_up(key)
+            if self._combo_contains_submit_key(key):
+                self._capture_dom_send_baseline("keypress")
         
         self._smart_delay(0.1, 0.2)
     
@@ -986,6 +1032,8 @@ class WorkflowExecutor(
                     self.tab.actions.key_down(item)
                 for item in reversed(keys):
                     self.tab.actions.key_up(item)
+            if self._combo_contains_submit_key(key):
+                self._capture_dom_send_baseline("keypress_combo")
 
         self._smart_delay(0.1, 0.2)
 
