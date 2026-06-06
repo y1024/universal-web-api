@@ -1473,6 +1473,16 @@ class NetworkMonitor:
                 if raw_body and not is_event_stream and self._looks_like_sse_payload(raw_body):
                     is_event_stream = True
 
+            status_code = self._extract_http_status(event)
+            if status_code >= 400:
+                error_text = self._build_http_status_error_text(event, raw_body)
+                logger.warning(
+                    "[NetworkMonitor] 目标流返回异常状态码，终止工作流 "
+                    f"(status={status_code}, url={event.get('url', '')[:120]}, "
+                    f"body_len={len(raw_body)})"
+                )
+                raise NetworkMonitorTerminalError(error_text or f"HTTP {status_code}")
+
             if not raw_body:
                 empty_body_skips += 1
                 if should_probe_initial_target_body:
@@ -1509,16 +1519,6 @@ class NetworkMonitor:
                     f"(targets={stream_target_hits}, source={raw_body_source}, 长度={len(raw_body)} 字符)",
                     interval_sec=5.0,
                 )
-
-            status_code = self._extract_http_status(event)
-            if status_code >= 400 and self._extract_http_error_detail(raw_body):
-                error_text = self._build_http_status_error_text(event, raw_body)
-                logger.warning(
-                    "[NetworkMonitor] 目标流返回异常状态码，终止工作流 "
-                    f"(status={status_code}, url={event.get('url', '')[:120]}, "
-                    f"body_len={len(raw_body)})"
-                )
-                raise NetworkMonitorTerminalError(error_text or f"HTTP {status_code}")
 
             # 解析响应
             try:

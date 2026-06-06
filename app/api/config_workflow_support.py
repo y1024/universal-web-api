@@ -199,7 +199,10 @@ def _execute_workflow_editor_test_payload(
             getattr(tab, "html", "") or "",
             preset_name=preset_name
         ) or {}
-        site_advanced_config = config_engine.get_site_advanced_config(domain)
+        site_advanced_config = config_engine.get_site_advanced_config(
+            domain,
+            preset_name=preset_name,
+        )
 
         extractor = config_engine.get_site_extractor(domain, preset_name=preset_name)
         executor = WorkflowExecutor(

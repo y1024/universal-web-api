@@ -208,6 +208,7 @@ class BrowserConstants:
     _DEFAULTS = {
         'DEFAULT_PORT': 9222,
         'CONNECTION_TIMEOUT': 10,
+        'MAX_REQUEST_EXECUTE_TIME_SEC': 300.0,
         'STEALTH_DELAY_MIN': 0.03,
         'STEALTH_DELAY_MAX': 0.1,
         'ACTION_DELAY_MIN': 0.06,
@@ -280,6 +281,7 @@ class BrowserConstants:
     # 连接配置
     DEFAULT_PORT = 9222
     CONNECTION_TIMEOUT = 10
+    MAX_REQUEST_EXECUTE_TIME_SEC = 300.0
     
     # 延迟配置
     STEALTH_DELAY_MIN = 0.03

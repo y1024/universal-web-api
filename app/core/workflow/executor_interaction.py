@@ -254,6 +254,10 @@ class WorkflowExecutorInteractionMixin:
         self._last_fill_completed_at = time.time()
         self._last_fill_text_length = max(0, len(text or ""))
         self._last_fill_after_new_chat = bool(after_new_chat)
+        logger.debug(
+            f"[FILL_COMPLETED] 输入框填充完成: expected_len={self._last_fill_text_length}, "
+            f"after_new_chat={after_new_chat}"
+        )
 
     def _get_recent_fill_send_wait_timeout(self, target_key: str, default_timeout: float) -> float:
         if (target_key or "") != "send_btn":
@@ -326,6 +330,23 @@ class WorkflowExecutorInteractionMixin:
         except Exception:
             active_ele = None
         if self._element_accepts_text_input(active_ele):
+            try:
+                info = self.tab.run_js("""
+                    const el = arguments[0];
+                    return {
+                        tag: (el.tagName || '').toLowerCase(),
+                        id: el.id || '',
+                        className: el.className || '',
+                        name: el.name || ''
+                    };
+                """, active_ele)
+                logger.debug(
+                    f"[ACTIVE_INPUT_RESOLVED] Found active text input: "
+                    f"tag={info.get('tag')!r}, id={info.get('id')!r}, "
+                    f"class={info.get('className')!r}, name={info.get('name')!r}"
+                )
+            except Exception as e:
+                logger.debug(f"[ACTIVE_INPUT_RESOLVED] 获取活动输入框特征异常: {e}")
             return active_ele
         return None
 

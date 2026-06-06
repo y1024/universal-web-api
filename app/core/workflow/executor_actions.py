@@ -9,14 +9,29 @@ app/core/workflow/executor_actions.py - 工作流执行器隐身动作 Mixin
 
 import math
 import random
+import re
 import time
 from typing import Any, Optional
+from urllib.parse import unquote, urlparse
 
 from app.core.config import BrowserConstants, ElementNotFoundError, WorkflowError, logger
 from app.utils.human_mouse import cdp_precise_click, human_scroll_path, idle_drift, smooth_move_mouse
 
 
 class WorkflowExecutorActionMixin:
+    _NEW_CHAT_EMPTY_ROUTE_SEGMENTS = {
+        "app",
+        "text",
+        "direct",
+        "none",
+        "chat",
+        "new",
+        "new_chat",
+        "new-chat",
+        "prompts",
+    }
+    _NEW_CHAT_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,40}$")
+
     def _get_coord_click_settings(self) -> dict:
         return {
             "ready_timeout": self._coerce_float(
@@ -733,6 +748,8 @@ class WorkflowExecutorActionMixin:
 
         last_error = None
         found_element = False
+        pre_click_url = ""
+        before_len = 0
         for attempt in range(2):
             try:
                 with self._page_interaction_slot("CLICK", target_key) as acquired:
@@ -745,6 +762,21 @@ class WorkflowExecutorActionMixin:
                     found_element = True
 
                     ele = self._wait_for_element_interactable(ele, selector, target_key)
+
+                    if target_key in {"new_chat_btn", "new_chat", "new_conversation"}:
+                        try:
+                            pre_click_url = str(self.tab.url or "")
+                            logger.debug(f"[CLICK_NEW_CHAT] 点击新建对话前 URL: {pre_click_url}")
+                        except Exception:
+                            pass
+
+                    if target_key == "send_btn":
+                        try:
+                            send_url = str(self.tab.url or "")
+                            before_len = self._safe_get_input_len_by_key("input_box")
+                            logger.debug(f"[SEND_CLICK_START] 开始点击发送按钮, 当前 URL: {send_url}, 发送前输入框长度: {before_len}")
+                        except Exception:
+                            pass
 
                     if self.stealth_mode:
                         if self._should_use_background_safe_dom_click(target_key):
@@ -777,9 +809,16 @@ class WorkflowExecutorActionMixin:
                 )
                 if target_key in {"new_chat_btn", "new_chat", "new_conversation"}:
                     self._input_stability_wait_pending = True
+                    if pre_click_url:
+                        self._last_new_chat_clicked_url = pre_click_url
+                        self._last_new_chat_clicked_at = time.time()
+                if target_key == "send_btn":
+                    self._confirm_send_click_response_or_raise(before_len)
                 return
 
             except Exception as click_err:
+                if isinstance(click_err, WorkflowError) and str(click_err) == "send_unconfirmed":
+                    raise
                 last_error = click_err
                 logger.warning(
                     "[CLICK] 点击失败: "
@@ -1263,50 +1302,33 @@ class WorkflowExecutorActionMixin:
     # ================= 可靠发送 =================
 
     def _safe_get_input_len_by_key(self, target_key: str) -> int:
-        """读取输入框当前长度"""
+        """读取输入框当前长度（防多标签干扰与后台 activeElement 漂移版）"""
         try:
-            candidates = []
-
-            if target_key and target_key == getattr(self, "_last_input_target_key", ""):
-                last_ele = getattr(self, "_last_input_element", None)
-                if last_ele:
-                    candidates.append(last_ele)
-
             selector = ""
             if isinstance(self._selectors, dict):
                 selector = str(self._selectors.get(target_key, "") or "").strip()
 
-            if selector or target_key:
-                try:
-                    ele = self.finder.find_with_fallback(selector, target_key, timeout=0.2)
-                except Exception:
-                    ele = None
-                if ele:
-                    candidates.append(ele)
+            n = self.tab.run_js("""
+                try {
+                    const sel = arguments[0];
+                    let el = null;
+                    if (sel) {
+                        el = document.querySelector(sel);
+                    }
+                    if (!el) {
+                        el = document.querySelector('textarea, [contenteditable="true"], input[type="text"]');
+                    }
+                    if (!el) return 0;
+                    
+                    const tag = (el.tagName || '').toLowerCase();
+                    if (tag === 'textarea' || tag === 'input') return (el.value || '').length;
+                    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') return (el.innerText || '').length;
+                    return 0;
+                } catch(e){ return 0; }
+            """, selector)
 
-            try:
-                active_ele = self.tab.run_js("return document.activeElement")
-            except Exception:
-                active_ele = None
-            if active_ele:
-                candidates.append(active_ele)
-
-            for ele in candidates:
-                try:
-                    n = self.tab.run_js("""
-                        try {
-                            const el = arguments[0];
-                            const tag = (el.tagName || '').toLowerCase();
-                            if (tag === 'textarea' || tag === 'input') return (el.value || '').length;
-                            if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') return (el.innerText || '').length;
-                            return (el.textContent || '').length;
-                        } catch(e){ return 0; }
-                    """, ele)
-                except Exception:
-                    continue
-                if n is not None:
-                    return int(n)
-
+            if n is not None:
+                return int(n)
             return 0
         except Exception:
             return 0
@@ -1323,7 +1345,75 @@ class WorkflowExecutorActionMixin:
             return False
         except Exception:
             return False
-            # ================= 隐身模式页面预热 =================
+
+    def _is_send_confirmation_check_enabled(self) -> bool:
+        advanced = self._site_advanced_config if isinstance(self._site_advanced_config, dict) else {}
+        return self._coerce_bool(
+            advanced.get("send_confirmation_check_enabled"),
+            False,
+        )
+
+    def _get_send_confirmation_check_timeout(self) -> float:
+        advanced = self._site_advanced_config if isinstance(self._site_advanced_config, dict) else {}
+        timeout = self._coerce_float(
+            advanced.get("send_confirmation_check_timeout"),
+            1.5,
+            minimum=0.1,
+        )
+        return min(timeout, 10.0)
+
+    def _confirm_send_click_response_or_raise(self, before_len: int) -> None:
+        """Confirm the page physically reacted to send_btn by clearing/shrinking input."""
+        timeout = self._get_send_confirmation_check_timeout()
+        interval = 0.1
+        started_at = time.perf_counter()
+        latest_len = before_len
+
+        if not self._is_send_confirmation_check_enabled():
+            try:
+                time.sleep(0.12)
+                latest_len = self._safe_get_input_len_by_key("input_box")
+                is_success = self._is_send_success(before_len, latest_len)
+                logger.debug(
+                    f"[SEND_CLICK_END] 发送按钮点击完成. 发送前长度: {before_len}, "
+                    f"发送后长度: {latest_len}, 判定成功={is_success}, 当前 URL: {self.tab.url}"
+                )
+            except Exception:
+                pass
+            return
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._check_cancelled():
+                return
+
+            try:
+                latest_len = self._safe_get_input_len_by_key("input_box")
+            except Exception:
+                latest_len = before_len
+
+            if self._is_send_success(before_len, latest_len):
+                logger.info(
+                    "[SEND_CONFIRM] 发送按钮物理响应已确认: "
+                    f"before_len={before_len}, after_len={latest_len}, "
+                    f"elapsed={time.perf_counter() - started_at:.2f}s"
+                )
+                return
+
+            time.sleep(interval)
+
+        try:
+            current_url = str(self.tab.url or "")
+        except Exception:
+            current_url = ""
+        logger.warning(
+            "[SEND_CONFIRM_TIMEOUT] 发送确认超时，输入框仍未清空，触发工作流重试: "
+            f"before_len={before_len}, after_len={latest_len}, "
+            f"timeout={timeout:.1f}s, url={self._compact_log_value(current_url, 140)}"
+        )
+        raise WorkflowError("send_unconfirmed")
+
+    # ================= 隐身模式页面预热 =================
     
     def _warmup_page_for_stealth(self):
         """
@@ -1382,6 +1472,130 @@ class WorkflowExecutorActionMixin:
 
         except Exception as e:
             logger.debug(f"[STEALTH] 页面预热异常（可忽略）: {e}")
+
+    def _should_wait_for_new_chat_url_transition(self) -> bool:
+        advanced = self._site_advanced_config if isinstance(self._site_advanced_config, dict) else {}
+        return self._coerce_bool(
+            advanced.get("url_transition_wait_on_new_chat"),
+            False,
+        )
+
+    def _get_new_chat_url_transition_patterns(self) -> list[str]:
+        advanced = self._site_advanced_config if isinstance(self._site_advanced_config, dict) else {}
+        raw_patterns = advanced.get("url_transition_wait_patterns") or []
+        if isinstance(raw_patterns, str):
+            raw_patterns = raw_patterns.replace("\n", ",").replace(";", ",").split(",")
+        if not isinstance(raw_patterns, (list, tuple, set)):
+            return []
+        return [
+            str(pattern or "").strip()
+            for pattern in raw_patterns
+            if str(pattern or "").strip()
+        ]
+
+    @classmethod
+    def _is_likely_chat_session_url(
+        cls,
+        url: str,
+        patterns: Optional[list[str]] = None,
+    ) -> bool:
+        text = str(url or "").strip()
+        if not text:
+            return False
+
+        for pattern in patterns or []:
+            pattern_text = str(pattern or "").strip()
+            if not pattern_text:
+                continue
+            if pattern_text in text:
+                return True
+            try:
+                if re.search(pattern_text, text):
+                    return True
+            except re.error:
+                continue
+
+        try:
+            parsed = urlparse(text)
+        except Exception:
+            return False
+
+        path = parsed.path or ""
+        if not path:
+            return False
+
+        segments = [
+            unquote(segment).strip()
+            for segment in path.split("/")
+            if unquote(segment).strip()
+        ]
+        for segment in segments:
+            lowered = segment.lower()
+            if lowered in cls._NEW_CHAT_EMPTY_ROUTE_SEGMENTS:
+                continue
+            if cls._NEW_CHAT_SESSION_ID_RE.match(segment):
+                return True
+        return False
+
+    def _wait_for_new_chat_url_transition_if_needed(
+        self,
+        *,
+        fill_after_new_chat: bool,
+        current_url: str = "",
+    ) -> str:
+        if (
+            not fill_after_new_chat
+            or not self._should_wait_for_new_chat_url_transition()
+        ):
+            return current_url
+
+        previous_url = str(getattr(self, "_last_new_chat_clicked_url", "") or "")
+        if not previous_url:
+            return current_url
+
+        if not self._is_likely_chat_session_url(
+            previous_url,
+            self._get_new_chat_url_transition_patterns(),
+        ):
+            logger.debug(
+                "[TRANSITION_SKIP] 新建对话前 URL 不像具体旧会话，跳过 URL 切换等待: "
+                f"before={self._compact_log_value(previous_url, 140)}"
+            )
+            return current_url
+
+        timeout = 5.0
+        interval = 0.1
+        started_at = time.perf_counter()
+        deadline = time.time() + timeout
+        latest_url = str(current_url or "")
+
+        while time.time() < deadline:
+            if self._check_cancelled():
+                return latest_url
+
+            try:
+                latest_url = str(self.tab.url or "")
+            except Exception:
+                latest_url = ""
+
+            if latest_url and latest_url != previous_url:
+                logger.info(
+                    "[TRANSITION_OK] 新建对话后 URL 成功切换: "
+                    f"before={self._compact_log_value(previous_url, 140)}, "
+                    f"current={self._compact_log_value(latest_url, 140)}, "
+                    f"elapsed={time.perf_counter() - started_at:.2f}s"
+                )
+                return latest_url
+
+            time.sleep(interval)
+
+        logger.warning(
+            "[TRANSITION_TIMEOUT] 新建对话后 URL 未在限定时间内切换，触发工作流重试: "
+            f"before={self._compact_log_value(previous_url, 140)}, "
+            f"current={self._compact_log_value(latest_url or current_url, 140)}, "
+            f"timeout={timeout:.1f}s"
+        )
+        raise WorkflowError("new_chat_transition_timeout")
     
     # ================= 输入框填充 =================
     
@@ -1397,6 +1611,27 @@ class WorkflowExecutorActionMixin:
             fill_after_new_chat = bool(
                 (target_key or "") == "input_box" and self._input_stability_wait_pending
             )
+
+            current_url = ""
+            try:
+                current_url = str(self.tab.url or "")
+            except Exception:
+                pass
+
+            if target_key == "input_box":
+                logger.debug(f"[FILL_INPUT_START] 开始填充输入框, 当前 URL: {current_url}")
+                if fill_after_new_chat:
+                    last_url = getattr(self, "_last_new_chat_clicked_url", "")
+                    if last_url and current_url == last_url:
+                        logger.warning(
+                            f"[WARNING] [FILL_INPUT] 新建对话后填充输入框，但 URL 未切换! "
+                            f"当前 URL: {current_url}, 新建对话点击前 URL: {last_url}"
+                        )
+                current_url = self._wait_for_new_chat_url_transition_if_needed(
+                    fill_after_new_chat=fill_after_new_chat,
+                    current_url=current_url,
+                )
+
             ele = self.finder.find_with_fallback(selector, target_key)
             if not ele:
                 if not optional:

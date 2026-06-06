@@ -320,11 +320,11 @@
     {
       "id": "cmd_cf_pagecheck_arena_verify",
       "name": "自动过cf盾",
-      "enabled": true,
+      "enabled": false,
       "mode": "simple",
       "trigger": {
         "type": "page_check",
-        "value": "protected by cloudflare || verify you are human || checking your browser || 确认您是真人 || Security Verification",
+        "value": "人机身份验证",
         "command_id": "",
         "action_ref": "",
         "match_rule": "equals",
@@ -332,8 +332,8 @@
         "match_mode": "keyword",
         "status_codes": "403,429,500,502,503,504",
         "abort_on_match": true,
-        "scope": "domain",
-        "domain": "arena.ai",
+        "scope": "all",
+        "domain": "",
         "tab_index": null,
         "priority": 4,
         "periodic_enabled": true,
@@ -353,9 +353,9 @@
       },
       "actions": [
         {
-          "type": "execute_workflow",
-          "preset_name": "预设_过CF盾",
-          "prompt": "",
+          "type": "click_captcha_challenge",
+          "timeout_sec": 6,
+          "random_radius": 4,
           "action_id": "step_1_verify"
         },
         {
@@ -365,15 +365,15 @@
         },
         {
           "type": "run_js",
-          "code": "(() => { try { const t = (document.body && document.body.innerText ? document.body.innerText : '').toLowerCase(); const hasVerify = t.includes('security verification') || t.includes('protected by cloudflare') || t.includes('verify you are human') || t.includes('checking your browser') || t.includes('确认您是真人') || t.includes('cloudflare'); if (hasVerify) return 'VERIFY'; const hasInput = !!document.querySelector('textarea, [contenteditable=\"true\"], input[placeholder*=\"ask\" i]'); const links = Array.from(document.querySelectorAll('a')).slice(0, 12); let blueLinks = 0; for (const a of links) { try { if (getComputedStyle(a).color === 'rgb(0, 0, 238)') blueLinks++; } catch (e) {} } const hasArenaHints = t.includes('new chat') || t.includes('leaderboard') || t.includes('battle mode'); if (blueLinks >= 3 && hasArenaHints) return 'BLACK'; if (hasInput) return 'READY'; return 'UNKNOWN'; } catch (e) { return 'UNKNOWN'; } })()",
+          "code": "(() => { try { const t = (document.body && document.body.innerText ? document.body.innerText : '').toLowerCase(); const hasRecaptchaFrame = !!document.querySelector('iframe[src*=\"recaptcha\"], iframe[src*=\"google.com/recaptcha\"], .g-recaptcha, [name=\"g-recaptcha-response\"]'); const hasVerify = t.includes('security verification') || t.includes('protected by cloudflare') || t.includes('verify you are human') || t.includes('checking your browser') || t.includes('确认您是真人') || t.includes('cloudflare') || t.includes('protected by recaptcha') || t.includes('recaptcha') || t.includes('人机身份验证') || hasRecaptchaFrame; if (hasVerify) return false; const hasInput = !!document.querySelector('textarea, [contenteditable=\"true\"], input[placeholder*=\"ask\" i]'); const links = Array.from(document.querySelectorAll('a')).slice(0, 12); let blueLinks = 0; for (const a of links) { try { if (getComputedStyle(a).color === 'rgb(0, 0, 238)') blueLinks++; } catch (e) {} } const hasArenaHints = t.includes('new chat') || t.includes('leaderboard') || t.includes('battle mode'); if (blueLinks >= 3 && hasArenaHints) return 'BLACK'; if (hasInput) return 'READY'; return 'UNKNOWN'; } catch (e) { return 'UNKNOWN'; } })()",
           "action_id": "step_3_probe"
         }
       ],
       "group_name": "arena",
       "script": "",
       "script_lang": "javascript",
-      "last_triggered": 1780072414.1921036,
-      "trigger_count": 2,
+      "last_triggered": 1780590196.9242542,
+      "trigger_count": 9,
       "log_enabled": true,
       "log_level": "GLOBAL",
       "stop_on_error": false

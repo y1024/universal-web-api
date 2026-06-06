@@ -40,6 +40,7 @@ ACTION_TYPES = {
     "release_tab_lock": "解除标签页占用",
     "click_element": "点击元素",
     "click_coordinates": "点击坐标",
+    "click_captcha_challenge": "点击人机验证",
     "write_element": "写入元素",
     "read_element": "读取元素",
     "http_request": "页面内请求",

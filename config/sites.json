@@ -140,21 +140,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -162,9 +162,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 100,
           "canvas_export_mime": "image/jpeg",
@@ -187,9 +187,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -213,7 +213,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -321,21 +321,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -343,9 +343,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 100,
           "canvas_export_mime": "image/jpeg",
@@ -368,9 +368,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -394,7 +394,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -494,21 +494,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "div.group\\/image img.object-cover.relative",
@@ -516,9 +516,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 100,
           "canvas_export_mime": "image/jpeg",
@@ -541,9 +541,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -567,7 +567,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -628,9 +628,9 @@
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -640,7 +640,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 6.0,
+            "attachment_observe_window": 6,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -672,8 +672,8 @@
             "require_attachment_present": true,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": false,
-            "idle_timeout": 8.0,
-            "hard_max_wait": 90.0
+            "idle_timeout": 8,
+            "hard_max_wait": 90
           }
         },
         "image_extraction": {
@@ -682,21 +682,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img:not([aria-hidden=\"true\"])",
@@ -704,9 +704,9 @@
           "video_selector": "video, video source",
           "container_selector": "div[id^=\"image-\"]",
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 8.0,
+          "load_timeout_seconds": 8,
           "download_blobs": true,
           "max_size_mb": 20,
           "canvas_export_mime": "image/jpeg",
@@ -729,9 +729,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -755,7 +755,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -940,21 +940,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": true,
               "run_policy": "generic_only",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": true,
               "run_policy": "generic_only",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -962,9 +962,9 @@
           "video_selector": "generated-music video, video-player video, response-element video, video",
           "container_selector": "response-element, generated-image, generated-music, .attachment-container, .markdown-main-panel",
           "force_postprocess": false,
-          "debounce_seconds": 1.0,
+          "debounce_seconds": 1,
           "wait_for_load": true,
-          "load_timeout_seconds": 10.0,
+          "load_timeout_seconds": 10,
           "download_blobs": true,
           "max_size_mb": 50,
           "canvas_export_mime": "image/jpeg",
@@ -987,9 +987,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -1013,7 +1013,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -1036,9 +1036,9 @@
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -1048,7 +1048,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 8.0,
+            "attachment_observe_window": 8,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -1101,8 +1101,8 @@
             "require_attachment_present": true,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": false,
-            "idle_timeout": 12.0,
-            "hard_max_wait": 120.0
+            "idle_timeout": 12,
+            "hard_max_wait": 120
           }
         },
         "prompt_padding": {
@@ -1208,21 +1208,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": true,
               "run_policy": "generic_only",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": true,
               "run_policy": "generic_only",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -1230,9 +1230,9 @@
           "video_selector": "generated-music video, video-player video, response-element video, video",
           "container_selector": "response-element, generated-image, generated-music, .attachment-container, .markdown-main-panel",
           "force_postprocess": false,
-          "debounce_seconds": 1.0,
+          "debounce_seconds": 1,
           "wait_for_load": true,
-          "load_timeout_seconds": 10.0,
+          "load_timeout_seconds": 10,
           "download_blobs": true,
           "max_size_mb": 50,
           "canvas_export_mime": "image/jpeg",
@@ -1255,9 +1255,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -1281,7 +1281,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -1304,9 +1304,9 @@
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -1316,7 +1316,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 8.0,
+            "attachment_observe_window": 8,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -1369,8 +1369,8 @@
             "require_attachment_present": true,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": false,
-            "idle_timeout": 12.0,
-            "hard_max_wait": 120.0
+            "idle_timeout": 12,
+            "hard_max_wait": 120
           }
         },
         "prompt_padding": {
@@ -1476,21 +1476,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": true,
               "run_policy": "generic_only",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": true,
               "run_policy": "generic_only",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -1498,9 +1498,9 @@
           "video_selector": "generated-music video, video-player video, response-element video, video",
           "container_selector": "response-element, generated-image, generated-music, .attachment-container, .markdown-main-panel",
           "force_postprocess": false,
-          "debounce_seconds": 1.0,
+          "debounce_seconds": 1,
           "wait_for_load": true,
-          "load_timeout_seconds": 10.0,
+          "load_timeout_seconds": 10,
           "download_blobs": true,
           "max_size_mb": 50,
           "canvas_export_mime": "image/jpeg",
@@ -1523,9 +1523,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -1549,7 +1549,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -1572,9 +1572,9 @@
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -1584,7 +1584,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 8.0,
+            "attachment_observe_window": 8,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -1637,8 +1637,8 @@
             "require_attachment_present": true,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": false,
-            "idle_timeout": 12.0,
-            "hard_max_wait": 120.0
+            "idle_timeout": 12,
+            "hard_max_wait": 120
           }
         },
         "prompt_padding": {
@@ -1716,21 +1716,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -1738,9 +1738,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -1763,9 +1763,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -1789,7 +1789,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -1812,9 +1812,9 @@
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -1824,7 +1824,7 @@
             "post_click_observe_window": 2.4,
             "pre_retry_probe_window": 0.18,
             "retry_observe_window": 1.2,
-            "attachment_observe_window": 8.0,
+            "attachment_observe_window": 8,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -1849,8 +1849,8 @@
             "require_attachment_present": false,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": true,
-            "idle_timeout": 8.0,
-            "hard_max_wait": 90.0
+            "idle_timeout": 8,
+            "hard_max_wait": 90
           }
         },
         "prompt_padding": {
@@ -1923,21 +1923,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -1945,9 +1945,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -1970,9 +1970,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -1996,7 +1996,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -2019,9 +2019,9 @@
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -2031,7 +2031,7 @@
             "post_click_observe_window": 2.4,
             "pre_retry_probe_window": 0.18,
             "retry_observe_window": 1.2,
-            "attachment_observe_window": 8.0,
+            "attachment_observe_window": 8,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -2147,21 +2147,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -2169,9 +2169,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -2194,9 +2194,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -2220,7 +2220,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -2243,9 +2243,9 @@
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -2255,7 +2255,7 @@
             "post_click_observe_window": 2.4,
             "pre_retry_probe_window": 0.18,
             "retry_observe_window": 1.2,
-            "attachment_observe_window": 8.0,
+            "attachment_observe_window": 8,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -2280,8 +2280,8 @@
             "require_attachment_present": false,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": true,
-            "idle_timeout": 8.0,
-            "hard_max_wait": 90.0
+            "idle_timeout": 8,
+            "hard_max_wait": 90
           }
         },
         "prompt_padding": {
@@ -2345,21 +2345,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 15.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 15
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -2367,9 +2367,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 10.0,
+          "load_timeout_seconds": 10,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -2388,9 +2388,9 @@
             "语音朗读",
             "收听"
           ],
-          "audio_capture_max_wait_seconds": 15.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 15,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -2414,7 +2414,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -2507,21 +2507,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": true,
               "run_policy": "probe_if_trigger_found",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 10.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 10
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -2531,7 +2531,7 @@
           "force_postprocess": false,
           "debounce_seconds": 0,
           "wait_for_load": true,
-          "load_timeout_seconds": 10.0,
+          "load_timeout_seconds": 10,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -2553,9 +2553,9 @@
             "自动播报",
             "播报"
           ],
-          "audio_capture_max_wait_seconds": 10.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 10,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -2576,7 +2576,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -2686,21 +2686,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -2708,9 +2708,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -2733,9 +2733,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -2759,7 +2759,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -2821,7 +2821,7 @@
             "action": "WAIT",
             "target": "",
             "optional": false,
-            "value": 2
+            "value": 1
           },
           {
             "action": "FILL_INPUT",
@@ -2855,6 +2855,14 @@
           }
         ],
         "stealth": true,
+        "advanced": {
+          "input_box_stability_wait_enabled": true,
+          "input_box_stability_wait_after_new_chat_only": true,
+          "input_box_stability_wait_timeout": 1.5,
+          "url_transition_wait_on_new_chat": true,
+          "send_confirmation_check_enabled": true,
+          "send_confirmation_check_timeout": 1.5
+        },
         "stream_config": {
           "mode": "network",
           "hard_timeout": 300,
@@ -2873,21 +2881,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -2895,9 +2903,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -2920,9 +2928,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -2946,7 +2954,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -3032,21 +3040,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -3054,9 +3062,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -3079,9 +3087,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -3105,7 +3113,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -3140,6 +3148,14 @@
           "enabled": false,
           "marker_text": "测试号，无实际意义",
           "segments_per_side": 12
+        },
+        "advanced": {
+          "input_box_stability_wait_enabled": true,
+          "input_box_stability_wait_after_new_chat_only": true,
+          "input_box_stability_wait_timeout": 4,
+          "url_transition_wait_on_new_chat": true,
+          "send_confirmation_check_enabled": true,
+          "send_confirmation_check_timeout": 1.5
         }
       },
       "预设_过CF盾": {
@@ -3182,21 +3198,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -3204,9 +3220,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -3229,9 +3245,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -3255,7 +3271,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -3358,21 +3374,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img.transition-opacity.duration-500.opacity-100.aspect-square.object-cover",
@@ -3380,9 +3396,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": true,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -3405,9 +3421,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -3431,7 +3447,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -3537,21 +3553,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img.transition-opacity.duration-500.opacity-100.aspect-square.object-cover",
@@ -3559,9 +3575,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": true,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -3584,9 +3600,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -3610,7 +3626,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -3717,21 +3733,21 @@
             "image": {
               "enabled": true,
               "run_policy": "on_signal",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img.transition-opacity.duration-500.opacity-100.aspect-square.object-cover",
@@ -3739,9 +3755,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -3764,9 +3780,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -3790,7 +3806,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -3837,7 +3853,9 @@
       "independent_cookies_auto_takeover": false,
       "input_box_stability_wait_enabled": true,
       "input_box_stability_wait_after_new_chat_only": true,
-      "input_box_stability_wait_timeout": 1.5
+      "input_box_stability_wait_timeout": 1.5,
+      "send_confirmation_check_enabled": true,
+      "send_confirmation_check_timeout": 1.5
     }
   },
   "chat.qwen.ai": {
@@ -3906,21 +3924,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -3928,9 +3946,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -3953,9 +3971,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -3979,7 +3997,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -4002,9 +4020,9 @@
           "hint_text": "继续",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -4014,7 +4032,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 6.0,
+            "attachment_observe_window": 6,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -4059,8 +4077,8 @@
             "require_attachment_present": true,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": false,
-            "idle_timeout": 8.0,
-            "hard_max_wait": 90.0
+            "idle_timeout": 8,
+            "hard_max_wait": 90
           }
         },
         "prompt_padding": {
@@ -4145,21 +4163,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -4167,9 +4185,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -4192,9 +4210,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -4218,7 +4236,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -4241,9 +4259,9 @@
           "hint_text": "继续",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -4253,7 +4271,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 6.0,
+            "attachment_observe_window": 6,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -4302,8 +4320,8 @@
             "require_attachment_present": true,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": false,
-            "idle_timeout": 8.0,
-            "hard_max_wait": 90.0
+            "idle_timeout": 8,
+            "hard_max_wait": 90
           }
         },
         "prompt_padding": {
@@ -4395,21 +4413,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -4417,9 +4435,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -4442,9 +4460,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -4468,7 +4486,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -4491,9 +4509,9 @@
           "hint_text": "文件内容为需要回复的上下文，按上下文回复",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -4503,7 +4521,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 6.0,
+            "attachment_observe_window": 6,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -4552,8 +4570,8 @@
             "require_attachment_present": true,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": false,
-            "idle_timeout": 8.0,
-            "hard_max_wait": 90.0
+            "idle_timeout": 8,
+            "hard_max_wait": 90
           }
         },
         "prompt_padding": {
@@ -4631,21 +4649,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -4653,9 +4671,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -4678,9 +4696,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -4704,7 +4722,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -4812,21 +4830,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -4834,9 +4852,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -4859,9 +4877,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -4885,7 +4903,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -4909,8 +4927,8 @@
           "reacquire_input_after_upload": true,
           "post_upload_input_selector": ".input-box-inner textarea",
           "post_upload_settle": 0.4,
-          "upload_signal_timeout": 6.0,
-          "upload_signal_grace": 4.0,
+          "upload_signal_timeout": 6,
+          "upload_signal_grace": 4,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -4920,7 +4938,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 6.0,
+            "attachment_observe_window": 6,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -4966,8 +4984,8 @@
             "require_attachment_present": false,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": true,
-            "idle_timeout": 8.0,
-            "hard_max_wait": 90.0
+            "idle_timeout": 8,
+            "hard_max_wait": 90
           }
         },
         "prompt_padding": {
@@ -4987,7 +5005,6 @@
     }
   },
   "ai.google.dev": {
-    "default_preset": "主预设",
     "presets": {
       "主预设": {
         "selectors": {
@@ -5056,21 +5073,21 @@
             "image": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 45.0,
-              "blind_wait_timeout_seconds": 1.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
             },
             "audio": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "capture_timeout_seconds": 12.0
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
             },
             "video": {
               "enabled": false,
               "run_policy": "disabled",
-              "quick_probe_timeout_seconds": 1.0,
-              "late_wait_timeout_seconds": 90.0
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
             }
           },
           "selector": "img",
@@ -5078,9 +5095,9 @@
           "video_selector": "video, video source",
           "container_selector": null,
           "force_postprocess": false,
-          "debounce_seconds": 2.0,
+          "debounce_seconds": 2,
           "wait_for_load": true,
-          "load_timeout_seconds": 5.0,
+          "load_timeout_seconds": 5,
           "download_blobs": true,
           "max_size_mb": 10,
           "canvas_export_mime": "image/jpeg",
@@ -5103,9 +5120,9 @@
             "tts",
             "voice"
           ],
-          "audio_capture_max_wait_seconds": 12.0,
-          "audio_capture_min_wait_seconds": 2.0,
-          "audio_capture_hard_max_wait_seconds": 45.0,
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
           "audio_capture_estimated_chars_per_second": 4.8,
           "audio_capture_wait_padding_seconds": 1.2,
           "audio_network_capture": {
@@ -5129,7 +5146,7 @@
             "speech_rate": 0,
             "pitch": 0,
             "format": "aac",
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 30,
             "pc_version": "3.20.2",
             "aid": "497858",
             "real_aid": "497858",
@@ -5152,9 +5169,9 @@
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
-          "post_upload_settle": 0.0,
+          "post_upload_settle": 0,
           "upload_signal_timeout": 2.5,
-          "upload_signal_grace": 3.0,
+          "upload_signal_grace": 3,
           "state_probe": {
             "enabled": false,
             "code": ""
@@ -5164,7 +5181,7 @@
             "post_click_observe_window": 1.8,
             "pre_retry_probe_window": 0.12,
             "retry_observe_window": 0.9,
-            "attachment_observe_window": 6.0,
+            "attachment_observe_window": 6,
             "max_retry_count": 2,
             "retry_interval": 0.6,
             "retry_cooldown_window": 1.5,
@@ -5189,8 +5206,8 @@
             "require_attachment_present": false,
             "require_upload_signal_before_ready": false,
             "continue_once_on_unconfirmed_send": true,
-            "idle_timeout": 8.0,
-            "hard_max_wait": 90.0
+            "idle_timeout": 8,
+            "hard_max_wait": 90
           }
         },
         "prompt_padding": {
@@ -5199,6 +5216,7 @@
           "segments_per_side": 12
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   }
 }

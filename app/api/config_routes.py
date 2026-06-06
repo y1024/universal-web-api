@@ -228,16 +228,18 @@ async def get_site_main_branch_config(
 @router.get("/api/sites/{domain}/advanced-config")
 async def get_site_advanced_config(
     domain: str,
+    preset_name: Optional[str] = None,
     authenticated: bool = Depends(verify_auth)
 ):
-    """获取站点级高级配置。"""
+    """获取站点/预设合并后的高级配置。"""
     if domain not in config_engine.sites:
         raise HTTPException(status_code=404, detail=f"配置不存在: {domain}")
 
     try:
-        config = config_engine.get_site_advanced_config(domain)
+        config = config_engine.get_site_advanced_config(domain, preset_name=preset_name)
         return {
             "domain": domain,
+            "preset_name": preset_name,
             "advanced": config,
         }
     except Exception as e:
@@ -261,10 +263,30 @@ async def set_site_advanced_config(
         "input_box_stability_wait_enabled": bool(body.input_box_stability_wait_enabled),
         "input_box_stability_wait_after_new_chat_only": bool(body.input_box_stability_wait_after_new_chat_only),
         "input_box_stability_wait_timeout": float(body.input_box_stability_wait_timeout),
+        "url_transition_wait_on_new_chat": bool(body.url_transition_wait_on_new_chat),
+        "send_confirmation_check_enabled": bool(body.send_confirmation_check_enabled),
+        "send_confirmation_check_timeout": float(body.send_confirmation_check_timeout),
     }
+    provided_fields = getattr(body, "model_fields_set", None)
+    if provided_fields is None:
+        provided_fields = getattr(body, "__fields_set__", set())
+    if "url_transition_wait_patterns" in provided_fields:
+        payload["url_transition_wait_patterns"] = [
+            str(pattern or "").strip()
+            for pattern in (body.url_transition_wait_patterns or [])
+            if str(pattern or "").strip()
+        ]
 
     try:
-        success = config_engine.set_site_advanced_config(domain, payload)
+        preset_name = str(body.preset_name or "").strip()
+        if preset_name:
+            success = config_engine.set_preset_advanced_config(
+                domain,
+                payload,
+                preset_name=preset_name,
+            )
+        else:
+            success = config_engine.set_site_advanced_config(domain, payload)
         if not success:
             raise HTTPException(status_code=500, detail="高级配置保存失败")
 
@@ -272,7 +294,11 @@ async def set_site_advanced_config(
             "status": "success",
             "message": f"站点 {domain} 高级配置已更新",
             "domain": domain,
-            "advanced": config_engine.get_site_advanced_config(domain),
+            "preset_name": preset_name or None,
+            "advanced": config_engine.get_site_advanced_config(
+                domain,
+                preset_name=preset_name or None,
+            ),
         }
     except HTTPException:
         raise

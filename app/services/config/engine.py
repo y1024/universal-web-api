@@ -76,6 +76,16 @@ PRESET_FIELDS = [
     "extractor_id", "extractor_verified"
 ]
 
+PRESET_ADVANCED_FIELDS = {
+    "input_box_stability_wait_enabled",
+    "input_box_stability_wait_after_new_chat_only",
+    "input_box_stability_wait_timeout",
+    "url_transition_wait_on_new_chat",
+    "url_transition_wait_patterns",
+    "send_confirmation_check_enabled",
+    "send_confirmation_check_timeout",
+}
+
 # 默认工作流
 DEFAULT_WORKFLOW: List[WorkflowStep] = [
     {"action": "CLICK", "target": "new_chat_btn", "optional": True, "value": None},
@@ -877,22 +887,21 @@ class ConfigEngine:
         entries.sort(key=lambda item: (int(item.get("guide_priority", 0)), str(item.get("domain") or "")))
         return entries
 
-    def get_site_advanced_config(self, domain: str) -> Dict[str, Any]:
-        """获取站点级高级配置。"""
-        self.refresh_if_changed()
-
-        site = self.sites.get(domain)
-        if not site:
-            return get_default_site_advanced_config()
-
-        raw_config = site.get("advanced") if isinstance(site, dict) else None
-        if not isinstance(raw_config, dict):
-            raw_config = {}
-
+    def _normalize_site_advanced_config(
+        self,
+        raw_config: Optional[Dict[str, Any]] = None,
+        *,
+        base_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """合并并规范化高级配置。"""
         normalized = {
             **get_default_site_advanced_config(),
-            **copy.deepcopy(raw_config),
         }
+        if isinstance(base_config, dict):
+            normalized.update(copy.deepcopy(base_config))
+        if isinstance(raw_config, dict):
+            normalized.update(copy.deepcopy(raw_config))
+
         normalized["independent_cookies"] = bool(normalized.get("independent_cookies", False))
         normalized["independent_cookies_auto_takeover"] = bool(
             normalized.get("independent_cookies_auto_takeover", False)
@@ -908,6 +917,60 @@ class ConfigEngine:
         except Exception:
             timeout_value = 1.5
         normalized["input_box_stability_wait_timeout"] = max(0.2, min(timeout_value, 10.0))
+        normalized["url_transition_wait_on_new_chat"] = bool(
+            normalized.get("url_transition_wait_on_new_chat", False)
+        )
+        raw_patterns = normalized.get("url_transition_wait_patterns") or []
+        if isinstance(raw_patterns, str):
+            raw_patterns = raw_patterns.replace("\n", ",").replace(";", ",").split(",")
+        if not isinstance(raw_patterns, (list, tuple, set)):
+            raw_patterns = []
+        normalized["url_transition_wait_patterns"] = [
+            str(pattern or "").strip()
+            for pattern in raw_patterns
+            if str(pattern or "").strip()
+        ]
+        normalized["send_confirmation_check_enabled"] = bool(
+            normalized.get("send_confirmation_check_enabled", False)
+        )
+        try:
+            send_timeout_value = float(normalized.get("send_confirmation_check_timeout", 1.5))
+        except Exception:
+            send_timeout_value = 1.5
+        normalized["send_confirmation_check_timeout"] = max(0.1, min(send_timeout_value, 10.0))
+        return normalized
+
+    def get_site_advanced_config(self, domain: str, preset_name: str = None) -> Dict[str, Any]:
+        """获取站点高级配置；传入 preset_name 时叠加对应预设的覆盖项。"""
+        self.refresh_if_changed()
+
+        site = self.sites.get(domain)
+        if not site:
+            return self._normalize_site_advanced_config()
+
+        raw_config = site.get("advanced") if isinstance(site, dict) else None
+        normalized = self._normalize_site_advanced_config(
+            raw_config if isinstance(raw_config, dict) else {}
+        )
+
+        if preset_name is not None:
+            preset_data = self._get_site_data_readonly(domain, preset_name)
+            preset_advanced = (
+                preset_data.get("advanced")
+                if isinstance(preset_data, dict)
+                else None
+            )
+            if isinstance(preset_advanced, dict):
+                preset_advanced = {
+                    key: value
+                    for key, value in preset_advanced.items()
+                    if key in PRESET_ADVANCED_FIELDS
+                }
+                normalized = self._normalize_site_advanced_config(
+                    preset_advanced,
+                    base_config=normalized,
+                )
+
         return normalized
 
     def set_site_advanced_config(self, domain: str, config: Dict[str, Any]) -> bool:
@@ -919,27 +982,43 @@ class ConfigEngine:
             logger.warning(f"站点不存在: {domain}")
             return False
 
-        normalized = {
-            **get_default_site_advanced_config(),
-            **copy.deepcopy(config or {}),
-        }
-        normalized["independent_cookies"] = bool(normalized.get("independent_cookies", False))
-        normalized["independent_cookies_auto_takeover"] = bool(
-            normalized.get("independent_cookies_auto_takeover", False)
-        )
-        normalized["input_box_stability_wait_enabled"] = bool(
-            normalized.get("input_box_stability_wait_enabled", False)
-        )
-        normalized["input_box_stability_wait_after_new_chat_only"] = bool(
-            normalized.get("input_box_stability_wait_after_new_chat_only", True)
-        )
-        try:
-            timeout_value = float(normalized.get("input_box_stability_wait_timeout", 1.5))
-        except Exception:
-            timeout_value = 1.5
-        normalized["input_box_stability_wait_timeout"] = max(0.2, min(timeout_value, 10.0))
+        existing = site.get("advanced") if isinstance(site.get("advanced"), dict) else {}
+        normalized = self._normalize_site_advanced_config(config or {}, base_config=existing)
 
         site["advanced"] = normalized
+        return self._save_config()
+
+    def set_preset_advanced_config(
+        self,
+        domain: str,
+        config: Dict[str, Any],
+        preset_name: str = None,
+    ) -> bool:
+        """设置当前预设的工作流时序类高级配置。"""
+        self.refresh_if_changed()
+
+        data = self._get_site_data(domain, preset_name)
+        if data is None:
+            logger.warning(f"站点或预设不存在: {domain}/{preset_name}")
+            return False
+
+        site_base = self.get_site_advanced_config(domain)
+        normalized = self._normalize_site_advanced_config(
+            config or {},
+            base_config=site_base,
+        )
+
+        stored = copy.deepcopy(data.get("advanced") or {})
+        if not isinstance(stored, dict):
+            stored = {}
+
+        provided_keys = set((config or {}).keys()) if isinstance(config, dict) else set()
+        for key in PRESET_ADVANCED_FIELDS:
+            if key == "url_transition_wait_patterns" and key not in provided_keys:
+                continue
+            stored[key] = normalized[key]
+
+        data["advanced"] = stored
         return self._save_config()
 
     def set_default_preset(self, domain: str, preset_name: str) -> bool:

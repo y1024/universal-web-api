@@ -417,6 +417,15 @@ class TextInputHandler:
             if active_within or selection_within:
                 return True
 
+            self.focus_to_end(ele)
+            time.sleep(0.05)
+
+            state = self._probe_focus_state(ele)
+            active_within = bool(state.get("activeWithin"))
+            selection_within = bool(state.get("selectionWithin"))
+            if active_within or selection_within:
+                return True
+
             if attempt < attempts:
                 self.physical_activate(ele)
                 time.sleep(0.08)
@@ -446,6 +455,7 @@ class TextInputHandler:
                     time.sleep(0.04)
                     state = self._probe_focus_state(ele)
                     if bool(state.get("activeWithin")) or bool(state.get("selectionWithin")):
+                        logger.debug(f"[STEALTH_FOCUS] Native DOM focus successful on attempt {attempt + 1}")
                         return True
                     last_state = state
             except Exception as e:
@@ -457,6 +467,7 @@ class TextInputHandler:
                     time.sleep(0.04)
                     state = self._probe_focus_state(ele)
                     if bool(state.get("activeWithin")) or bool(state.get("selectionWithin")):
+                        logger.debug(f"[STEALTH_FOCUS] Native fallback focus successful on attempt {attempt + 1}")
                         return True
                     last_state = state
             except Exception as e:
@@ -465,7 +476,7 @@ class TextInputHandler:
             if attempt < total_attempts - 1:
                 time.sleep(0.05)
 
-        logger.debug(
+        logger.warning(
             "[STEALTH] 原生聚焦后未能确认焦点 "
             f"(active_within={bool(last_state.get('activeWithin'))}, "
             f"selection_within={bool(last_state.get('selectionWithin'))}, "
@@ -477,27 +488,51 @@ class TextInputHandler:
         """最小化校验粘贴结果，避免整页全选后脚本误判成功。"""
         expected = self.normalize_for_compare(expected_text)
         if not expected:
+            logger.debug("[PASTE_VERIFY] 预期文本为空，直接返回 True")
             return True
 
         actual = self.read_input_full_text(ele)
         actual_normalized = self.normalize_for_compare(actual)
+        
+        expected_len = len(expected_text)
+        actual_len = len(actual)
+        
+        # 提取首尾字符样本，转义换行以保持日志在一行内
+        head_sample = actual[:60].replace('\r', '\\r').replace('\n', '\\n')
+        tail_sample = actual[-60:].replace('\r', '\\r').replace('\n', '\\n')
+
         if actual_normalized == expected:
+            logger.debug(
+                "[PASTE_VERIFY] 精确匹配成功: "
+                f"actual={actual_len}, expected={expected_len}, "
+                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
+            )
             return True
 
         expected_core = re.sub(r'\s+', '', expected_text)
         actual_core = re.sub(r'\s+', '', actual)
         if actual_core == expected_core:
+            logger.debug(
+                "[PASTE_VERIFY] 核心无空白字符匹配成功: "
+                f"actual={actual_len}, expected={expected_len}, "
+                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
+            )
             return True
 
         if expected_core and expected_core in actual_core:
+            logger.debug(
+                "[PASTE_VERIFY] 核心文本包含关系匹配成功: "
+                f"actual={actual_len}, expected={expected_len}, "
+                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
+            )
             return True
 
-        expected_len = len(expected_core)
-        actual_len = len(actual_core)
-        ratio = (actual_len / expected_len) if expected_len > 0 else 1.0
+        expected_core_len = len(expected_core)
+        actual_core_len = len(actual_core)
+        ratio = (actual_core_len / expected_core_len) if expected_core_len > 0 else 1.0
 
-        prefix_len = min(64, expected_len, actual_len)
-        suffix_len = min(64, expected_len, actual_len)
+        prefix_len = min(64, expected_core_len, actual_core_len)
+        suffix_len = min(64, expected_core_len, actual_core_len)
         prefix_match = (
             prefix_len == 0
             or actual_core[:prefix_len] == expected_core[:prefix_len]
@@ -506,33 +541,37 @@ class TextInputHandler:
             suffix_len == 0
             or actual_core[-suffix_len:] == expected_core[-suffix_len:]
         )
-        length_gap = abs(expected_len - actual_len)
-        max_gap = max(4, expected_len // 100)
+        length_gap = abs(expected_core_len - actual_core_len)
+        max_gap = max(4, expected_core_len // 100)
 
         if (
-            actual_len > 0
+            actual_core_len > 0
             and ratio >= 0.98
             and length_gap <= max_gap
             and prefix_match
             and suffix_match
         ):
             logger.debug(
-                "[PASTE_VERIFY] 接受近似匹配结果 "
-                f"(actual={actual_len}, expected={expected_len}, ratio={ratio:.2f}, gap={length_gap})"
+                "[PASTE_VERIFY] 接受近似匹配结果: "
+                f"actual={actual_len} (core={actual_core_len}), expected={expected_len} (core={expected_core_len}), "
+                f"ratio={ratio:.2f}, gap={length_gap}, "
+                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
             )
             return True
 
-        if actual_len == 0 or ratio < 0.98 or not prefix_match or not suffix_match:
+        if actual_core_len == 0 or ratio < 0.98 or not prefix_match or not suffix_match:
             logger.warning(
-                "[PASTE_VERIFY] 检测到异常粘贴结果 "
-                f"(actual={actual_len}, expected={expected_len}, ratio={ratio:.2f}, "
-                f"prefix_match={prefix_match}, suffix_match={suffix_match})"
+                "[PASTE_VERIFY] 检测到异常粘贴结果: "
+                f"actual={actual_len} (core={actual_core_len}), expected={expected_len} (core={expected_core_len}), "
+                f"ratio={ratio:.2f}, prefix_match={prefix_match}, suffix_match={suffix_match}, "
+                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
             )
             return False
 
         logger.warning(
-            "[PASTE_VERIFY] 粘贴结果长度偏差过大 "
-            f"(actual={actual_len}, expected={expected_len}, gap={length_gap})"
+            "[PASTE_VERIFY] 粘贴结果长度偏差过大: "
+            f"actual={actual_len} (core={actual_core_len}), expected={expected_len} (core={expected_core_len}), "
+            f"gap={length_gap}, head={repr(head_sample)}, tail={repr(tail_sample)}"
         )
         return False
 

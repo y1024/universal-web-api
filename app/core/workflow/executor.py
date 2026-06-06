@@ -922,6 +922,17 @@ class WorkflowExecutor(
             if not optional:
                 yield self.formatter.pack_error(f"元素未找到: {str(e)}")
                 raise
+
+        except WorkflowError as e:
+            if self._check_cancelled():
+                logger.info(f"[Executor] step cancelled; suppressing workflow exception [{action}]: {e}")
+                return
+            logger.error(f"步骤执行失败 [{action}]: {e}")
+            if str(e) in {"new_chat_transition_timeout", "send_unconfirmed"}:
+                raise
+            if not optional:
+                yield self.formatter.pack_error(f"执行失败: {str(e)}")
+                raise
         
         except Exception as e:
             if self._check_cancelled():

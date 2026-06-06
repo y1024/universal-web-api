@@ -205,16 +205,41 @@ window.ConfigTab = {
                     independent_cookies_auto_takeover: false,
                     input_box_stability_wait_enabled: false,
                     input_box_stability_wait_after_new_chat_only: true,
-                    input_box_stability_wait_timeout: 1.5
+                    input_box_stability_wait_timeout: 1.5,
+                    url_transition_wait_on_new_chat: false,
+                    send_confirmation_check_enabled: false,
+                    send_confirmation_check_timeout: 1.5
                 };
             }
-            return {
-                independent_cookies: false,
-                independent_cookies_auto_takeover: false,
+            const siteAdvanced = (this.currentConfig.advanced && typeof this.currentConfig.advanced === 'object')
+                ? this.currentConfig.advanced
+                : {};
+            const presetAdvanced = (this.presetConfig && this.presetConfig.advanced && typeof this.presetConfig.advanced === 'object')
+                ? this.presetConfig.advanced
+                : {};
+            const timingAdvanced = {
                 input_box_stability_wait_enabled: false,
                 input_box_stability_wait_after_new_chat_only: true,
                 input_box_stability_wait_timeout: 1.5,
-                ...(this.currentConfig.advanced || {})
+                url_transition_wait_on_new_chat: false,
+                send_confirmation_check_enabled: false,
+                send_confirmation_check_timeout: 1.5,
+                ...siteAdvanced,
+                ...presetAdvanced
+            };
+            return {
+                independent_cookies: !!siteAdvanced.independent_cookies,
+                independent_cookies_auto_takeover: !!siteAdvanced.independent_cookies_auto_takeover,
+                input_box_stability_wait_enabled: !!timingAdvanced.input_box_stability_wait_enabled,
+                input_box_stability_wait_after_new_chat_only: !!timingAdvanced.input_box_stability_wait_after_new_chat_only,
+                input_box_stability_wait_timeout: this.sanitizeInputStabilityWaitTimeout(
+                    timingAdvanced.input_box_stability_wait_timeout
+                ),
+                url_transition_wait_on_new_chat: !!timingAdvanced.url_transition_wait_on_new_chat,
+                send_confirmation_check_enabled: !!timingAdvanced.send_confirmation_check_enabled,
+                send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(
+                    timingAdvanced.send_confirmation_check_timeout
+                )
             };
         },
         compareLocalParsed() {
@@ -307,9 +332,8 @@ window.ConfigTab = {
             if (
                 parsed.presets !== undefined
                 || parsed.default_preset !== undefined
-                || parsed.advanced !== undefined
             ) {
-                throw new Error('这里只接受单个预设配置对象，不要包含 presets/default_preset/advanced');
+                throw new Error('这里只接受单个预设配置对象，不要包含 presets/default_preset');
             }
             if (
                 parsed.selectors !== undefined
@@ -323,6 +347,16 @@ window.ConfigTab = {
             }
             if (parsed.workflow !== undefined && !Array.isArray(parsed.workflow)) {
                 throw new Error('workflow 必须是数组');
+            }
+            if (
+                parsed.advanced !== undefined
+                && (
+                    parsed.advanced === null
+                    || typeof parsed.advanced !== 'object'
+                    || Array.isArray(parsed.advanced)
+                )
+            ) {
+                throw new Error('advanced 必须是对象');
             }
         },
 
@@ -386,6 +420,7 @@ window.ConfigTab = {
                 image_extraction: '图片提取',
                 file_paste: '文件粘贴',
                 prompt_padding: '首尾填充',
+                advanced: '高级配置',
                 stealth: '低熵模式',
                 extractor_id: '提取器',
                 extractor_verified: '提取器验证'
@@ -397,6 +432,7 @@ window.ConfigTab = {
                 'image_extraction',
                 'file_paste',
                 'prompt_padding',
+                'advanced',
                 'stealth',
                 'extractor_id',
                 'extractor_verified'
@@ -704,23 +740,104 @@ window.ConfigTab = {
             return Math.min(10, Math.max(0.2, parsed));
         },
 
+        sanitizeSendConfirmationCheckTimeout(value) {
+            const parsed = Number(value);
+            if (!Number.isFinite(parsed)) {
+                return 1.5;
+            }
+            return Math.min(10, Math.max(0.1, parsed));
+        },
+
         buildSiteAdvancedPayload(overrides = {}) {
+            const siteAdvanced = {
+                independent_cookies: false,
+                independent_cookies_auto_takeover: false,
+                input_box_stability_wait_enabled: false,
+                input_box_stability_wait_after_new_chat_only: true,
+                input_box_stability_wait_timeout: 1.5,
+                url_transition_wait_on_new_chat: false,
+                send_confirmation_check_enabled: false,
+                send_confirmation_check_timeout: 1.5,
+                ...((this.currentConfig && this.currentConfig.advanced) || {}),
+                ...overrides
+            };
             return {
-                independent_cookies: !!this.siteAdvancedConfig.independent_cookies,
-                independent_cookies_auto_takeover: !!this.siteAdvancedConfig.independent_cookies_auto_takeover,
+                independent_cookies: !!siteAdvanced.independent_cookies,
+                independent_cookies_auto_takeover: !!siteAdvanced.independent_cookies_auto_takeover,
+                input_box_stability_wait_enabled: !!siteAdvanced.input_box_stability_wait_enabled,
+                input_box_stability_wait_after_new_chat_only: !!siteAdvanced.input_box_stability_wait_after_new_chat_only,
+                input_box_stability_wait_timeout: this.sanitizeInputStabilityWaitTimeout(
+                    siteAdvanced.input_box_stability_wait_timeout
+                ),
+                url_transition_wait_on_new_chat: !!siteAdvanced.url_transition_wait_on_new_chat,
+                send_confirmation_check_enabled: !!siteAdvanced.send_confirmation_check_enabled,
+                send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(
+                    siteAdvanced.send_confirmation_check_timeout
+                )
+            };
+        },
+
+        buildPresetAdvancedPayload(overrides = {}) {
+            const nextAdvanced = {
                 input_box_stability_wait_enabled: !!this.siteAdvancedConfig.input_box_stability_wait_enabled,
                 input_box_stability_wait_after_new_chat_only: !!this.siteAdvancedConfig.input_box_stability_wait_after_new_chat_only,
                 input_box_stability_wait_timeout: this.sanitizeInputStabilityWaitTimeout(
                     this.siteAdvancedConfig.input_box_stability_wait_timeout
                 ),
+                url_transition_wait_on_new_chat: !!this.siteAdvancedConfig.url_transition_wait_on_new_chat,
+                send_confirmation_check_enabled: !!this.siteAdvancedConfig.send_confirmation_check_enabled,
+                send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(
+                    this.siteAdvancedConfig.send_confirmation_check_timeout
+                ),
                 ...overrides
+            };
+            return {
+                preset_name: this.selectedPreset,
+                independent_cookies: !!this.siteAdvancedConfig.independent_cookies,
+                independent_cookies_auto_takeover: !!this.siteAdvancedConfig.independent_cookies_auto_takeover,
+                input_box_stability_wait_enabled: !!nextAdvanced.input_box_stability_wait_enabled,
+                input_box_stability_wait_after_new_chat_only: !!nextAdvanced.input_box_stability_wait_after_new_chat_only,
+                input_box_stability_wait_timeout: this.sanitizeInputStabilityWaitTimeout(
+                    nextAdvanced.input_box_stability_wait_timeout
+                ),
+                url_transition_wait_on_new_chat: !!nextAdvanced.url_transition_wait_on_new_chat,
+                send_confirmation_check_enabled: !!nextAdvanced.send_confirmation_check_enabled,
+                send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(
+                    nextAdvanced.send_confirmation_check_timeout
+                )
             };
         },
 
-        async persistSiteAdvancedConfig(nextAdvanced, previousAdvanced) {
+        filterPresetAdvancedFields(config = {}) {
+            const keys = [
+                'input_box_stability_wait_enabled',
+                'input_box_stability_wait_after_new_chat_only',
+                'input_box_stability_wait_timeout',
+                'url_transition_wait_on_new_chat',
+                'send_confirmation_check_enabled',
+                'send_confirmation_check_timeout'
+            ];
+            const result = {};
+            keys.forEach(key => {
+                if (Object.prototype.hasOwnProperty.call(config, key)) {
+                    if (key === 'input_box_stability_wait_timeout') {
+                        result[key] = this.sanitizeInputStabilityWaitTimeout(config[key]);
+                    } else if (key === 'send_confirmation_check_timeout') {
+                        result[key] = this.sanitizeSendConfirmationCheckTimeout(config[key]);
+                    } else {
+                        result[key] = !!config[key];
+                    }
+                }
+            });
+            return result;
+        },
+
+        async persistSiteAdvancedConfig(nextAdvanced, previousAdvanced, options = {}) {
             const token = localStorage.getItem('api_token');
             const headers = { 'Content-Type': 'application/json' };
             if (token) headers['Authorization'] = 'Bearer ' + token;
+            const presetScoped = !!options.presetScoped;
+            const previousTarget = previousAdvanced || {};
 
             const response = await fetch('/api/sites/' + encodeURIComponent(this.currentDomain) + '/advanced-config', {
                 method: 'PUT',
@@ -730,15 +847,26 @@ window.ConfigTab = {
 
             if (!response.ok) {
                 const err = await response.json().catch(() => ({}));
-                this.currentConfig.advanced = previousAdvanced;
+                if (presetScoped && this.presetConfig) {
+                    this.presetConfig.advanced = previousTarget;
+                } else {
+                    this.currentConfig.advanced = previousTarget;
+                }
                 throw new Error(err.detail || ('HTTP ' + response.status));
             }
 
             const data = await response.json().catch(() => ({}));
-            this.currentConfig.advanced = {
-                ...previousAdvanced,
-                ...(data.advanced || nextAdvanced)
-            };
+            if (presetScoped && this.presetConfig) {
+                this.presetConfig.advanced = {
+                    ...previousTarget,
+                    ...this.filterPresetAdvancedFields(data.advanced || nextAdvanced)
+                };
+            } else {
+                this.currentConfig.advanced = {
+                    ...previousTarget,
+                    ...(data.advanced || nextAdvanced)
+                };
+            }
             this.$emit('reload-config');
         },
 
@@ -809,22 +937,22 @@ window.ConfigTab = {
         },
 
         async updateInputStabilityWaitEnabled(enabled) {
-            if (!this.currentDomain || !this.currentConfig) return;
+            if (!this.currentDomain || !this.currentConfig || !this.presetConfig) return;
 
             this.advancedConfigSaving = true;
-            const previousAdvanced = { ...(this.currentConfig.advanced || {}) };
-            const nextAdvanced = this.buildSiteAdvancedPayload({
+            const previousAdvanced = { ...(this.presetConfig.advanced || {}) };
+            const nextAdvanced = this.buildPresetAdvancedPayload({
                 input_box_stability_wait_enabled: !!enabled
             });
-            this.currentConfig.advanced = {
+            this.presetConfig.advanced = {
                 ...previousAdvanced,
-                ...nextAdvanced
+                ...this.filterPresetAdvancedFields(nextAdvanced)
             };
 
             try {
-                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced);
+                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced, { presetScoped: true });
             } catch (e) {
-                console.error('保存站点高级配置失败:', e);
+                console.error('保存预设高级配置失败:', e);
                 alert('保存失败: ' + e.message);
             } finally {
                 this.advancedConfigSaving = false;
@@ -832,22 +960,22 @@ window.ConfigTab = {
         },
 
         async updateInputStabilityWaitAfterNewChatOnly(enabled) {
-            if (!this.currentDomain || !this.currentConfig) return;
+            if (!this.currentDomain || !this.currentConfig || !this.presetConfig) return;
 
             this.advancedConfigSaving = true;
-            const previousAdvanced = { ...(this.currentConfig.advanced || {}) };
-            const nextAdvanced = this.buildSiteAdvancedPayload({
+            const previousAdvanced = { ...(this.presetConfig.advanced || {}) };
+            const nextAdvanced = this.buildPresetAdvancedPayload({
                 input_box_stability_wait_after_new_chat_only: !!enabled
             });
-            this.currentConfig.advanced = {
+            this.presetConfig.advanced = {
                 ...previousAdvanced,
-                ...nextAdvanced
+                ...this.filterPresetAdvancedFields(nextAdvanced)
             };
 
             try {
-                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced);
+                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced, { presetScoped: true });
             } catch (e) {
-                console.error('保存站点高级配置失败:', e);
+                console.error('保存预设高级配置失败:', e);
                 alert('保存失败: ' + e.message);
             } finally {
                 this.advancedConfigSaving = false;
@@ -855,22 +983,91 @@ window.ConfigTab = {
         },
 
         async updateInputStabilityWaitTimeout(value) {
-            if (!this.currentDomain || !this.currentConfig) return;
+            if (!this.currentDomain || !this.currentConfig || !this.presetConfig) return;
 
             this.advancedConfigSaving = true;
-            const previousAdvanced = { ...(this.currentConfig.advanced || {}) };
-            const nextAdvanced = this.buildSiteAdvancedPayload({
+            const previousAdvanced = { ...(this.presetConfig.advanced || {}) };
+            const nextAdvanced = this.buildPresetAdvancedPayload({
                 input_box_stability_wait_timeout: this.sanitizeInputStabilityWaitTimeout(value)
             });
-            this.currentConfig.advanced = {
+            this.presetConfig.advanced = {
                 ...previousAdvanced,
-                ...nextAdvanced
+                ...this.filterPresetAdvancedFields(nextAdvanced)
             };
 
             try {
-                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced);
+                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced, { presetScoped: true });
             } catch (e) {
-                console.error('保存站点高级配置失败:', e);
+                console.error('保存预设高级配置失败:', e);
+                alert('保存失败: ' + e.message);
+            } finally {
+                this.advancedConfigSaving = false;
+            }
+        },
+
+        async updateUrlTransitionWaitOnNewChat(enabled) {
+            if (!this.currentDomain || !this.currentConfig || !this.presetConfig) return;
+
+            this.advancedConfigSaving = true;
+            const previousAdvanced = { ...(this.presetConfig.advanced || {}) };
+            const nextAdvanced = this.buildPresetAdvancedPayload({
+                url_transition_wait_on_new_chat: !!enabled
+            });
+            this.presetConfig.advanced = {
+                ...previousAdvanced,
+                ...this.filterPresetAdvancedFields(nextAdvanced)
+            };
+
+            try {
+                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced, { presetScoped: true });
+            } catch (e) {
+                console.error('保存预设高级配置失败:', e);
+                alert('保存失败: ' + e.message);
+            } finally {
+                this.advancedConfigSaving = false;
+            }
+        },
+
+        async updateSendConfirmationCheckEnabled(enabled) {
+            if (!this.currentDomain || !this.currentConfig || !this.presetConfig) return;
+
+            this.advancedConfigSaving = true;
+            const previousAdvanced = { ...(this.presetConfig.advanced || {}) };
+            const nextAdvanced = this.buildPresetAdvancedPayload({
+                send_confirmation_check_enabled: !!enabled
+            });
+            this.presetConfig.advanced = {
+                ...previousAdvanced,
+                ...this.filterPresetAdvancedFields(nextAdvanced)
+            };
+
+            try {
+                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced, { presetScoped: true });
+            } catch (e) {
+                console.error('保存预设高级配置失败:', e);
+                alert('保存失败: ' + e.message);
+            } finally {
+                this.advancedConfigSaving = false;
+            }
+        },
+
+        async updateSendConfirmationCheckTimeout(value) {
+            if (!this.currentDomain || !this.currentConfig || !this.presetConfig) return;
+
+            this.advancedConfigSaving = true;
+            const previousAdvanced = { ...(this.presetConfig.advanced || {}) };
+            const nextAdvanced = this.buildPresetAdvancedPayload({
+                send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(value)
+            });
+            this.presetConfig.advanced = {
+                ...previousAdvanced,
+                ...this.filterPresetAdvancedFields(nextAdvanced)
+            };
+
+            try {
+                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced, { presetScoped: true });
+            } catch (e) {
+                console.error('保存预设高级配置失败:', e);
                 alert('保存失败: ' + e.message);
             } finally {
                 this.advancedConfigSaving = false;
@@ -1399,6 +1596,17 @@ window.ConfigTab = {
                                 <span>仅在刚点击 new_chat_btn 后启用</span>
                             </label>
 
+                            <label class="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    class="rounded"
+                                    :checked="siteAdvancedConfig.url_transition_wait_on_new_chat"
+                                    :disabled="advancedConfigSaving"
+                                    @change="updateUrlTransitionWaitOnNewChat($event.target.checked)"
+                                >
+                                <span>新建对话后等待 URL 切换（当前预设）</span>
+                            </label>
+
                             <label class="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
                                 <span>最长等待</span>
                                 <input
@@ -1410,6 +1618,41 @@ window.ConfigTab = {
                                     :value="siteAdvancedConfig.input_box_stability_wait_timeout"
                                     :disabled="advancedConfigSaving || !siteAdvancedConfig.input_box_stability_wait_enabled"
                                     @change="updateInputStabilityWaitTimeout($event.target.value)"
+                                >
+                                <span>秒</span>
+                            </label>
+                        </div>
+
+                        <div class="border-t dark:border-gray-700 pt-4 space-y-3">
+                            <div>
+                                <div class="text-sm font-medium text-gray-900 dark:text-white">发送内容确认与自愈</div>
+                                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                    点击 <code>send_btn</code> 后，确认输入框已清空或明显缩短；未确认时触发当前工作流重试。
+                                </p>
+                            </div>
+
+                            <label class="flex items-center gap-3 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    class="rounded"
+                                    :checked="siteAdvancedConfig.send_confirmation_check_enabled"
+                                    :disabled="advancedConfigSaving"
+                                    @change="updateSendConfirmationCheckEnabled($event.target.checked)"
+                                >
+                                <span>启用发送确认自愈（当前预设）</span>
+                            </label>
+
+                            <label class="flex items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
+                                <span>确认超时</span>
+                                <input
+                                    type="number"
+                                    min="0.1"
+                                    max="10"
+                                    step="0.1"
+                                    class="w-24 rounded border dark:border-gray-600 px-2 py-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                                    :value="siteAdvancedConfig.send_confirmation_check_timeout"
+                                    :disabled="advancedConfigSaving || !siteAdvancedConfig.send_confirmation_check_enabled"
+                                    @change="updateSendConfirmationCheckTimeout($event.target.value)"
                                 >
                                 <span>秒</span>
                             </label>

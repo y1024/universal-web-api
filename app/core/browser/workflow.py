@@ -735,9 +735,6 @@ class BrowserWorkflowMixin:
 
             try:
                 for chunk in stream:
-                    if self._chunk_has_stream_content(chunk):
-                        saw_content = True
-
                     is_terminal_error = self._is_retriable_stream_terminal_error_chunk(chunk)
                     if (
                         not saw_content
@@ -756,6 +753,9 @@ class BrowserWorkflowMixin:
                             )
                         )
                         break
+
+                    if not is_terminal_error and self._chunk_has_stream_content(chunk):
+                        saw_content = True
 
                     if is_terminal_error:
                         logger.error(
@@ -1291,7 +1291,10 @@ class BrowserWorkflowMixin:
         }
         
         extractor = config_engine.get_site_extractor(domain, preset_name=effective_preset_name)
-        site_advanced_config = config_engine.get_site_advanced_config(domain)
+        site_advanced_config = config_engine.get_site_advanced_config(
+            domain,
+            preset_name=resolved_preset_name,
+        )
         logger.debug(f"[{session.id}] 使用提取器: {extractor.get_id()} [预设: {resolved_preset_name}]")
 
         try:
@@ -1537,6 +1540,16 @@ class BrowserWorkflowMixin:
                             f"target={target_key or '-'}, elapsed={step_elapsed:.2f}s, "
                             f"error={self._compact_log_value(e, 180)}"
                         )
+                        if isinstance(e, WorkflowError) and str(e) in {
+                            "new_chat_transition_timeout",
+                            "send_unconfirmed",
+                        }:
+                            error_code = str(e)
+                            workflow_aborted = True
+                            yield self.formatter.pack_error(
+                                f"stream_terminal_error:{error_code}",
+                                code=error_code,
+                            )
                         break
                     except Exception as e:
                         step_elapsed = time.perf_counter() - step_started_at

@@ -1,7 +1,7 @@
 """Request models and preset normalization helpers for config routes."""
 
 import copy
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -13,11 +13,16 @@ class ConfigUpdateRequest(BaseModel):
 
 class SiteAdvancedConfigRequest(BaseModel):
     """站点级高级配置更新请求。"""
+    preset_name: Optional[str] = Field(default=None)
     independent_cookies: bool = Field(default=False)
     independent_cookies_auto_takeover: bool = Field(default=False)
     input_box_stability_wait_enabled: bool = Field(default=False)
     input_box_stability_wait_after_new_chat_only: bool = Field(default=True)
     input_box_stability_wait_timeout: float = Field(default=1.5)
+    url_transition_wait_on_new_chat: bool = Field(default=False)
+    url_transition_wait_patterns: List[str] = Field(default_factory=list)
+    send_confirmation_check_enabled: bool = Field(default=False)
+    send_confirmation_check_timeout: float = Field(default=1.5)
 
 
 class PresetConfigUpdateRequest(BaseModel):
@@ -31,7 +36,7 @@ def _normalize_preset_config_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict) or isinstance(payload, list):
         raise HTTPException(status_code=400, detail="config 必须是对象")
 
-    reserved_site_fields = {"presets", "default_preset", "advanced"}
+    reserved_site_fields = {"presets", "default_preset"}
     invalid_fields = [key for key in reserved_site_fields if key in payload]
     if invalid_fields:
         joined = ", ".join(invalid_fields)
@@ -53,6 +58,12 @@ def _normalize_preset_config_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized["workflow"] = []
     elif not isinstance(workflow, list):
         raise HTTPException(status_code=400, detail="workflow 必须是数组")
+
+    advanced = normalized.get("advanced")
+    if advanced is not None and (
+        not isinstance(advanced, dict) or isinstance(advanced, list)
+    ):
+        raise HTTPException(status_code=400, detail="advanced 必须是对象")
 
     normalized["stealth"] = bool(normalized.get("stealth", False))
     return normalized

@@ -214,6 +214,7 @@ def _build_settings_backup_bundle() -> Dict[str, Any]:
 
 DEFAULT_BROWSER_CONSTANTS: Dict[str, Any] = {
     "CONNECTION_TIMEOUT": 10,
+    "MAX_REQUEST_EXECUTE_TIME_SEC": 300.0,
     "STEALTH_DELAY_MIN": 0.03,
     "STEALTH_DELAY_MAX": 0.1,
     "ACTION_DELAY_MIN": 0.06,

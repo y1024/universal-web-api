@@ -425,6 +425,164 @@ class CommandEngineActionsMixin:
             "stopped_on_error": stopped_on_error,
         }
 
+    @staticmethod
+    def _captcha_click_point_script() -> str:
+        return r"""
+return (() => {
+  const visibleRect = (el) => {
+    if (!el) return null;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      Number(style.opacity || 1) <= 0.02 ||
+      rect.width < 8 ||
+      rect.height < 8
+    ) {
+      return null;
+    }
+    const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (rect.right < 0 || rect.bottom < 0 || rect.left > vw || rect.top > vh) {
+      return null;
+    }
+    return {
+      left: Math.max(0, rect.left),
+      top: Math.max(0, rect.top),
+      width: Math.min(rect.width, Math.max(0, vw - Math.max(0, rect.left))),
+      height: Math.min(rect.height, Math.max(0, vh - Math.max(0, rect.top))),
+      rawWidth: rect.width,
+      rawHeight: rect.height
+    };
+  };
+
+  const describe = (el) => {
+    const attrs = [
+      el.getAttribute('src'),
+      el.getAttribute('title'),
+      el.getAttribute('aria-label'),
+      el.getAttribute('name'),
+      el.id,
+      el.className
+    ];
+    return attrs.map((v) => String(v || '')).join(' ').toLowerCase();
+  };
+
+  const candidates = [];
+  const pushCandidate = (el, kind, score) => {
+    const rect = visibleRect(el);
+    if (!rect) return;
+    const text = describe(el);
+    const checkboxLike = /checkbox|anchor|recaptcha|turnstile|challenge|cloudflare/.test(text);
+    let clickX = rect.left + rect.width / 2;
+    let clickY = rect.top + rect.height / 2;
+    if (checkboxLike || rect.width >= 120) {
+      clickX = rect.left + Math.min(Math.max(rect.width * 0.16, 24), 46);
+    }
+    candidates.push({
+      kind,
+      score: score + (checkboxLike ? 20 : 0) + Math.min(rect.width, 320) / 100,
+      x: Math.round(clickX),
+      y: Math.round(clickY),
+      rect,
+      hint: text.slice(0, 160)
+    });
+  };
+
+  for (const el of document.querySelectorAll('iframe')) {
+    const text = describe(el);
+    if (/recaptcha|google\.com\/recaptcha/.test(text)) pushCandidate(el, 'recaptcha_iframe', 100);
+    else if (/turnstile|challenges\.cloudflare\.com|cloudflare|challenge/.test(text)) pushCandidate(el, 'cloudflare_iframe', 90);
+  }
+
+  for (const selector of [
+    '.g-recaptcha',
+    '.cf-turnstile',
+    '[data-sitekey]',
+    '[role="checkbox"]',
+    'input[type="checkbox"]'
+  ]) {
+    for (const el of document.querySelectorAll(selector)) {
+      pushCandidate(el, selector, 50);
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const target = candidates[0];
+  if (!target) return { ok: false, reason: 'captcha_target_not_found' };
+  return { ok: true, ...target, viewport: { width: window.innerWidth, height: window.innerHeight } };
+})();
+"""
+
+    def _execute_captcha_challenge_click_action(self, action: Dict, session: 'TabSession') -> Dict[str, Any]:
+        timeout_sec = max(0.5, self._coerce_float(action.get("timeout_sec", 6), 6.0))
+        random_radius = max(0, self._coerce_int(action.get("random_radius", 4), 4))
+        deadline = time.time() + timeout_sec
+        last_probe: Any = None
+
+        while time.time() < deadline:
+            try:
+                probe = session.tab.run_js(self._captcha_click_point_script())
+            except Exception as e:
+                logger.warning(f"[CMD] 人机验证目标探测失败: {e}")
+                return {"ok": False, "error": f"captcha_probe_failed:{e}"}
+
+            last_probe = probe
+            if isinstance(probe, dict) and probe.get("ok"):
+                try:
+                    click_x = int(probe.get("x"))
+                    click_y = int(probe.get("y"))
+                except Exception:
+                    return {"ok": False, "error": "captcha_click_point_invalid", "probe": probe}
+
+                if random_radius > 0:
+                    click_x += random.randint(-random_radius, random_radius)
+                    click_y += random.randint(-max(1, random_radius // 2), max(1, random_radius // 2))
+
+                try:
+                    from app.utils.human_mouse import cdp_precise_click, smooth_move_mouse
+
+                    smooth_move_mouse(
+                        session.tab,
+                        (max(0, click_x - 60), max(0, click_y - 40)),
+                        (click_x, click_y),
+                    )
+                    success = bool(cdp_precise_click(session.tab, click_x, click_y))
+                except Exception as e:
+                    logger.warning(f"[CMD] 人机验证 CDP 点击失败: {e}")
+                    return {"ok": False, "error": f"captcha_click_failed:{e}", "probe": probe}
+
+                if not success:
+                    return {
+                        "ok": False,
+                        "error": "captcha_click_failed",
+                        "x": click_x,
+                        "y": click_y,
+                        "probe": probe,
+                    }
+
+                logger.info(
+                    f"[CMD] 已点击人机验证目标: kind={probe.get('kind')}, "
+                    f"x={click_x}, y={click_y}"
+                )
+                return {
+                    "ok": True,
+                    "kind": probe.get("kind"),
+                    "x": click_x,
+                    "y": click_y,
+                    "hint": probe.get("hint", ""),
+                }
+
+            time.sleep(0.25)
+
+        logger.warning(f"[CMD] 未找到可点击的人机验证目标: last={str(last_probe)[:160]}")
+        return {
+            "ok": False,
+            "error": "captcha_target_not_found",
+            "last_probe": last_probe,
+        }
+
     def _execute_action(self, action: Dict, session: 'TabSession') -> Any:
         action_type = action.get("type", "")
         tab = session.tab
@@ -671,6 +829,9 @@ class CommandEngineActionsMixin:
                     logger.warning(f"[CMD] 点击元素失败: {e}")
                     return f"click_element_failed:{e}"
             return "click_element_skipped_no_selector"
+
+        elif action_type == "click_captcha_challenge":
+            return self._execute_captcha_challenge_click_action(action, session)
 
         elif action_type == "click_coordinates":
             try:

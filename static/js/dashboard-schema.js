@@ -53,6 +53,15 @@ const BROWSER_CONSTANTS_SCHEMA = {
                 min: 1,
                 max: 60,
                 default: 10
+            },
+            MAX_REQUEST_EXECUTE_TIME_SEC: {
+                label: '请求执行硬超时',
+                unit: '秒',
+                desc: '单次 API 请求从开始执行到强制取消的最长时间。设为 0 可关闭这个硬超时；环境变量 MAX_REQUEST_EXECUTE_TIME_SEC 仍会优先覆盖这里的值。',
+                type: 'number',
+                min: 0,
+                step: 10,
+                default: 300
             }
         }
     },

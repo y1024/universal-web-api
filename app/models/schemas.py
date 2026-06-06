@@ -516,12 +516,16 @@ class StreamConfig(TypedDict, total=False):
 # ================= 站点高级配置 =================
 
 class SiteAdvancedConfig(TypedDict, total=False):
-    """站点级高级功能配置（不随预设切换）"""
+    """站点/预设高级功能配置。"""
     independent_cookies: bool
     independent_cookies_auto_takeover: bool
     input_box_stability_wait_enabled: bool
     input_box_stability_wait_after_new_chat_only: bool
     input_box_stability_wait_timeout: float
+    url_transition_wait_on_new_chat: bool
+    url_transition_wait_patterns: List[str]
+    send_confirmation_check_enabled: bool
+    send_confirmation_check_timeout: float
 
 
 def get_default_site_advanced_config() -> 'SiteAdvancedConfig':
@@ -532,6 +536,10 @@ def get_default_site_advanced_config() -> 'SiteAdvancedConfig':
         "input_box_stability_wait_enabled": False,
         "input_box_stability_wait_after_new_chat_only": True,
         "input_box_stability_wait_timeout": 1.5,
+        "url_transition_wait_on_new_chat": False,
+        "url_transition_wait_patterns": [],
+        "send_confirmation_check_enabled": False,
+        "send_confirmation_check_timeout": 1.5,
     }
 
 

@@ -9,13 +9,13 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from app.core.config import get_logger
+from app.core.config import BrowserConstants, get_logger
 from app.services.request_manager import RequestContext
 
 
 logger = get_logger("REQUEST.LIFECYCLE")
 
-DEFAULT_MAX_REQUEST_EXECUTE_TIME_SEC = 120.0
+DEFAULT_MAX_REQUEST_EXECUTE_TIME_SEC = 300.0
 MIN_MAX_REQUEST_EXECUTE_TIME_SEC = 5.0
 WORKER_QUEUE_FINAL_GRACE_SEC = 5.0
 
@@ -24,21 +24,33 @@ class TrackedWorkerExecutionCancelled(Exception):
     """Raised when a tracked blocking worker keeps running after cancellation."""
 
 
-def get_max_request_execute_time_sec(default: float = DEFAULT_MAX_REQUEST_EXECUTE_TIME_SEC) -> float:
-    """Return the request hard timeout; set MAX_REQUEST_EXECUTE_TIME_SEC<=0 to disable."""
-    raw = os.getenv("MAX_REQUEST_EXECUTE_TIME_SEC")
-    if raw is None or str(raw).strip() == "":
-        return max(MIN_MAX_REQUEST_EXECUTE_TIME_SEC, float(default))
-
+def _coerce_max_request_execute_time_sec(raw: Any, default: float, source: str) -> float:
     try:
         value = float(raw)
     except Exception:
-        logger.debug(f"Invalid MAX_REQUEST_EXECUTE_TIME_SEC={raw!r}, using default {default}s")
+        logger.debug(f"Invalid {source} MAX_REQUEST_EXECUTE_TIME_SEC={raw!r}, using default {default}s")
         return max(MIN_MAX_REQUEST_EXECUTE_TIME_SEC, float(default))
 
     if value <= 0:
         return 0.0
     return max(MIN_MAX_REQUEST_EXECUTE_TIME_SEC, value)
+
+
+def get_max_request_execute_time_sec(default: float = DEFAULT_MAX_REQUEST_EXECUTE_TIME_SEC) -> float:
+    """Return the request hard timeout; set MAX_REQUEST_EXECUTE_TIME_SEC<=0 to disable."""
+    env_raw = os.getenv("MAX_REQUEST_EXECUTE_TIME_SEC")
+    if env_raw is not None and str(env_raw).strip() != "":
+        return _coerce_max_request_execute_time_sec(env_raw, default, "env")
+
+    try:
+        config_raw = BrowserConstants.get("MAX_REQUEST_EXECUTE_TIME_SEC")
+    except Exception as e:
+        logger.debug(f"Read browser config MAX_REQUEST_EXECUTE_TIME_SEC failed: {e}")
+        config_raw = default
+
+    if config_raw is None or str(config_raw).strip() == "":
+        config_raw = default
+    return _coerce_max_request_execute_time_sec(config_raw, default, "browser_config")
 
 
 def mark_request_hard_timeout(
