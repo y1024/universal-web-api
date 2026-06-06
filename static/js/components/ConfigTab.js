@@ -737,7 +737,7 @@ window.ConfigTab = {
             if (!Number.isFinite(parsed)) {
                 return 1.5;
             }
-            return Math.min(10, Math.max(0.2, parsed));
+            return Math.min(10, Math.max(0.1, parsed));
         },
 
         sanitizeSendConfirmationCheckTimeout(value) {

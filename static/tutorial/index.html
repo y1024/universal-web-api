@@ -595,6 +595,29 @@
                 <li><strong>历史请求列表</strong>：显示最近请求的详细执行链。支持点击特定行查看完整上下文，并标有“多模态”等专属交互类型标签，便于进行交互追踪。</li>
             </ul>
 
+            <h3>请求失败时怎么查</h3>
+            <ol>
+                <li>先进入「请求监控」，看最近一条失败记录的域名、标签页编号、耗时、错误摘要和请求类型。</li>
+                <li>点开该记录查看详情，确认失败发生在排队、输入、发送、网络监听、DOM 回退还是媒体后处理阶段。</li>
+                <li>再切到「日志」，用请求 ID 或页面上显示的短追踪号串联同一轮请求的 <code>[ROUTE]</code>、<code>[POOL]</code>、<code>[INPUT]</code>、<code>[STREAM]</code>、<code>[NetworkMonitor]</code> 日志。</li>
+                <li>如果同站点失败率突然升高，优先检查受控浏览器是否触发验证码、登录过期、页面改版或代理 IP 切换。</li>
+                <li>如果某个标签页长时间保持忙碌，先在标签页池里查看当前任务；确认确实卡死后，再使用调试接口取消或强制释放。</li>
+            </ol>
+
+            <div class="info-box">
+                <p><strong>后端历史接口：</strong></p>
+                <ul style="margin-bottom: 0;">
+                    <li><code>GET /api/system/request-history?limit=200</code>：读取最近请求历史。</li>
+                    <li><code>GET /api/system/request-history/{request_id}</code>：读取单条请求详情；前端详情弹窗使用的就是这个接口。</li>
+                    <li><code>POST /api/debug/cancel-current</code>：DEBUG 模式下取消当前运行请求，可选 <code>tab_id</code>。</li>
+                    <li><code>POST /api/debug/force-release</code>：DEBUG 模式下强制释放请求锁和标签页锁，只建议排查卡死时使用。</li>
+                </ul>
+            </div>
+
+            <div class="note">
+                <p><strong>日志隐私说明：</strong>输入粘贴验证、文件粘贴和请求摘要会尽量记录长度、哈希、阶段和状态，而不是把完整原文长期打印在日志里。需要更深排查时再临时打开 DEBUG，并在问题确认后及时关闭。</p>
+            </div>
+
             <h3>2. 版本管理 (Version Management)</h3>
             <p>点击「版本管理」部分，可以免去手动下载解压的繁琐步骤：</p>
             <ul>
@@ -684,6 +707,7 @@
                             <li>默认（自动分配标签页）：<code>http://127.0.0.1:8199/v1</code></li>
                             <li>指定站点域名：<code>http://127.0.0.1:8199/url/gemini.com/v1</code>（自动匹配该站点的标签页）</li>
                             <li>指定标签页：<code>http://127.0.0.1:8199/tab/1/v1</code>（编号见下方「标签页池」）</li>
+                            <li>指定当前完整 URL：<code>http://127.0.0.1:8199/tab-url/{token}/v1</code>（token 从「标签页池」里复制）</li>
                             <li>部分客户端需要完整路径：在末尾补上 <code>/chat/completions</code></li>
                         </ul>
                     </li>
@@ -715,9 +739,19 @@
                     <td>适合你已经给特定标签页绑定了特定预设</td>
                 </tr>
                 <tr>
+                    <td>严格绑定当前完整 URL</td>
+                    <td><code>http://127.0.0.1:8199/tab-url/abc123def456/v1/chat/completions</code></td>
+                    <td>只匹配当前已打开的同一个 URL；URL 变化后需要重新复制 token</td>
+                </tr>
+                <tr>
                     <td>固定走站点并强制指定预设</td>
                     <td><code>http://127.0.0.1:8199/url/gemini.com/pro/v1/chat/completions</code></td>
                     <td>适合同一站点有多个用途，例如 <code>主预设</code> / <code>pro</code> / <code>视频生成</code>；也适合直接作为 Base URL 使用</td>
+                </tr>
+                <tr>
+                    <td>严格绑定 URL 并强制指定预设</td>
+                    <td><code>http://127.0.0.1:8199/tab-url/abc123def456/pro/v1/chat/completions</code></td>
+                    <td>先严格匹配完整 URL，再校验该站点存在指定预设</td>
                 </tr>
             </table>
 
@@ -795,6 +829,26 @@
                     <td><code>/tab/{index}/v1/chat/completions</code></td>
                     <td>固定标签页聊天接口，可附带 <code>preset_name</code></td>
                 </tr>
+                <tr>
+                    <td><code>GET</code></td>
+                    <td><code>/tab-url/{token}/v1/models</code></td>
+                    <td>精确 URL 路由模型列表接口；token 从标签页池面板复制</td>
+                </tr>
+                <tr>
+                    <td><code>POST</code></td>
+                    <td><code>/tab-url/{token}/v1/chat/completions</code></td>
+                    <td>只匹配当前已打开的完整 URL，相同 URL 多标签会轮询</td>
+                </tr>
+                <tr>
+                    <td><code>GET</code></td>
+                    <td><code>/tab-url/{token}/{preset_name}/v1/models</code></td>
+                    <td>精确 URL + 预设路径模型列表接口</td>
+                </tr>
+                <tr>
+                    <td><code>POST</code></td>
+                    <td><code>/tab-url/{token}/{preset_name}/v1/chat/completions</code></td>
+                    <td>先严格匹配完整 URL，再严格使用该站点的指定预设</td>
+                </tr>
             </table>
 
             <p><strong>当前支持的查询参数：</strong></p>
@@ -808,6 +862,7 @@
 
             <div class="highlight-box">
                 <p><strong>⚠️ 路径兼容性提醒：</strong>现在已经支持把预设名直接写进路径里，例如 <code>/url/gemini.com/pro/v1/chat/completions</code>。如果你的客户端会先请求 <code>/models</code>，也可以直接使用 <code>/url/gemini.com/pro/v1/models</code>。</p>
+                <p style="margin-bottom: 0;"><strong>精确 URL 路由：</strong><code>/tab-url/{token}</code> 的 token 是后端根据当前完整 URL 生成的一段短哈希，只能从「标签页池」里复制，不能手写还原。它不会回退到同域名的其它页面，适合“同一站点多个会话 URL 必须严格区分”的场景。</p>
             </div>
 
             <h3>完整调用示例</h3>
@@ -851,7 +906,33 @@ curl http://127.0.0.1:8199/tab/2/v1/chat/completions ^
 # 10. 固定标签页聊天并强制指定预设
 curl "http://127.0.0.1:8199/tab/2/v1/chat/completions?preset_name=pro" ^
   -H "Content-Type: application/json" ^
+  -d "{\"model\":\"any\",\"messages\":[{\"role\":\"user\",\"content\":\"继续上一轮\"}],\"stream\":false}"
+
+# 11. 精确 URL 路由聊天（token 从标签页池复制）
+curl http://127.0.0.1:8199/tab-url/abc123def456/v1/chat/completions ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model\":\"any\",\"messages\":[{\"role\":\"user\",\"content\":\"只发到这个完整 URL 对应的标签页\"}],\"stream\":false}"
+
+# 12. 精确 URL 路由 + 预设路径聊天
+curl http://127.0.0.1:8199/tab-url/abc123def456/pro/v1/chat/completions ^
+  -H "Content-Type: application/json" ^
   -d "{\"model\":\"any\",\"messages\":[{\"role\":\"user\",\"content\":\"继续上一轮\"}],\"stream\":false}"</code></pre>
+
+            <h3>响应头诊断</h3>
+            <p>路由类接口会尽量返回诊断响应头，方便你确认后端实际采用了哪种分配策略。</p>
+            <table>
+                <tr><th>响应头</th><th>含义</th></tr>
+                <tr><td><code>X-Tab-Selection-Mode</code></td><td><code>first_idle</code> / <code>round_robin</code> / <code>random</code> / <code>tab_index</code> / <code>exact_url</code> 等实际选择模式</td></tr>
+                <tr><td><code>X-Requested-Route-Domain</code></td><td>域名路由请求的目标域名；动态路由尚未选定标签页时也会返回</td></tr>
+                <tr><td><code>X-Resolved-Tab-Index</code></td><td>已经明确解析到固定标签页时返回的标签页编号</td></tr>
+                <tr><td><code>X-Resolved-Route-Domain</code></td><td>已经明确解析到标签页时，该标签页当前所属域名</td></tr>
+                <tr><td><code>X-Resolved-Exact-Url</code></td><td>精确 URL 路由最终命中的完整 URL</td></tr>
+                <tr><td><code>X-Resolved-Preset-Name</code></td><td>路径或请求参数最终命中的预设名称</td></tr>
+            </table>
+
+            <div class="note">
+                <p><strong>动态域名路由说明：</strong>当你调用 <code>/url/{domain}/...</code> 且没有传 <code>tab_index</code> 时，后端会把 <code>selector</code> 作为分配模式传给标签页池，真正的标签页会在工作流开始执行时获取。因此这类响应可能只有 <code>X-Requested-Route-Domain</code> 和 <code>X-Tab-Selection-Mode</code>，不会提前伪装成已经解析到了某个标签页。</p>
+            </div>
 
             <h3>💡 关于登录状态</h3>
             <ul>
@@ -976,7 +1057,7 @@ curl "http://127.0.0.1:8199/tab/2/v1/chat/completions?preset_name=pro" ^
                 <li>处理完成后，标签页会释放回池中，等待下一个请求。</li>
             </ol>
 
-            <h3>三种路由方式</h3>
+            <h3>五种路由方式</h3>
             <table>
                 <tr><th>方式</th><th>地址格式</th><th>适合场景</th></tr>
                 <tr>
@@ -994,15 +1075,50 @@ curl "http://127.0.0.1:8199/tab/2/v1/chat/completions?preset_name=pro" ^
                     <td><code>/tab/1/v1/chat/completions</code></td>
                     <td>为不同标签页配了不同预设，需要精确控制</td>
                 </tr>
+                <tr>
+                    <td><strong>标签页 URL 路由</strong></td>
+                    <td><code>/tab-url/{token}/v1/chat/completions</code></td>
+                    <td>只匹配当前完整 URL，不回退到同域名其它页面；token 从标签页池面板复制</td>
+                </tr>
+                <tr>
+                    <td><strong>URL 绑定预设路由</strong></td>
+                    <td><code>/tab-url/{token}/{预设}/v1/chat/completions</code></td>
+                    <td>严格匹配完整 URL 后，再严格使用该站点的指定预设</td>
+                </tr>
             </table>
 
             <div class="info-box">
                 <p><strong>💡 在控制面板里你可以：</strong></p>
                 <ul style="margin-bottom: 0;">
                     <li>查看所有标签页的编号、状态、当前 URL 和请求计数。</li>
-                    <li>复制指定标签页的 API 端点地址。</li>
+                    <li>复制默认路由、域名路由、固定标签页路由、标签页 URL 路由和预设专属路由。</li>
                     <li>为不同标签页切换不同的预设配置。</li>
+                    <li>启用或禁用域名路由、固定标签页路由、精确 URL 路由等路由方式，减少不想暴露的入口。</li>
                 </ul>
+            </div>
+
+            <h3>标签页分配模式</h3>
+            <table>
+                <tr><th>模式</th><th>含义</th><th>适合场景</th></tr>
+                <tr>
+                    <td><code>first_idle</code></td>
+                    <td>优先选择编号最靠前的空闲标签页；没有空闲时再等待</td>
+                    <td>默认模式，行为最可预测</td>
+                </tr>
+                <tr>
+                    <td><code>round_robin</code></td>
+                    <td>在匹配站点的标签页之间轮询</td>
+                    <td>同一站点开了多个标签页，想均匀分摊请求</td>
+                </tr>
+                <tr>
+                    <td><code>random</code></td>
+                    <td>在匹配站点的标签页之间随机选择</td>
+                    <td>不希望请求总落到固定编号标签页时使用</td>
+                </tr>
+            </table>
+
+            <div class="note">
+                <p><strong>默认值怎么来：</strong>域名路由没有显式传 <code>selector</code> 时，会跟随标签页池面板里的全局分配模式；显式传了 <code>?selector=random</code> 或 <code>?selector=round_robin</code> 时，只影响当前这一次请求。</p>
             </div>
 
             <h3>域名路由的高级参数</h3>
@@ -1027,6 +1143,17 @@ curl "http://127.0.0.1:8199/tab/2/v1/chat/completions?preset_name=pro" ^
 
             <div class="note">
                 <p><strong>💡 推荐理解方式：</strong><code>/url/gemini.com/...</code> 负责“去哪个站点”，<code>selector</code> / <code>tab_index</code> 负责“选哪个标签页”，<code>preset_name</code> 负责“这一轮用哪套配置”。三者是可以组合的。</p>
+            </div>
+
+            <h3>精确 URL 路由什么时候用</h3>
+            <ul>
+                <li>同一个站点打开了多个不同会话 URL，并且你必须把请求发回其中一个固定会话。</li>
+                <li>域名相同但页面用途不同，例如一个标签页是普通对话，另一个标签页是图像生成或代码工作区。</li>
+                <li>你需要让客户端配置一个“不会因为同域名其它标签页空闲而跑偏”的 Base URL。</li>
+            </ul>
+
+            <div class="highlight-box">
+                <p><strong>⚠️ URL 变化提醒：</strong><code>/tab-url/{token}</code> 基于完整 URL 生成。部分站点在新建对话或发送第一条消息后会把 URL 从首页跳到会话页；这时旧 token 可能不再匹配，需要在标签页池里重新复制最新的 URL 路由。</p>
             </div>
 
             <div class="note">

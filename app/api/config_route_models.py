@@ -18,11 +18,11 @@ class SiteAdvancedConfigRequest(BaseModel):
     independent_cookies_auto_takeover: bool = Field(default=False)
     input_box_stability_wait_enabled: bool = Field(default=False)
     input_box_stability_wait_after_new_chat_only: bool = Field(default=True)
-    input_box_stability_wait_timeout: float = Field(default=1.5)
+    input_box_stability_wait_timeout: float = Field(default=1.5, ge=0.1, le=10.0)
     url_transition_wait_on_new_chat: bool = Field(default=False)
     url_transition_wait_patterns: List[str] = Field(default_factory=list)
     send_confirmation_check_enabled: bool = Field(default=False)
-    send_confirmation_check_timeout: float = Field(default=1.5)
+    send_confirmation_check_timeout: float = Field(default=1.5, ge=0.1, le=10.0)
 
 
 class PresetConfigUpdateRequest(BaseModel):

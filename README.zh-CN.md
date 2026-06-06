@@ -42,7 +42,7 @@ graph TD
 *   **⚡ 零配置、标准兼容**：提供标准 OpenAI 兼容（包括 `/v1/chat/completions` 与 `/v1/models`），并提供面向 Claude Code/Codex 等第三方编程工具的实验性兼容接入（如针对 Claude Code 的 `/v1/messages` 连通性测试，以及针对 Codex 插件的 `/v1/responses` 专用端点）。
 *   **🛠️ 本地受控浏览器驱动**：基于 DrissionPage 库对本地 Chromium 内核浏览器（Chrome / Edge 等）进行轻量自动化控制，数据完全留存在本地，端到端隐私安全。
 *   **🛡️ 拟人化安全调试**：内置平滑按键模拟、焦点仿真以及人鼠交互模拟，尽量降低因异常自动化检测导致的账号干扰。
-*   **📦 智能标签页池调度**：内置标签页池（Tab Pool），支持按站点路由、负载均衡与多轮询，天然支持多标签并发测试。
+*   **📦 智能标签页池调度**：内置标签页池（Tab Pool），支持默认分配、站点域名、固定标签页、精确 URL 与 URL 绑定预设路由，并提供优先空闲、轮询、随机等分配模式。
 *   **📡 双通道流式解析**：结合网络层响应侦听（CDP Interception）与 DOM 增量分析双通道技术，无论网页端采用何种渲染方式，都能秒级同步输出 SSE 流式内容。
 *   **📎 多模态与超长附件自愈**：
     *   自动提取并本地下载网页端的文字、图片、音频、视频内容。
@@ -63,8 +63,8 @@ graph TD
 2. **一键启动**：
    * **Windows**：双击运行根目录下的 **`start.bat`**。
    * **macOS / Linux**：在终端执行 **`python3 start.py`**。
-3. **完成初始化**：等待依赖包自动校验安装完成后，系统会自动弹出一个受控的浏览器窗口，并打开本地控制台 `http://127.0.0.1:8199`。
-4. **账号登录**：在受控浏览器窗口中，登录您拥有的 AI 网站账号（如 ChatGPT、DeepSeek 等）。
+3. **完成初始化**：等待依赖包自动校验安装完成后，系统会自动弹出一个受控的浏览器窗口，并在普通浏览器中打开本地控制台 `http://127.0.0.1:8199`。受控浏览器只建议放 AI 站点，控制台和教程请在普通浏览器里查看。
+4. **账号登录**：在受控浏览器窗口中，登录您拥有的 AI 网站账号（如 ChatGPT、DeepSeek 等），并保持目标站点停留在可对话页面。
 5. **客户端配置**：在您的任意 AI 客户端（如翻译插件、Chat UI）中修改 API 配置：
    * **API 地址 (Base URL)**：`http://127.0.0.1:8199/v1`
    * **API Key**：若未在 `.env` 中启用授权认证，可填任意值（如 `sk-local`）；若启用了配置中的密钥验证，请填写对应的自定义 Token。
@@ -97,9 +97,10 @@ graph TD
 | 文档章节 | 描述说明 |
 | :--- | :--- |
 | 📖 [完整使用文档](./static/tutorial/index.html#quick-start) | 包含详细的安装说明、运行机制与各操作系统支持度 |
-| 🔗 [连接 API 指南](./static/tutorial/index.html#connect-api) | 请求路由规则解释（默认、域名、固定标签页绑定）与调用代码示例 |
+| 🔗 [连接 API 指南](./static/tutorial/index.html#connect-api) | 请求路由规则解释（默认、域名、固定标签页、精确 URL、URL 绑定预设）与调用代码示例 |
 | 🧩 [智能函数调用](./static/tutorial/index.html#function-calling) | 本地 Function Calling 的多轮纠错与自愈策略说明 |
-| 🔄 [标签页池与预设](./static/tutorial/index.html#tab-pool) | 如何配置多标签并发，利用预设（Presets）应对不同任务负载 |
+| 🔄 [标签页池与预设](./static/tutorial/index.html#tab-pool) | 如何配置多标签并发、路由方式、分配模式与预设（Presets） |
+| 📊 [请求监控与排障](./static/tutorial/index.html#dashboard-advanced) | 查看请求历史、失败详情、分站点成功率，并使用调试接口取消或释放卡住的任务 |
 | 🛠️ [核心选择器与配置](./static/tutorial/index.html#selectors) | CSS 选择器编写、可视化步骤定义、流式参数解释 |
 | 🛡️ [低干扰与高级环境](./static/tutorial/index.html#stealth-mode) | 浏览器指纹防护、低熵行为模拟等抗检测配置 |
 | ❓ [常见问题与限制说明](./static/tutorial/index.html#faq) | 超时排查、验证码处理指导、平台差异性说明 |

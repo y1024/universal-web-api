@@ -65,23 +65,33 @@ class RequestContext:
     
     def request_cancel(self, reason: str = "unknown"):
         with self._lock:
+            if self.status in (
+                RequestStatus.COMPLETED,
+                RequestStatus.CANCELLED,
+                RequestStatus.FAILED,
+            ):
+                return
+
             if self._cancel_flag:
                 return
-            
+
             self._cancel_flag = True
             self.cancel_reason = reason
-            
-            if self.status == RequestStatus.RUNNING:
-                self.status = RequestStatus.CANCELLED
-            
+            if self.finished_at is None:
+                self.finished_at = time.time()
+            self.status = RequestStatus.CANCELLED
+
             logger.info(f"[{self.request_id}] 取消 ({reason})")
-    
+
     def mark_running(self, tab_id: str = None):
         with self._lock:
             self.started_at = time.time()
+            self.finished_at = None
             self.tab_id = tab_id
             if self._cancel_flag:
                 self.status = RequestStatus.CANCELLED
+                if self.finished_at is None or self.finished_at < self.started_at:
+                    self.finished_at = self.started_at
             else:
                 self.status = RequestStatus.RUNNING
     
@@ -93,20 +103,7 @@ class RequestContext:
     
     def mark_failed(self, reason: str = None):
         with self._lock:
-            self.status = RequestStatus.FAILED
-            self.finished_at = time.time()
-            if reason:
-                self.cancel_reason = reason
-    
-    
-    def mark_completed(self):
-        with self._lock:
-            if self.status == RequestStatus.RUNNING:
-                self.status = RequestStatus.COMPLETED
-            self.finished_at = time.time()
-    
-    def mark_failed(self, reason: str = None):
-        with self._lock:
+            self._cancel_flag = True
             self.status = RequestStatus.FAILED
             self.finished_at = time.time()
             if reason:
@@ -115,7 +112,7 @@ class RequestContext:
     def get_duration(self) -> float:
         end = self.finished_at or time.time()
         start = self.started_at or self.created_at
-        return end - start
+        return max(0.0, end - start)
     
     def is_terminal(self) -> bool:
         return self.status in (
@@ -164,10 +161,12 @@ class RequestManager:
         self._monitor_history: List[Dict[str, Any]] = []
         self._history_lock = threading.Lock()
         self._history_save_lock = threading.Lock()
+        self._stats_save_lock = threading.Lock()
 
         self.total_requests = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self._cleanup_stale_temp_files()
         self._load_stats()
         self._load_history()
         
@@ -187,16 +186,35 @@ class RequestManager:
             logger.debug(f"加载状态失败: {e}")
 
     def _save_stats(self):
+        tmp_path = self._stats_file + ".tmp"
         try:
-            os.makedirs(os.path.dirname(self._stats_file), exist_ok=True)
-            with open(self._stats_file, "w", encoding="utf-8") as f:
-                json.dump({
+            with self._stats_save_lock:
+                os.makedirs(os.path.dirname(self._stats_file), exist_ok=True)
+                payload = {
                     "total_requests": self.total_requests,
                     "total_input_tokens": self.total_input_tokens,
-                    "total_output_tokens": self.total_output_tokens
-                }, f)
+                    "total_output_tokens": self.total_output_tokens,
+                }
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+                    f.flush()
+                os.replace(tmp_path, self._stats_file)
         except Exception as e:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
             logger.debug(f"保存状态失败: {e}")
+
+    def _cleanup_stale_temp_files(self):
+        for path in (self._stats_file + ".tmp", self._history_file + ".tmp"):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.debug(f"清理遗留临时文件: {path}")
+            except Exception as e:
+                logger.debug(f"清理遗留临时文件失败: {path}, {e}")
 
     def _load_history(self):
         try:
@@ -223,12 +241,12 @@ class RequestManager:
             self._monitor_history = []
 
     def _save_history(self):
+        tmp_path = self._history_file + ".tmp"
         try:
             with self._history_save_lock:
                 os.makedirs(os.path.dirname(self._history_file), exist_ok=True)
                 with self._history_lock:
                     records = list(self._monitor_history[-200:])
-                tmp_path = self._history_file + ".tmp"
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(
                         {
@@ -240,8 +258,14 @@ class RequestManager:
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
+                    f.flush()
                 os.replace(tmp_path, self._history_file)
         except Exception as e:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
             logger.debug(f"保存请求历史失败: {e}")
 
     @staticmethod
@@ -847,11 +871,18 @@ class RequestManager:
         """创建新请求"""
         request_id = self._generate_id()
         ctx = RequestContext(request_id=request_id)
-        
+        cleanup_history_contexts: List[RequestContext] = []
+
         with self._requests_lock:
             self._requests[request_id] = ctx
-            self._cleanup_old_requests()
-        
+            cleanup_history_contexts = self._cleanup_old_requests()
+
+        for stale_ctx in cleanup_history_contexts:
+            try:
+                self._append_monitor_history(stale_ctx)
+            except Exception as e:
+                logger.debug(f"写入清理请求监控历史失败: {e}")
+
         # 设置上下文后记录日志
         token = _request_context.set(request_id)
         try:
@@ -867,18 +898,20 @@ class RequestManager:
             self._request_counter += 1
             return f"req-{self._request_counter:03d}"
     
-    def _cleanup_old_requests(self):
+    def _cleanup_old_requests(self) -> List[RequestContext]:
         """清理旧请求（修复版：不因单个未完成请求阻塞所有清理）"""
         if len(self._requests) <= self._max_history:
-            return
-        
+            return []
+
         now = time.time()
         to_delete = []
-        
+        history_contexts: List[RequestContext] = []
+
         for req_id, ctx in list(self._requests.items()):
             # 已终态的可以删除
             if ctx.is_terminal():
                 to_delete.append(req_id)
+                history_contexts.append(ctx)
             # 超时的 RUNNING 请求视为僵尸，强制标记失败
             elif ctx.status == RequestStatus.RUNNING:
                 started = ctx.started_at or ctx.created_at
@@ -888,6 +921,7 @@ class RequestManager:
                     )
                     ctx.mark_failed("zombie_timeout")
                     to_delete.append(req_id)
+                    history_contexts.append(ctx)
             
             # 收集足够数量后停止遍历
             if len(self._requests) - len(to_delete) <= self._max_history:
@@ -899,6 +933,8 @@ class RequestManager:
         
         if to_delete:
             logger.debug(f"清理了 {len(to_delete)} 个旧请求")
+
+        return history_contexts
     
     def start_request(self, ctx: RequestContext, tab_id: str = None):
         """标记请求开始执行"""
@@ -930,12 +966,24 @@ class RequestManager:
     
     def finish_request(self, ctx: RequestContext, success: bool = True):
         """标记请求结束"""
-        if ctx.status == RequestStatus.RUNNING:
-            if success:
-                ctx.mark_completed()
-            else:
-                ctx.mark_failed()
-        
+        with ctx._lock:
+            if ctx.status in (
+                RequestStatus.COMPLETED,
+                RequestStatus.FAILED,
+            ):
+                pass
+            elif ctx._cancel_flag or ctx.status == RequestStatus.CANCELLED:
+                ctx.status = RequestStatus.CANCELLED
+            elif ctx.status == RequestStatus.RUNNING:
+                ctx.status = RequestStatus.COMPLETED if success else RequestStatus.FAILED
+            elif ctx.status not in (
+                RequestStatus.COMPLETED,
+                RequestStatus.FAILED,
+            ):
+                ctx.status = RequestStatus.COMPLETED if success else RequestStatus.FAILED
+            if ctx.finished_at is None:
+                ctx.finished_at = time.time()
+
         duration = ctx.get_duration()
         # 设置上下文后记录日志
         token = _request_context.set(ctx.request_id)

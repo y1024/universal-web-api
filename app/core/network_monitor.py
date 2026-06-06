@@ -927,15 +927,54 @@ class NetworkMonitor:
 
             raw_body, raw_body_source = self._extract_raw_body(response)
             next_body = self._normalize_raw_body(raw_body)
+            if self._is_stream_body_replacement(body, next_body):
+                return next_body, raw_body_source
+
             if len(next_body) > previous_len:
                 return next_body, raw_body_source
 
             if self._stream_capture_complete(response):
-                return next_body, raw_body_source
+                return body, source
 
             time.sleep(0.05)
 
         return body, source
+
+    @staticmethod
+    def _is_stream_body_replacement(previous_body: str, next_body: str) -> bool:
+        previous_body = previous_body or ""
+        next_body = next_body or ""
+        if not previous_body or not next_body or next_body == previous_body:
+            return False
+        return not next_body.startswith(previous_body)
+
+    def _handle_stream_body_replacement(
+        self,
+        previous_body: str,
+        next_body: str,
+        source: str,
+    ) -> bool:
+        if not self._is_stream_body_replacement(previous_body, next_body):
+            return False
+
+        if self._total_chunks > 0:
+            logger.warning(
+                "[NetworkMonitor] 流响应原始快照发生非前缀替换，回退到 DOM 补齐 "
+                f"(old_len={len(previous_body or '')}, new_len={len(next_body or '')}, "
+                f"source={source}, chunks={self._total_chunks})"
+            )
+            raise NetworkMonitorTimeout("目标流响应快照发生非前缀替换")
+
+        logger.warning(
+            "[NetworkMonitor] 流响应原始快照发生非前缀替换，重置解析器后按新快照解析 "
+            f"(old_len={len(previous_body or '')}, new_len={len(next_body or '')}, "
+            f"source={source})"
+        )
+        try:
+            self.parser.reset()
+        except Exception as e:
+            logger.debug(f"[NetworkMonitor] 重置解析器失败（忽略）: {e}")
+        return True
 
     def _write_parser_debug_dump(
         self,
@@ -1242,6 +1281,11 @@ class NetworkMonitor:
                         active_stream_body_source,
                     )
                     if next_body and next_body != active_stream_body:
+                        self._handle_stream_body_replacement(
+                            active_stream_body,
+                            next_body,
+                            next_source,
+                        )
                         active_stream_body = next_body
                         active_stream_body_source = next_source
                         last_activity_time = time.time()
@@ -1432,6 +1476,19 @@ class NetworkMonitor:
             # 读取响应体，流式协议优先使用 _stream.fullText
             raw_body, raw_body_source = self._extract_raw_body(response)
             raw_body = self._normalize_raw_body(raw_body)
+            status_code = self._extract_http_status(event)
+            if (
+                status_code >= 400
+                and getattr(response_obj, "_response", None) is None
+                and not raw_body
+            ):
+                error_text = self._build_http_status_error_text(event, raw_body)
+                logger.warning(
+                    "[NetworkMonitor] 目标流返回异常状态码且缺少响应体，终止工作流 "
+                    f"(status={status_code}, url={event.get('url', '')[:120]})"
+                )
+                raise NetworkMonitorTerminalError(error_text or f"HTTP {status_code}")
+
             if getattr(response_obj, "_response", None) is None and not raw_body:
                 logger.warning(
                     "[NetworkMonitor] 目标流响应缺少响应元数据和响应体，回退到 DOM 监听 "
@@ -1473,7 +1530,6 @@ class NetworkMonitor:
                 if raw_body and not is_event_stream and self._looks_like_sse_payload(raw_body):
                     is_event_stream = True
 
-            status_code = self._extract_http_status(event)
             if status_code >= 400:
                 error_text = self._build_http_status_error_text(event, raw_body)
                 logger.warning(
@@ -1539,6 +1595,11 @@ class NetworkMonitor:
                     raw_body_source,
                 )
                 if next_body and next_body != raw_body:
+                    self._handle_stream_body_replacement(
+                        raw_body,
+                        next_body,
+                        next_source,
+                    )
                     raw_body = next_body
                     raw_body_source = next_source
                     last_activity_time = time.time()

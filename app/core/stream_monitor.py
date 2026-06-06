@@ -121,16 +121,24 @@ class StreamContext:
         self.pending_new_anchor = None
         self.pending_new_anchor_seen = 0
         self.network_sent_content_length = 0
+        self.network_sent_offset_pending = False
+        self.network_sent_offset_confirmed = False
         self.from_send_baseline = False
 
-    def reset_for_new_target(self):
+    def reset_for_new_target(self, preserve_network_sent_offset: bool = False):
         """切换到新目标节点时重置状态"""
+        preserved_network_sent_length = (
+            self.network_sent_content_length if preserve_network_sent_offset else 0
+        )
         self.max_seen_text = ""
         self.sent_content_length = 0
         self.stable_text_count = 0
         self.last_stable_text = ""
         self.active_turn_baseline_len = 0
         self.content_ever_changed = False
+        self.network_sent_content_length = preserved_network_sent_length
+        self.network_sent_offset_pending = bool(preserved_network_sent_length > 0)
+        self.network_sent_offset_confirmed = False
         # v5.5: 不重置 images_detected，保持图片检测状态
 
     def apply_network_sent_offset(self, sent_length: int, current_text: str = "") -> bool:
@@ -141,15 +149,18 @@ class StreamContext:
         if sent_length <= 0:
             return False
 
-        if len(current_text or "") < int(self.active_turn_baseline_len or 0) + sent_length:
-            return False
-
-        self.sent_content_length = sent_length
-        self.network_sent_content_length = sent_length
-        self.max_seen_text = current_text or self.max_seen_text
-        self.last_stable_text = current_text or self.last_stable_text
-        self.content_ever_changed = True
-        return True
+        self.network_sent_content_length = max(self.network_sent_content_length, sent_length)
+        if current_text:
+            self.max_seen_text = current_text
+            self.last_stable_text = current_text
+        effective_start = int(self.active_turn_baseline_len or 0) + sent_length
+        confirmed = len(current_text or "") >= effective_start
+        self.network_sent_offset_pending = not confirmed
+        self.network_sent_offset_confirmed = confirmed
+        if confirmed:
+            self.sent_content_length = max(self.sent_content_length, sent_length)
+            self.content_ever_changed = True
+        return confirmed
 
     def calculate_diff(self, current_text: str) -> Tuple[str, bool, Optional[str]]:
         """v5 增强版 diff：支持前缀校验"""
@@ -157,6 +168,18 @@ class StreamContext:
             return "", False, None
 
         effective_start = self.active_turn_baseline_len + self.sent_content_length
+
+        if self.network_sent_offset_pending and len(current_text) < effective_start:
+            return "", False, None
+        if self.network_sent_offset_pending:
+            pending_start = self.active_turn_baseline_len + self.network_sent_content_length
+            if len(current_text) < pending_start:
+                return "", False, None
+            self.network_sent_offset_pending = False
+            self.network_sent_offset_confirmed = True
+            self.sent_content_length = max(self.sent_content_length, self.network_sent_content_length)
+            self.content_ever_changed = True
+            effective_start = self.active_turn_baseline_len + self.sent_content_length
 
         # 🆕 前缀一致性检查（如果已发送过内容）
         if self.sent_content_length > 0 and len(current_text) >= effective_start:
@@ -195,7 +218,7 @@ class StreamContext:
         # 原有逻辑：内容缩短检测
         if len(current_text) >= self.active_turn_baseline_len:
             current_active_text = current_text[self.active_turn_baseline_len:]
-            if len(current_active_text) < self.sent_content_length:
+            if not self.network_sent_offset_pending and len(current_active_text) < self.sent_content_length:
                 shrink_amount = self.sent_content_length - len(current_active_text)
                 if shrink_amount <= BrowserConstants.STREAM_CONTENT_SHRINK_TOLERANCE:
                     return "", False, None
@@ -215,6 +238,15 @@ class StreamContext:
 
         if len(current_text) > len(self.max_seen_text):
             self.max_seen_text = current_text
+
+    def sync_to_current_dom_text(self, current_text: str) -> int:
+        active_len = max(0, len(current_text or "") - int(self.active_turn_baseline_len or 0))
+        self.sent_content_length = active_len
+        self.max_seen_text = current_text or ""
+        self.last_stable_text = current_text or ""
+        self.stable_text_count = 0
+        self.content_ever_changed = True
+        return active_len
 
 
 class GeneratingStatusCache:
@@ -381,6 +413,18 @@ class StreamMonitor:
 
     def capture_send_baseline(self, selector: str) -> Dict[str, Any]:
         """Capture the DOM reply baseline immediately after a submit action."""
+        if isinstance(self._pending_send_baseline, dict):
+            captured_at = float(self._pending_send_baseline.get("_captured_at") or 0.0)
+            if (
+                self._pending_send_baseline.get("_captured_after_send")
+                and time.time() - captured_at < 30.0
+            ):
+                logger.debug(
+                    "[DOM_BASELINE] 保留已捕获的发送基线，避免重试动作覆盖 "
+                    f"(age={time.time() - captured_at:.1f}s)"
+                )
+                return dict(self._pending_send_baseline)
+
         self._last_visual_reply_log_info = None
         baseline = self._get_latest_message_snapshot(selector)
         self._pending_send_baseline = dict(baseline or {})
@@ -398,6 +442,9 @@ class StreamMonitor:
         baseline = self._pending_send_baseline
         self._pending_send_baseline = None
         return dict(baseline) if isinstance(baseline, dict) else None
+
+    def clear_send_baseline(self) -> None:
+        self._pending_send_baseline = None
 
     def monitor(
         self,
@@ -874,7 +921,7 @@ class StreamMonitor:
                         ctx.pending_new_anchor_seen = 1
 
                     if ctx.pending_new_anchor_seen >= 2:
-                        ctx.reset_for_new_target()
+                        ctx.reset_for_new_target(preserve_network_sent_offset=True)
                         ctx.output_target_anchor = current_anchor
                         ctx.output_target_count = current_count
                         ctx.pending_new_anchor = None
@@ -919,34 +966,32 @@ class StreamMonitor:
             else:
                 element_missing_count = 0
 
-            if len(current_text) > len(ctx.max_seen_text):
-                ctx.max_seen_text = current_text
-
             diff, is_from_history, reason = ctx.calculate_diff(current_text)
-            
+
             # 🆕 处理前缀不匹配（内容被重写）
             if reason == "prefix_mismatch":
-                logger.info("[PREFIX_MISMATCH] 内容重写，发送完整当前内容")
-                
-                # 重置发送状态
-                ctx.sent_content_length = 0
-                ctx.max_seen_text = ""
-                
-                # 发送当前完整内容
-                full_content = current_text[ctx.active_turn_baseline_len:]
-                if full_content:
-                    ctx.update_after_send(full_content, current_text)
-                    visible_content = self._sanitize_stream_text(full_content)
-                    if visible_content.strip():
-                        yield self.formatter.pack_chunk(visible_content, completion_id=completion_id)
-                        silence_start = time.time()
-                        has_output = True
-                        ctx.content_ever_changed = True
-                    else:
-                        logger.debug("[STREAM] Suppressed Gemini placeholder-only chunk after rewrite")
-                
+                logger.warning(
+                    "[PREFIX_MISMATCH] DOM 内容被重写；普通 delta 无法撤回已发送前缀，"
+                    "跳过整段重发以避免重复污染"
+                )
+                active_len = max(0, len(current_text) - int(ctx.active_turn_baseline_len or 0))
+                ctx.sent_content_length = max(ctx.sent_content_length, active_len)
+                ctx.max_seen_text = current_text
+                ctx.last_stable_text = current_text
+                ctx.stable_text_count = 0
+                ctx.content_ever_changed = True
+                silence_start = time.time()
                 continue
-            
+
+            if reason and str(reason).startswith("内容缩短"):
+                logger.warning(
+                    f"[STREAM_SHRINK] {reason}；普通 delta 无法撤回已发送尾部，"
+                    "同步 DOM 快照并停止重放历史内容"
+                )
+                ctx.sync_to_current_dom_text(current_text)
+                silence_start = time.time()
+                continue
+
             if diff:
                 if self._should_stop():
                     break
@@ -984,7 +1029,7 @@ class StreamMonitor:
             silence_threshold = BrowserConstants.STREAM_SILENCE_THRESHOLD
             silence_threshold_fallback = BrowserConstants.STREAM_SILENCE_THRESHOLD_FALLBACK
             stable_count_threshold = BrowserConstants.STREAM_STABLE_COUNT_THRESHOLD
-            if ctx.network_sent_content_length > 0:
+            if ctx.network_sent_offset_confirmed:
                 silence_threshold = min(float(silence_threshold), 1.2)
                 silence_threshold_fallback = min(float(silence_threshold_fallback), 2.0)
                 stable_count_threshold = min(int(stable_count_threshold), 2)
@@ -1258,9 +1303,11 @@ class StreamMonitor:
         self._final_images = []
         self._final_image_urls = []
         self._prefetched_image_urls = set()
+        self._pending_send_baseline = None
         self._stream_ctx = None
         self._generating_checker = None
         self._expect_image_output = False
+        self._last_visual_reply_log_info = None
         logger.debug("[StreamMonitor] large cached stream results cleared")
 
 

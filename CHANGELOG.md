@@ -1,5 +1,17 @@
 # 更新日志
 
+## 2026-06-06
+
+new:
+- 域名路由支持动态同站点标签页分配：未指定 `tab_index` 时，`/url/{domain}/v1/chat/completions` 会把 `selector` 作为标签页池分配模式传入真实工作流，覆盖普通流式、非流式与 Tool Calling 路径。
+
+change:
+- 路由响应头诊断增强：动态域名路由在尚未解析到具体标签页前也会返回 `X-Requested-Route-Domain` 与 `X-Tab-Selection-Mode`；固定标签页、精确 URL 和预设路径继续返回对应 `X-Resolved-*` 头。
+- 教程与 README 更新：补齐精确 URL 路由、URL 绑定预设、随机/轮询分配、请求历史、调试取消与强制释放等实际使用流程，并明确受控浏览器与普通控制台窗口的分工。
+
+test:
+- 新增 API 层域名路由单测，覆盖 `selector=random/round_robin` 的入口传递、固定 `tab_index` 分支、无候选标签页错误路径，以及普通/流式/Tool Calling 分发链路。
+
 ## 2026-06-02
 
 new:

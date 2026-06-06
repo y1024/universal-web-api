@@ -17,7 +17,8 @@ window.TabPoolTabComponent = {
             allocationMode: 'first_idle',
             allocationModeOptions: [
                 { value: 'first_idle', label: '优先空闲' },
-                { value: 'round_robin', label: '轮询' }
+                { value: 'round_robin', label: '轮询' },
+                { value: 'random', label: '随机' }
             ],
             allocationModeUpdating: false,
             routeMethodOptions: [

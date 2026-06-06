@@ -105,6 +105,7 @@ SSE_HEARTBEAT_INTERVAL = 15.0
 TAB_POOL_ALLOCATION_OPTIONS = [
     {"value": "first_idle", "label": "优先空闲"},
     {"value": "round_robin", "label": "轮询"},
+    {"value": "random", "label": "随机"},
 ]
 TAB_ROUTE_METHOD_OPTIONS = [
     {"value": "domain", "label": "站点域名路由"},
@@ -502,8 +503,25 @@ def _build_tab_resolution_headers(
     preset_name: str = "",
 ) -> Dict[str, str]:
     headers: Dict[str, str] = {}
+    requested_route_domain = str(route_domain or "").strip()
+    requested_exact_url = str(exact_url or "").strip()
+
+    if requested_route_domain:
+        headers["X-Requested-Route-Domain"] = (
+            normalize_route_domain(requested_route_domain) or requested_route_domain
+        )
+
+    if requested_exact_url:
+        headers["X-Requested-Exact-Url"] = normalize_exact_tab_url(requested_exact_url) or requested_exact_url
+
+    if selector:
+        headers["X-Tab-Selection-Mode"] = selector
+
+    if preset_name:
+        headers["X-Resolved-Preset-Name"] = preset_name
+
     if not tab_info:
-        return headers
+        return _encode_response_headers(headers)
 
     tab_index = int(tab_info.get("persistent_index") or 0)
     if tab_index > 0:
@@ -523,12 +541,6 @@ def _build_tab_resolution_headers(
     current_domain = str(tab_info.get("current_domain") or tab_info.get("route_domain") or route_domain or "").strip()
     if current_domain:
         headers["X-Resolved-Route-Domain"] = current_domain
-
-    if selector:
-        headers["X-Tab-Selection-Mode"] = selector
-
-    if preset_name:
-        headers["X-Resolved-Preset-Name"] = preset_name
 
     return _encode_response_headers(headers)
 
@@ -725,7 +737,7 @@ async def update_tab_pool_config(
 ):
     """更新标签页池运行模式并持久化到 browser_config.json。"""
     allocation_mode = str(body.allocation_mode or "").strip().lower()
-    if allocation_mode not in {"first_idle", "round_robin"}:
+    if allocation_mode not in {"first_idle", "round_robin", "random"}:
         raise HTTPException(status_code=400, detail="invalid_allocation_mode")
     enabled_route_methods = _normalize_enabled_route_methods(body.enabled_route_methods)
 
@@ -1027,6 +1039,68 @@ async def _chat_with_exact_url(
     response.headers.update(headers)
     return response
 
+
+async def _chat_with_route_domain(
+    request: Request,
+    body: ChatRequest,
+    ctx: RequestContext,
+    *,
+    route_domain: str,
+    allocation_mode: Optional[str] = None,
+    resolved_headers: Optional[Dict[str, str]] = None,
+):
+    headers = _encode_response_headers(resolved_headers)
+
+    if has_tool_calling_request(
+        messages=body.messages,
+        tools=body.tools,
+        functions=body.functions,
+    ):
+        if body.stream:
+            return StreamingResponse(
+                _stream_tool_calling_with_route_domain(
+                    request,
+                    body,
+                    ctx,
+                    route_domain,
+                    allocation_mode=allocation_mode,
+                ),
+                media_type="text/event-stream",
+                headers=_build_stream_headers(headers),
+            )
+        response = await _non_stream_tool_calling_with_route_domain(
+            request,
+            body,
+            ctx,
+            route_domain,
+            allocation_mode=allocation_mode,
+        )
+        response.headers.update(headers)
+        return response
+
+    if body.stream:
+        return StreamingResponse(
+            _stream_with_route_domain(
+                request,
+                body,
+                ctx,
+                route_domain,
+                allocation_mode=allocation_mode,
+            ),
+            media_type="text/event-stream",
+            headers=_build_stream_headers(headers),
+        )
+
+    response = await _non_stream_with_route_domain(
+        request,
+        body,
+        ctx,
+        route_domain,
+        allocation_mode=allocation_mode,
+    )
+    response.headers.update(headers)
+    return response
+
 @router.post("/tab/{tab_index}/v1/chat/completions")
 async def chat_with_tab(
     tab_index: int,
@@ -1108,20 +1182,27 @@ async def chat_with_route_domain(
         selector,
         default=_get_pool_default_selector(browser),
     )
-    tab_info = _resolve_target_tab(
-        browser,
-        route_domain=route_key,
-        tab_index=tab_index,
-        selector=normalized_selector,
-    )
+
+    tab_info = None
+    resolved_tab_index = None
+    if tab_index is not None:
+        tab_info = _resolve_target_tab(
+            browser,
+            route_domain=route_key,
+            tab_index=tab_index,
+            selector=normalized_selector,
+        )
+        resolved_tab_index = int(tab_info.get("persistent_index") or 0)
+        if resolved_tab_index < 1:
+            raise HTTPException(status_code=500, detail="resolved_tab_index_invalid")
+    elif not _list_candidate_tabs(browser, route_key):
+        raise HTTPException(status_code=404, detail=f"域名路由 '{normalize_route_domain(route_key) or route_key}' 没有匹配的标签页")
+
     resolved_headers = _build_tab_resolution_headers(
         tab_info,
         route_domain=route_key,
         selector=("tab_index" if tab_index is not None else normalized_selector),
     )
-    resolved_tab_index = int(tab_info.get("persistent_index") or 0)
-    if resolved_tab_index < 1:
-        raise HTTPException(status_code=500, detail="resolved_tab_index_invalid")
 
     ctx = request_manager.create_request()
     try:
@@ -1134,21 +1215,36 @@ async def chat_with_route_domain(
         ctx,
         body.model_dump(),
         endpoint=f"/url/{route_key}/v1/chat/completions",
-        route_domain=str(tab_info.get("current_domain") or tab_info.get("route_domain") or route_key),
+        route_domain=str((tab_info or {}).get("current_domain") or (tab_info or {}).get("route_domain") or route_key),
         tab_index=resolved_tab_index,
         preset_name=resolved_preset_name,
     )
     with logger.context(ctx.request_id):
+        if tab_index is not None:
+            logger.info(
+                f"开始 (域名路由 {route_key} -> 标签页 #{resolved_tab_index}, "
+                f"selector=tab_index, "
+                f"preset={resolved_preset_name or '<follow-tab/default>'})"
+            )
+            return await _chat_with_resolved_tab(
+                request,
+                body,
+                ctx,
+                tab_index=resolved_tab_index,
+                resolved_headers=resolved_headers,
+            )
+
         logger.info(
-            f"开始 (域名路由 {route_key} -> 标签页 #{resolved_tab_index}, "
-            f"selector={'tab_index' if tab_index is not None else normalized_selector}, "
+            f"开始 (域名路由 {route_key} -> 动态同站点标签页, "
+            f"selector={normalized_selector}, "
             f"preset={resolved_preset_name or '<follow-tab/default>'})"
         )
-        return await _chat_with_resolved_tab(
+        return await _chat_with_route_domain(
             request,
             body,
             ctx,
-            tab_index=resolved_tab_index,
+            route_domain=route_key,
+            allocation_mode=normalized_selector,
             resolved_headers=resolved_headers,
         )
 
@@ -1522,7 +1618,8 @@ async def _stream_with_route_domain(
     request: Request,
     body: ChatRequest,
     ctx: RequestContext,
-    route_domain: str
+    route_domain: str,
+    allocation_mode: Optional[str] = None,
 ):
     """使用指定域名路由的流式响应"""
     disconnect_task = None
@@ -1552,6 +1649,7 @@ async def _stream_with_route_domain(
                     task_id=ctx.request_id,
                     preset_name=body.preset_name,
                     stop_checker=ctx.should_stop,
+                    allocation_mode=allocation_mode,
                 )
 
                 for chunk in gen:
@@ -1678,7 +1776,8 @@ async def _non_stream_with_route_domain(
     request: Request,
     body: ChatRequest,
     ctx: RequestContext,
-    route_domain: str
+    route_domain: str,
+    allocation_mode: Optional[str] = None,
 ) -> JSONResponse:
     """使用指定域名路由的非流式响应"""
     collected_content = []
@@ -1686,7 +1785,13 @@ async def _non_stream_with_route_domain(
     error_data = None
     fast_return_on_audio_media = _should_fast_return_on_audio_media(body)
 
-    async for chunk in _stream_with_route_domain(request, body, ctx, route_domain):
+    async for chunk in _stream_with_route_domain(
+        request,
+        body,
+        ctx,
+        route_domain,
+        allocation_mode=allocation_mode,
+    ):
         if isinstance(chunk, str):
             if chunk.startswith("data: [DONE]"):
                 continue
@@ -1974,6 +2079,7 @@ def _execute_browser_non_stream_for_route_domain(
     request_id: str,
     preset_name: Optional[str] = None,
     stop_checker=None,
+    allocation_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = None
     for chunk in browser.execute_workflow_for_route_domain(
@@ -1983,6 +2089,7 @@ def _execute_browser_non_stream_for_route_domain(
         task_id=request_id,
         preset_name=preset_name,
         stop_checker=stop_checker,
+        allocation_mode=allocation_mode,
         allow_media_postprocess=get_tool_calling_allow_media_postprocess(),
     ):
         payload = chunk
@@ -2137,6 +2244,7 @@ async def _run_tool_calling_async_for_route_domain(
     request_id: str,
     stop_checker=None,
     worker_state: Optional[Dict[str, Any]] = None,
+    allocation_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     tools, tool_choice = normalize_tool_request(
         tools=body.tools,
@@ -2164,6 +2272,7 @@ async def _run_tool_calling_async_for_route_domain(
                 request_id=request_id,
                 preset_name=body.preset_name,
                 stop_checker=stop_checker,
+                allocation_mode=allocation_mode,
             )
         )
         if isinstance(tracked_worker_state.get("ctx"), RequestContext):
@@ -2309,6 +2418,7 @@ async def _complete_tool_calling_with_route_domain(
     body: ChatRequest,
     ctx: RequestContext,
     route_domain: str,
+    allocation_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     disconnect_task = None
     worker_state: Dict[str, Any] = {"thread": None, "label": None, "ctx": ctx}
@@ -2327,6 +2437,7 @@ async def _complete_tool_calling_with_route_domain(
             ctx.request_id,
             ctx.should_stop,
             worker_state=worker_state,
+            allocation_mode=allocation_mode,
         )
         request_manager.capture_response_payload(ctx, response)
 
@@ -2457,9 +2568,16 @@ async def _non_stream_tool_calling_with_route_domain(
     body: ChatRequest,
     ctx: RequestContext,
     route_domain: str,
+    allocation_mode: Optional[str] = None,
 ) -> JSONResponse:
     try:
-        response = await _complete_tool_calling_with_route_domain(request, body, ctx, route_domain)
+        response = await _complete_tool_calling_with_route_domain(
+            request,
+            body,
+            ctx,
+            route_domain,
+            allocation_mode=allocation_mode,
+        )
         return JSONResponse(content=response)
     except Exception as e:
         message, code = _format_route_tool_calling_error(e)
@@ -2529,9 +2647,16 @@ async def _stream_tool_calling_with_route_domain(
     body: ChatRequest,
     ctx: RequestContext,
     route_domain: str,
+    allocation_mode: Optional[str] = None,
 ):
     try:
-        response = await _complete_tool_calling_with_route_domain(request, body, ctx, route_domain)
+        response = await _complete_tool_calling_with_route_domain(
+            request,
+            body,
+            ctx,
+            route_domain,
+            allocation_mode=allocation_mode,
+        )
         message = response.get("choices", [{}])[0].get("message", {}) or {}
         parsed = {
             "content": message.get("content"),

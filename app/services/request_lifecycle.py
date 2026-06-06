@@ -18,6 +18,8 @@ logger = get_logger("REQUEST.LIFECYCLE")
 DEFAULT_MAX_REQUEST_EXECUTE_TIME_SEC = 300.0
 MIN_MAX_REQUEST_EXECUTE_TIME_SEC = 5.0
 WORKER_QUEUE_FINAL_GRACE_SEC = 5.0
+WORKER_QUEUE_MAX_PUT_BLOCK_SEC = 0.1
+WORKER_QUEUE_CANCEL_PUT_BLOCK_SEC = 0.01
 
 
 class TrackedWorkerExecutionCancelled(Exception):
@@ -98,7 +100,13 @@ def put_worker_queue_item(
 
     while final or not ctx.should_stop():
         try:
-            chunk_queue.put(item, timeout=max(0.05, float(poll_timeout or 0.5)))
+            chunk_queue.put(
+                item,
+                timeout=_coerce_worker_queue_put_timeout(
+                    poll_timeout,
+                    cancelled=ctx.should_stop(),
+                ),
+            )
             return True
         except queue.Full:
             if final:
@@ -109,6 +117,19 @@ def put_worker_queue_item(
                 return False
 
     return False
+
+
+def _coerce_worker_queue_put_timeout(raw_timeout: Any, *, cancelled: bool = False) -> float:
+    try:
+        value = float(raw_timeout)
+    except Exception:
+        value = 0.5
+    if cancelled:
+        return WORKER_QUEUE_CANCEL_PUT_BLOCK_SEC
+    return max(
+        WORKER_QUEUE_CANCEL_PUT_BLOCK_SEC,
+        min(value if value > 0 else 0.5, WORKER_QUEUE_MAX_PUT_BLOCK_SEC),
+    )
 
 
 def _set_worker_future_result(

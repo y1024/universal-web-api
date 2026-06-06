@@ -11,6 +11,8 @@ import re
 import os
 import time
 import json
+import hashlib
+import threading
 import base64
 import random
 import mimetypes
@@ -26,6 +28,7 @@ from app.utils.platform import get_primary_modifier_key
 TEXT_INPUT_CHUNK_SIZE_DEFAULT = 30000
 TEXT_INPUT_CHUNK_SIZE_MIN = 1000
 TEXT_INPUT_CHUNK_SIZE_MAX = 1000000
+FILE_PASTE_TEMP_FILE_RETENTION_SECONDS = 15 * 60
 
 
 # ================= 文本输入处理器 =================
@@ -168,6 +171,13 @@ class TextInputHandler:
             """))
         except Exception:
             return False
+
+    @staticmethod
+    def _redact_preview_text(text: str, *, label: str = "") -> str:
+        raw = str(text or "")
+        digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:12]
+        prefix = f"{label} " if label else ""
+        return f"<redacted {prefix}len={len(raw)} sha256={digest}>"
     
     def debug_read_input_sample(self, ele, head: int = 80, tail: int = 80) -> dict:
         """读取输入框内容的头尾采样（用于调试）"""
@@ -176,12 +186,21 @@ class TextInputHandler:
                 return (function(){{
                     try {{
                         const el = this;
-                        const tag = (el.tagName || '').toLowerCase();
-                        const isCE = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+                        const target = (() => {{
+                            const tag = (el.tagName || '').toLowerCase();
+                            const isCE = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+                            if (tag === 'textarea' || tag === 'input' || isCE) return el;
+                            const nested = el.querySelector?.('textarea, input, [contenteditable="true"]');
+                            return nested || null;
+                        }})();
+                        if (!target) return {{len: 0, nl: 0, head: '', tail: ''}};
+
+                        const tag = (target.tagName || '').toLowerCase();
+                        const isCE = target.isContentEditable || target.getAttribute('contenteditable') === 'true';
                         let s = '';
-                        if (tag === 'textarea' || tag === 'input') s = el.value || '';
-                        else if (isCE) s = el.innerText || '';
-                        else s = el.textContent || '';
+                        if (tag === 'textarea' || tag === 'input') s = target.value || '';
+                        else if (isCE) s = target.innerText || '';
+                        else return {{len: 0, nl: 0, head: '', tail: ''}};
 
                         s = s.replace(/\\r\\n/g, '\\n');
                         const n = s.length;
@@ -206,12 +225,19 @@ class TextInputHandler:
                 try {
                     const el = this;
                     if (!el) return 0;
-                    const tag = (el.tagName || '').toLowerCase();
-                    if (tag === 'textarea' || tag === 'input') return (el.value || '').length;
-                    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
-                        return (el.innerText || '').length;
+                    const target = (() => {
+                        const tag = (el.tagName || '').toLowerCase();
+                        const isCE = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+                        if (tag === 'textarea' || tag === 'input' || isCE) return el;
+                        return el.querySelector?.('textarea, input, [contenteditable="true"]') || null;
+                    })();
+                    if (!target) return 0;
+                    const tag = (target.tagName || '').toLowerCase();
+                    if (tag === 'textarea' || tag === 'input') return (target.value || '').length;
+                    if (target.isContentEditable || target.getAttribute('contenteditable') === 'true') {
+                        return (target.innerText || '').length;
                     }
-                    return (el.textContent || '').length;
+                    return 0;
                 } catch (e) { return 0; }
             """)
             return int(n) if n is not None else 0
@@ -224,10 +250,17 @@ class TextInputHandler:
             s = ele.run_js("""
                 try {
                     const el = this;
-                    const tag = (el.tagName || '').toLowerCase();
-                    if (tag === 'textarea' || tag === 'input') return (el.value || '');
-                    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') return (el.innerText || '');
-                    return (el.textContent || '');
+                    const target = (() => {
+                        const tag = (el.tagName || '').toLowerCase();
+                        const isCE = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+                        if (tag === 'textarea' || tag === 'input' || isCE) return el;
+                        return el.querySelector?.('textarea, input, [contenteditable="true"]') || null;
+                    })();
+                    if (!target) return '';
+                    const tag = (target.tagName || '').toLowerCase();
+                    if (tag === 'textarea' || tag === 'input') return (target.value || '');
+                    if (target.isContentEditable || target.getAttribute('contenteditable') === 'true') return (target.innerText || '');
+                    return '';
                 } catch (e) { return ''; }
             """) or ""
             return str(s).replace('\r\n', '\n').replace('\r', '\n')
@@ -249,16 +282,23 @@ class TextInputHandler:
                 return (function(){
                     try {
                         const el = this;
-                        const tag = (el.tagName || '').toLowerCase();
-                        const isCE = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+                        const target = (() => {
+                            const tag = (el.tagName || '').toLowerCase();
+                            const isCE = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+                            if (tag === 'textarea' || tag === 'input' || isCE) return el;
+                            return el.querySelector?.('textarea, input, [contenteditable="true"]') || null;
+                        })();
+                        if (!target) return {len: 0, nl: 0};
+                        const tag = (target.tagName || '').toLowerCase();
+                        const isCE = target.isContentEditable || target.getAttribute('contenteditable') === 'true';
 
                         let s = '';
                         if (tag === 'textarea' || tag === 'input') {
-                            s = el.value || '';
+                            s = target.value || '';
                         } else if (isCE) {
-                            s = el.innerText || '';
+                            s = target.innerText || '';
                         } else {
-                            s = el.textContent || '';
+                            return {len: 0, nl: 0};
                         }
 
                         s = s.replace(/\\r\\n/g, '\\n');
@@ -505,7 +545,8 @@ class TextInputHandler:
             logger.debug(
                 "[PASTE_VERIFY] 精确匹配成功: "
                 f"actual={actual_len}, expected={expected_len}, "
-                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
+                f"head={repr(self._redact_preview_text(head_sample, label='head'))}, "
+                f"tail={repr(self._redact_preview_text(tail_sample, label='tail'))}"
             )
             return True
 
@@ -515,7 +556,8 @@ class TextInputHandler:
             logger.debug(
                 "[PASTE_VERIFY] 核心无空白字符匹配成功: "
                 f"actual={actual_len}, expected={expected_len}, "
-                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
+                f"head={repr(self._redact_preview_text(head_sample, label='head'))}, "
+                f"tail={repr(self._redact_preview_text(tail_sample, label='tail'))}"
             )
             return True
 
@@ -523,7 +565,8 @@ class TextInputHandler:
             logger.debug(
                 "[PASTE_VERIFY] 核心文本包含关系匹配成功: "
                 f"actual={actual_len}, expected={expected_len}, "
-                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
+                f"head={repr(self._redact_preview_text(head_sample, label='head'))}, "
+                f"tail={repr(self._redact_preview_text(tail_sample, label='tail'))}"
             )
             return True
 
@@ -555,7 +598,8 @@ class TextInputHandler:
                 "[PASTE_VERIFY] 接受近似匹配结果: "
                 f"actual={actual_len} (core={actual_core_len}), expected={expected_len} (core={expected_core_len}), "
                 f"ratio={ratio:.2f}, gap={length_gap}, "
-                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
+                f"head={repr(self._redact_preview_text(head_sample, label='head'))}, "
+                f"tail={repr(self._redact_preview_text(tail_sample, label='tail'))}"
             )
             return True
 
@@ -564,14 +608,17 @@ class TextInputHandler:
                 "[PASTE_VERIFY] 检测到异常粘贴结果: "
                 f"actual={actual_len} (core={actual_core_len}), expected={expected_len} (core={expected_core_len}), "
                 f"ratio={ratio:.2f}, prefix_match={prefix_match}, suffix_match={suffix_match}, "
-                f"head={repr(head_sample)}, tail={repr(tail_sample)}"
+                f"head={repr(self._redact_preview_text(head_sample, label='head'))}, "
+                f"tail={repr(self._redact_preview_text(tail_sample, label='tail'))}"
             )
             return False
 
         logger.warning(
             "[PASTE_VERIFY] 粘贴结果长度偏差过大: "
-            f"actual={actual_len} (core={actual_core_len}), expected={expected_len} (core={expected_core_len}), "
-            f"gap={length_gap}, head={repr(head_sample)}, tail={repr(tail_sample)}"
+                f"actual={actual_len} (core={actual_core_len}), expected={expected_len} (core={expected_core_len}), "
+                f"gap={length_gap}, "
+                f"head={repr(self._redact_preview_text(head_sample, label='head'))}, "
+                f"tail={repr(self._redact_preview_text(tail_sample, label='tail'))}"
         )
         return False
 
@@ -1098,7 +1145,8 @@ class TextInputHandler:
         sample = self.debug_read_input_sample(ele)
         logger.debug(
             f"[INPUT_SNAPSHOT] len={sample['len']} nl={sample['nl']} "
-            f"head={repr(sample['head'][:40])}... tail=...{repr(sample['tail'][-40:])}"
+            f"head={repr(self._redact_preview_text(sample['head'], label='head'))}... "
+            f"tail=...{repr(self._redact_preview_text(sample['tail'], label='tail'))}"
         )
         # ================= 人类化按键辅助（隐身模式专用）=================
     
@@ -1895,10 +1943,34 @@ class TextInputHandler:
         """判断是否应该使用文件粘贴模式"""
         if not self._file_paste_config.get("enabled", False):
             return False
-        
+
         threshold = self._file_paste_config.get("threshold", 50000)
         return len(text) > threshold
-    
+
+    def _cleanup_file_paste_temp_file(self, filepath: str, *, keep_for_browser: bool) -> None:
+        if not filepath or not os.path.exists(filepath):
+            return
+
+        temp_label = f"temp/{os.path.basename(filepath)}"
+        if keep_for_browser:
+            logger.debug(
+                f"[FILE_PASTE] temp file retained for browser async read: {temp_label}"
+            )
+            timer = threading.Timer(
+                FILE_PASTE_TEMP_FILE_RETENTION_SECONDS,
+                self._cleanup_file_paste_temp_file,
+                kwargs={"filepath": filepath, "keep_for_browser": False},
+            )
+            timer.daemon = True
+            timer.start()
+            return
+
+        try:
+            os.unlink(filepath)
+            logger.debug(f"[FILE_PASTE] temp file deleted: {temp_label}")
+        except Exception as unlink_err:
+            logger.debug(f"[FILE_PASTE] failed to delete temp file: {unlink_err}")
+
     def _fill_via_file_paste(self, ele, text: str) -> bool:
         """
         Upload large text by turning it into a temporary txt attachment.
@@ -1924,6 +1996,7 @@ class TextInputHandler:
         }
 
         filepath = None
+        keep_temp_file_for_browser = False
         try:
             ele.click()
             self._smart_delay(0.15, 0.35)
@@ -1963,6 +2036,8 @@ class TextInputHandler:
             upload_baseline = self._probe_upload_signal(filepath)
 
             uploaded = self._upload_file_via_site_targets(filepath)
+            if uploaded:
+                keep_temp_file_for_browser = True
 
             if not uploaded:
                 ambiguous_input_signal = (
@@ -1970,6 +2045,7 @@ class TextInputHandler:
                     and not bool(self._last_upload_signal_wait.get("confirmed"))
                 )
                 if ambiguous_input_signal:
+                    keep_temp_file_for_browser = True
                     logger.warning(
                         "[FILE_PASTE] ambiguous file-input signal detected; skip clipboard fallback to avoid duplicate attachments"
                     )
@@ -1979,6 +2055,7 @@ class TextInputHandler:
                             logger.error("[FILE_PASTE] copy file to clipboard failed")
                             return False
 
+                        keep_temp_file_for_browser = True
                         time.sleep(random.uniform(0.08, 0.15))
 
                         if self.stealth_mode:
@@ -2051,12 +2128,10 @@ class TextInputHandler:
             logger.error(f"[FILE_PASTE] file paste failed: {e}")
             return False
         finally:
-            if filepath and os.path.exists(filepath):
-                try:
-                    os.unlink(filepath)
-                    logger.debug(f"[FILE_PASTE] temp file deleted: temp/{os.path.basename(filepath)}")
-                except Exception as unlink_err:
-                    logger.debug(f"[FILE_PASTE] failed to delete temp file: {unlink_err}")
+            self._cleanup_file_paste_temp_file(
+                filepath,
+                keep_for_browser=keep_temp_file_for_browser,
+            )
 
     def fill_via_clipboard_no_click(self, ele, text: str):
         """

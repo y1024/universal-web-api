@@ -217,6 +217,7 @@ class WorkflowExecutor(
         self._kimi_capture_token: Optional[str] = None
         self._kimi_capture_init_js_id: Optional[str] = None
         self._kimi_page_parser = ParserRegistry.get("kimi") if self._use_kimi_page_capture else None
+        self._kimi_page_sent_content_length = 0
         if self._use_kimi_page_capture:
             self._ensure_kimi_page_capture_init_js()
 
@@ -507,6 +508,16 @@ class WorkflowExecutor(
         except Exception as e:
             logger.debug(f"[Executor] 读取网络已发送长度失败（忽略）: {e}")
 
+        try:
+            kimi_sent_chars = max(0, int(getattr(self, "_kimi_page_sent_content_length", 0) or 0))
+            if kimi_sent_chars > 0:
+                kwargs["sent_content_length"] = max(
+                    int(kwargs.get("sent_content_length") or 0),
+                    kimi_sent_chars,
+                )
+        except Exception as e:
+            logger.debug(f"[Executor] 读取 Kimi 页面抓流已发送长度失败（忽略）: {e}")
+
         if kwargs:
             baseline = kwargs.get("baseline_snapshot") or {}
             logger.debug(
@@ -590,6 +601,7 @@ class WorkflowExecutor(
                 token,
             )
         self._kimi_capture_token = token
+        self._kimi_page_sent_content_length = 0
         if install_result is not None:
             logger.debug(f"[Executor] Kimi 页面抓流已准备: {install_result}")
 
@@ -712,6 +724,7 @@ class WorkflowExecutor(
 
                 if content:
                     logger.debug(f"[Executor] Kimi 页面抓流产出: {repr(content)[:240]}")
+                    self._kimi_page_sent_content_length += len(content)
                     yield self.formatter.pack_chunk(content, completion_id=completion_id)
 
                 if done:
@@ -726,11 +739,13 @@ class WorkflowExecutor(
                 raise NetworkMonitorTimeout(f"kimi_page_capture_first_response_timeout:{first_response_timeout:.1f}s")
 
             if seen_request and (now - last_activity) > silence_threshold:
-                logger.debug(
+                logger.warning(
                     "[Executor] Kimi 页面抓流静默超时 "
                     f"({now - last_activity:.1f}s)"
                 )
-                break
+                raise NetworkMonitorTimeout(
+                    f"kimi_page_capture_silence_timeout:{silence_threshold:.1f}s"
+                )
 
             time.sleep(max(0.05, response_interval))
     
@@ -883,6 +898,8 @@ class WorkflowExecutor(
                             yield from self._monitor_kimi_page_capture(
                                 completion_id=self._completion_id
                             )
+                            if self._stream_monitor is not None:
+                                self._stream_monitor.clear_send_baseline()
                             monitor_used = "kimi_page"
                         else:
                             logger.debug("[Executor] 尝试网络监听模式")
@@ -901,6 +918,8 @@ class WorkflowExecutor(
                                 if self._network_monitor is not None
                                 else []
                             )
+                            if self._stream_monitor is not None:
+                                self._stream_monitor.clear_send_baseline()
                             monitor_used = "network"
 
                     except NetworkInterceptionTriggered as e:
@@ -923,6 +942,8 @@ class WorkflowExecutor(
                             completion_id=self._completion_id,
                             **dom_fallback_kwargs,
                         )
+                        if self._stream_monitor is not None:
+                            self._stream_monitor.clear_send_baseline()
                         self._last_stream_media_state = {}
                         self._last_stream_media_items = []
                         monitor_used = "dom_fallback"
@@ -939,6 +960,8 @@ class WorkflowExecutor(
                             completion_id=self._completion_id,
                             **dom_fallback_kwargs,
                         )
+                        if self._stream_monitor is not None:
+                            self._stream_monitor.clear_send_baseline()
                         self._last_stream_media_state = {}
                         self._last_stream_media_items = []
                         monitor_used = "dom_fallback"
@@ -949,6 +972,8 @@ class WorkflowExecutor(
                         user_input=user_input,
                         completion_id=self._completion_id
                     )
+                    if self._stream_monitor is not None:
+                        self._stream_monitor.clear_send_baseline()
                     self._last_stream_media_state = {}
                     self._last_stream_media_items = []
                     monitor_used = "dom"

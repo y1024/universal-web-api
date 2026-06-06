@@ -253,6 +253,19 @@ window.RequestMonitorTab = {
         formatNumber(value) {
             return (Number(value) || 0).toLocaleString('zh-CN')
         },
+        formatTokenNumber(value) {
+            const num = Number(value) || 0
+            if (num >= 1e9) {
+                return parseFloat((num / 1e9).toFixed(2)) + 'B'
+            }
+            if (num >= 1e6) {
+                return parseFloat((num / 1e6).toFixed(2)) + 'M'
+            }
+            if (num >= 1e4) {
+                return parseFloat((num / 1e3).toFixed(2)) + 'K'
+            }
+            return num.toLocaleString('zh-CN')
+        },
         statusTone(record) {
             return record && record.success ? 'success' : 'failed'
         },
@@ -349,7 +362,7 @@ window.RequestMonitorTab = {
         },
         tokenEstimate(record) {
             const estimate = record && record.token_estimate ? record.token_estimate : {}
-            return this.formatNumber(estimate.total || 0)
+            return this.formatTokenNumber(estimate.total || 0)
         },
         tabLabel(record) {
             const tabIndex = Number(record && record.tab_index || 0)
@@ -439,24 +452,25 @@ window.RequestMonitorTab = {
                     </article>
 
                     <!-- KPI 卡片 3: Token 分开统计 -->
-                    <article class="relative rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
+                    <article class="relative rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70"
+                             :title="'精确总计: ' + formatNumber(systemStats.total_input_tokens + systemStats.total_output_tokens) + ' Tokens'">
                         <div>
                             <div class="text-[11px] uppercase text-slate-400 dark:text-slate-500">Token 吞吐量</div>
-                            <div class="mt-2 text-3xl font-bold text-slate-950 dark:text-white">{{ formatNumber(systemStats.total_input_tokens + systemStats.total_output_tokens) }} <span class="text-xs font-normal text-slate-400">Tokens</span></div>
+                            <div class="mt-2 text-3xl font-bold text-slate-950 dark:text-white">{{ formatTokenNumber(systemStats.total_input_tokens + systemStats.total_output_tokens) }} <span class="text-xs font-normal text-slate-400">Tokens</span></div>
                         </div>
                         <div class="absolute top-3.5 right-3.5 w-8 h-8 flex items-center justify-center rounded-lg bg-emerald-50 text-base dark:bg-emerald-500/10">🎫</div>
                         <div class="mt-4 space-y-2 text-xs">
-                            <div class="flex items-center justify-between">
+                            <div class="flex items-center justify-between" :title="'精确输入: ' + formatNumber(systemStats.total_input_tokens)">
                                 <span class="text-slate-400 dark:text-slate-500 flex items-center gap-1">
                                     <span class="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block"></span> 累计输入 (Prompt)
                                 </span>
-                                <span class="font-bold text-blue-600 dark:text-blue-400">{{ formatNumber(systemStats.total_input_tokens) }}</span>
+                                <span class="font-bold text-blue-600 dark:text-blue-400">{{ formatTokenNumber(systemStats.total_input_tokens) }}</span>
                             </div>
-                            <div class="flex items-center justify-between">
+                            <div class="flex items-center justify-between" :title="'精确输出: ' + formatNumber(systemStats.total_output_tokens)">
                                 <span class="text-slate-400 dark:text-slate-500 flex items-center gap-1">
                                     <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span> 累计输出 (Completion)
                                 </span>
-                                <span class="font-bold text-emerald-600 dark:text-emerald-400">{{ formatNumber(systemStats.total_output_tokens) }}</span>
+                                <span class="font-bold text-emerald-600 dark:text-emerald-400">{{ formatTokenNumber(systemStats.total_output_tokens) }}</span>
                             </div>
                             <div class="mt-1">
                                 <div class="flex items-center justify-between text-[10px] text-slate-400 dark:text-slate-500 mb-0.5">
@@ -536,13 +550,13 @@ window.RequestMonitorTab = {
                                     <div class="flex shrink-0 flex-row items-center justify-between gap-3 lg:flex-col lg:items-end">
                                         <div class="text-2xl font-black text-slate-900 dark:text-white">{{ record.__durationText }}</div>
                                         <div class="text-[10px] text-slate-400 dark:text-slate-500 flex flex-col items-end gap-0.5 font-semibold">
-                                            <span class="flex items-center gap-1">
+                                            <span class="flex items-center gap-1" :title="'精确输入: ' + formatNumber(record.token_estimate ? record.token_estimate.prompt : 0)">
                                                 <span class="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block"></span>
-                                                输入: {{ formatNumber(record.token_estimate ? record.token_estimate.prompt : 0) }}
+                                                输入: {{ formatTokenNumber(record.token_estimate ? record.token_estimate.prompt : 0) }}
                                             </span>
-                                            <span class="flex items-center gap-1">
+                                            <span class="flex items-center gap-1" :title="'精确输出: ' + formatNumber(record.token_estimate ? record.token_estimate.response : 0)">
                                                 <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
-                                                输出: {{ formatNumber(record.token_estimate ? record.token_estimate.response : 0) }}
+                                                输出: {{ formatTokenNumber(record.token_estimate ? record.token_estimate.response : 0) }}
                                             </span>
                                         </div>
                                     </div>
@@ -651,13 +665,15 @@ window.RequestMonitorTab = {
                                 <div class="text-[11px] text-slate-400 dark:text-slate-500">生成耗时</div>
                                 <div class="mt-1 text-lg font-bold text-slate-900 dark:text-white">{{ formatDurationMs(selectedRecord.generation_ms) }}</div>
                             </div>
-                            <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40">
+                            <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40"
+                                 :title="'精确输入: ' + formatNumber(selectedRecord.token_estimate ? selectedRecord.token_estimate.prompt : 0)">
                                 <div class="text-[11px] text-slate-400 dark:text-slate-500">输入 Token (Prompt)</div>
-                                <div class="mt-1 text-lg font-bold text-blue-600 dark:text-blue-400">{{ formatNumber(selectedRecord.token_estimate ? selectedRecord.token_estimate.prompt : 0) }}</div>
+                                <div class="mt-1 text-lg font-bold text-blue-600 dark:text-blue-400">{{ formatTokenNumber(selectedRecord.token_estimate ? selectedRecord.token_estimate.prompt : 0) }}</div>
                             </div>
-                            <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40">
+                            <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40"
+                                 :title="'精确输出: ' + formatNumber(selectedRecord.token_estimate ? selectedRecord.token_estimate.response : 0)">
                                 <div class="text-[11px] text-slate-400 dark:text-slate-500">输出 Token (Completion)</div>
-                                <div class="mt-1 text-lg font-bold text-emerald-600 dark:text-emerald-400">{{ formatNumber(selectedRecord.token_estimate ? selectedRecord.token_estimate.response : 0) }}</div>
+                                <div class="mt-1 text-lg font-bold text-emerald-600 dark:text-emerald-400">{{ formatTokenNumber(selectedRecord.token_estimate ? selectedRecord.token_estimate.response : 0) }}</div>
                             </div>
                             <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-950/40">
                                 <div class="text-[11px] text-slate-400 dark:text-slate-500">开始 / 结束时间</div>

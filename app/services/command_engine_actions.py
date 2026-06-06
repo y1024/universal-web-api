@@ -537,7 +537,12 @@ return (() => {
                     click_x = int(probe.get("x"))
                     click_y = int(probe.get("y"))
                 except Exception:
-                    return {"ok": False, "error": "captcha_click_point_invalid", "probe": probe}
+                    last_error = "captcha_click_point_invalid"
+                    logger.warning(
+                        f"[CMD] 人机验证坐标解析失败，继续重试: probe={str(probe)[:160]}"
+                    )
+                    time.sleep(0.25)
+                    continue
 
                 if random_radius > 0:
                     click_x += random.randint(-random_radius, random_radius)

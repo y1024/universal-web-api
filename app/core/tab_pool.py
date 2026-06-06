@@ -10,6 +10,7 @@ app/core/tab_pool.py - 标签页池管理器 (v1.05)
 
 import asyncio
 import os
+import random
 import threading
 import time
 from collections import OrderedDict, deque
@@ -1126,8 +1127,8 @@ class TabPoolManager:
     @staticmethod
     def _normalize_allocation_mode(value: Any) -> str:
         normalized = str(value or "").strip().lower()
-        if normalized == "round_robin":
-            return "round_robin"
+        if normalized in {"round_robin", "random"}:
+            return normalized
         return "first_idle"
 
     def __init__(
@@ -1788,12 +1789,19 @@ class TabPoolManager:
         sessions: List[TabSession],
         *,
         route_domain: Optional[str] = None,
+        allocation_mode: Optional[str] = None,
     ) -> List[TabSession]:
         ordered = sorted(
             list(sessions or []),
             key=lambda item: (item.persistent_index or 0, item.id),
         )
-        if self.allocation_mode != "round_robin" or len(ordered) <= 1:
+        mode = self._normalize_allocation_mode(allocation_mode or self.allocation_mode)
+        if mode == "random" and len(ordered) > 1:
+            randomized = ordered[:]
+            random.shuffle(randomized)
+            return randomized
+
+        if mode != "round_robin" or len(ordered) <= 1:
             return ordered
 
         cursor = (
@@ -3029,10 +3037,17 @@ class TabPoolManager:
         self,
         route_domain: str,
         task_id: str,
-        timeout: float = None
+        timeout: float = None,
+        allocation_mode: Optional[str] = None,
     ) -> Optional[TabSession]:
         """异步版本的按域名路由获取。"""
-        return await asyncio.to_thread(self.acquire_by_route_domain, route_domain, task_id, timeout)
+        return await asyncio.to_thread(
+            self.acquire_by_route_domain,
+            route_domain,
+            task_id,
+            timeout,
+            allocation_mode,
+        )
 
 
 
@@ -3380,7 +3395,13 @@ class TabPoolManager:
                     owner_key=persistent_index,
                 )
 
-    def acquire_by_route_domain(self, route_domain: str, task_id: str, timeout: float = None) -> Optional[TabSession]:
+    def acquire_by_route_domain(
+        self,
+        route_domain: str,
+        task_id: str,
+        timeout: float = None,
+        allocation_mode: Optional[str] = None,
+    ) -> Optional[TabSession]:
         """ASCII-safe fair acquire for tabs matching the same route domain."""
         target = normalize_route_domain(route_domain)
         if not target:
@@ -3428,6 +3449,7 @@ class TabPoolManager:
                     for session in self._order_sessions_for_allocation(
                         matching_sessions,
                         route_domain=target,
+                        allocation_mode=allocation_mode,
                     ):
                         if not session.is_healthy(allow_live_check=False):
                             continue

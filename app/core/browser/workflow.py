@@ -90,6 +90,26 @@ class BrowserWorkflowMixin:
         return "[Tool Output Format Reminder]" in content
 
     @staticmethod
+    def _select_image_source_messages(messages: List[Dict], upload_history: bool) -> List[Dict]:
+        """选择本轮图片提取来源；关闭历史上传时保留最近一条带图用户消息。"""
+        if upload_history:
+            return messages or []
+
+        last_user = None
+        last_user_with_image = None
+        for message in reversed(messages or []):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            if last_user is None:
+                last_user = message
+            if BrowserWorkflowMixin._message_declares_image(message):
+                last_user_with_image = message
+                break
+
+        selected = last_user_with_image or last_user
+        return [selected] if selected else []
+
+    @staticmethod
     def _emit_request_block(emitted_blocks: set[int], block_no: int, title: str, detail: str = "") -> None:
         if block_no in emitted_blocks:
             return
@@ -517,6 +537,7 @@ class BrowserWorkflowMixin:
         stop_checker: Optional[Callable[[], bool]] = None,
         workflow_priority: Optional[int] = None,
         allow_media_postprocess: bool = True,
+        allocation_mode: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """使用指定域名路由匹配的标签页执行工作流。"""
         is_valid, error_msg, sanitized_messages = MessageValidator.validate(messages)
@@ -545,7 +566,12 @@ class BrowserWorkflowMixin:
 
         session = None
         try:
-            session = self.tab_pool.acquire_by_route_domain(normalized_route_domain, task_id, timeout=60)
+            session = self.tab_pool.acquire_by_route_domain(
+                normalized_route_domain,
+                task_id,
+                timeout=60,
+                allocation_mode=allocation_mode,
+            )
 
             if session is None:
                 yield self.formatter.pack_error(
@@ -1227,23 +1253,7 @@ class BrowserWorkflowMixin:
 
         upload_history = self._get_upload_history_images_flag(default=True)
         logger.debug(f"图片历史上传: {upload_history}")
-        image_source_messages = messages
-        if not upload_history:
-            last_user = None
-            last_user_with_image = None
-            for m in reversed(messages):
-                if not isinstance(m, dict) or m.get("role") != "user":
-                    continue
-                if last_user is None:
-                    last_user = m
-                    if self._message_declares_image(m):
-                        last_user_with_image = m
-                        break
-                    continue
-                if self._message_declares_image(m):
-                    last_user_with_image = m
-                    break
-            image_source_messages = [last_user_with_image or last_user] if (last_user_with_image or last_user) else []
+        image_source_messages = self._select_image_source_messages(messages, upload_history)
 
         logger.debug(f"图片源消息数: {len(image_source_messages)}/{len(messages)}")
         user_images = extract_images_from_messages(image_source_messages)

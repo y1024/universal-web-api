@@ -278,14 +278,11 @@ async def set_site_advanced_config(
             for pattern in (body.url_transition_wait_patterns or [])
             if str(pattern or "").strip()
         ]
-    if preset_name:
-        payload = {
-            key: value
-            for key, value in all_payload.items()
-            if key in provided_fields
-        }
-    else:
-        payload = all_payload
+    payload = {
+        key: value
+        for key, value in all_payload.items()
+        if key in provided_fields
+    }
 
     try:
         if preset_name:

@@ -114,6 +114,21 @@ class WorkflowExecutorActionMixin:
         target = str(target_key or "").strip()
         return bool(target and target in self._get_stealth_dom_click_targets())
 
+    def _resolve_input_length_selector(self, target_key: str) -> str:
+        selector = ""
+        if isinstance(getattr(self, "_selectors", None), dict):
+            selector = str(self._selectors.get(target_key, "") or "").strip()
+        if selector:
+            return selector
+
+        text_handler = getattr(self, "_text_handler", None)
+        if text_handler is not None:
+            selector = str(getattr(text_handler, "_active_input_selector", "") or "").strip()
+        if selector:
+            return selector
+
+        return ""
+
     def _should_run_stealth_warmup(self, action: str = "", target_key: str = "") -> bool:
         if not self.stealth_mode:
             return False
@@ -771,12 +786,23 @@ class WorkflowExecutorActionMixin:
                             pass
 
                     if target_key == "send_btn":
+                        send_url = ""
                         try:
                             send_url = str(self.tab.url or "")
-                            before_len = self._safe_get_input_len_by_key("input_box")
-                            logger.debug(f"[SEND_CLICK_START] 开始点击发送按钮, 当前 URL: {send_url}, 发送前输入框长度: {before_len}")
                         except Exception:
                             pass
+                        before_len = self._safe_get_input_len_by_key("input_box")
+                        logger.debug(f"[SEND_CLICK_START] 开始点击发送按钮, 当前 URL: {send_url}, 发送前输入框长度: {before_len}")
+                        
+                        expected_len = 0
+                        if isinstance(getattr(self, "_context", None), dict):
+                            expected_len = len(str(self._context.get("prompt", "") or ""))
+                        if before_len <= 0 and expected_len > 0:
+                            logger.error(
+                                f"[SEND_CLICK_ERROR] 发送前检测到输入框为空，但预期输入长度为 {expected_len}。"
+                                "这通常是由于超长文本粘贴时 React 状态未同步完成，失焦/点击触发了值覆写置空。"
+                            )
+                            raise WorkflowError("send_input_empty_before_click")
 
                     if self.stealth_mode:
                         if self._should_use_background_safe_dom_click(target_key):
@@ -819,7 +845,7 @@ class WorkflowExecutorActionMixin:
                 return
 
             except Exception as click_err:
-                if isinstance(click_err, WorkflowError) and str(click_err) == "send_unconfirmed":
+                if isinstance(click_err, WorkflowError) and str(click_err) in {"send_unconfirmed", "send_input_empty_before_click"}:
                     raise
                 last_error = click_err
                 logger.warning(
@@ -1306,25 +1332,28 @@ class WorkflowExecutorActionMixin:
     def _safe_get_input_len_by_key(self, target_key: str) -> int:
         """读取输入框当前长度（防多标签干扰与后台 activeElement 漂移版）"""
         try:
-            selector = ""
-            if isinstance(self._selectors, dict):
-                selector = str(self._selectors.get(target_key, "") or "").strip()
+            selector = self._resolve_input_length_selector(target_key)
+            if not selector:
+                return 0
 
             n = self.tab.run_js("""
                 try {
-                    const sel = arguments[0];
-                    let el = null;
-                    if (sel) {
-                        el = document.querySelector(sel);
-                    }
-                    if (!el && !sel) {
-                        el = document.querySelector('textarea, [contenteditable="true"], input[type="text"]');
-                    }
-                    if (!el) return 0;
-                    
-                    const tag = (el.tagName || '').toLowerCase();
-                    if (tag === 'textarea' || tag === 'input') return (el.value || '').length;
-                    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') return (el.innerText || '').length;
+                    const sel = String(arguments[0] || '').trim();
+                    let root = sel ? document.querySelector(sel) : null;
+                    if (!root) return 0;
+
+                    const target = (() => {
+                        const tag = (root.tagName || '').toLowerCase();
+                        const isCE = root.isContentEditable || root.getAttribute('contenteditable') === 'true';
+                        if (tag === 'textarea' || tag === 'input' || isCE) return root;
+                        if (typeof root.querySelector !== 'function') return null;
+                        return root.querySelector('textarea, input, [contenteditable="true"]');
+                    })();
+                    if (!target) return 0;
+
+                    const tag = (target.tagName || '').toLowerCase();
+                    if (tag === 'textarea' || tag === 'input') return (target.value || '').length;
+                    if (target.isContentEditable || target.getAttribute('contenteditable') === 'true') return (target.innerText || '').length;
                     return 0;
                 } catch(e){ return 0; }
             """, selector)

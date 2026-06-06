@@ -9,7 +9,7 @@ schemas.py - 数据模型和 API Schema 定义
 
 import copy
 from typing import TypedDict, List, Optional, Literal, Dict, Any, Union
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # ================= 动作类型 =================
 
@@ -31,7 +31,7 @@ ActionType = Literal[
 
 REQUIRED_SELECTOR_KEYS = [
     "input_box",
-    "send_btn", 
+    "send_btn",
     "result_container",
 ]
 
@@ -142,7 +142,7 @@ def get_default_selector_definitions() -> List[SelectorDefinition]:
 class ImageData(BaseModel):
     """
     图片数据模型
-    
+
     kind 决定使用 url 还是 data_uri：
     - kind="url": 使用 url 字段
     - kind="data_uri": 使用 data_uri 字段
@@ -150,20 +150,20 @@ class ImageData(BaseModel):
     kind: Literal["url", "data_uri"]
     url: Optional[str] = None
     data_uri: Optional[str] = None
-    
+
     mime: Optional[str] = None
     byte_size: Optional[int] = None
-    
+
     alt: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
-    
+
     index: int = 0
     detected_at: Optional[str] = None  # ISO 格式时间戳
     source: Optional[Literal["currentSrc", "src", "blob", "data_uri", "relative"]] = None
-    
-    class Config:
-        json_schema_extra = {
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "kind": "url",
                 "url": "https://example.com/image.png",
@@ -174,16 +174,17 @@ class ImageData(BaseModel):
                 "source": "currentSrc"
             }
         }
+    )
 
 class FilePasteConfig(TypedDict, total=False):
     """
     文件粘贴配置
-    
+
     当文本长度超过阈值时，将文本写入临时 txt 文件，
     然后以文件形式粘贴到输入框（通过 CF_HDROP 剪贴板格式）。
     粘贴文件后，自动在输入框中追加一句引导文本，确保能正常发送。
     附件发送确认规则也优先挂在这里，避免和网络监听配置混在一起。
-    
+
     用于 sites.json 中的 file_paste 字段
     """
     enabled: bool       # 是否启用文件粘贴模式，默认 False
@@ -414,7 +415,7 @@ def get_enabled_modalities(modalities: Any) -> List[str]:
 class ImageExtractionConfig(TypedDict, total=False):
     """
     多模态提取配置
-    
+
     用于 sites.json 中的 image_extraction 字段
     """
     enabled: bool                    # 是否启用多模态提取（兼容旧字段）
@@ -735,9 +736,9 @@ class ExtractorListResponse(BaseModel):
     """API 响应：提取器列表"""
     extractors: List[Dict[str, Any]]
     default: str
-    
-    class Config:
-        json_schema_extra = {
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "extractors": [
                     {
@@ -750,6 +751,7 @@ class ExtractorListResponse(BaseModel):
                 "default": "deep_mode_v1"
             }
         }
+    )
 
 
 class ExtractorTestRequest(BaseModel):
@@ -757,29 +759,31 @@ class ExtractorTestRequest(BaseModel):
     site_id: str
     extractor_id: str
     test_prompt: str = "Hello, test."
-    
-    class Config:
-        json_schema_extra = {
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "site_id": "chatgpt.com",
                 "extractor_id": "deep_mode_v1",
                 "test_prompt": "Write a short poem."
             }
         }
+    )
 
 
 class ExtractorVerifyRequest(BaseModel):
     """API 请求：验证提取结果"""
     extracted_text: str
     expected_text: str
-    
-    class Config:
-        json_schema_extra = {
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "extracted_text": "Roses are red...",
                 "expected_text": "Roses are red..."
             }
         }
+    )
 
 
 class ExtractorVerifyResponse(BaseModel):
@@ -787,27 +791,29 @@ class ExtractorVerifyResponse(BaseModel):
     similarity: float  # 0.0 - 1.0
     passed: bool       # >= 0.95 视为通过
     message: str
-    
-    class Config:
-        json_schema_extra = {
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "similarity": 0.973,
                 "passed": True,
                 "message": "验证通过"
             }
         }
+    )
 
 
 class ExtractorAssignRequest(BaseModel):
     """API 请求：为站点分配提取器"""
     extractor_id: str
-    
-    class Config:
-        json_schema_extra = {
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "extractor_id": "deep_mode_v1"
             }
         }
+    )
 
 
 # ================= 工具函数 =================
@@ -886,21 +892,21 @@ def validate_site_config(config: Dict[str, Any]) -> bool:
     """验证站点配置是否有效"""
     if "selectors" not in config or "workflow" not in config:
         return False
-    
+
     if not isinstance(config["selectors"], dict):
         return False
-    
+
     if not isinstance(config["workflow"], list):
         return False
-    
+
     for step in config["workflow"]:
         if not validate_workflow_step(step):
             return False
-    
+
     if "stream_config" in config:
         if not isinstance(config["stream_config"], dict):
             return False
-        
+
         stream_config = config["stream_config"]
 
         if "mode" in stream_config:
@@ -949,7 +955,7 @@ def validate_site_config(config: Dict[str, Any]) -> bool:
                 mode = str(network_config["stream_match_mode"]).strip().lower()
                 if mode not in {"keyword", "regex"}:
                     return False
-        
+
         if "send_confirmation" in stream_config:
             if not isinstance(stream_config["send_confirmation"], dict):
                 return False
@@ -1185,7 +1191,7 @@ def validate_site_config(config: Dict[str, Any]) -> bool:
             return False
         if "segments_per_side" in prompt_padding and not isinstance(prompt_padding["segments_per_side"], int):
             return False
-    
+
     return True
 
 
@@ -1250,10 +1256,10 @@ def merge_stream_config(
     """合并流式监控配置"""
     if defaults is None:
         defaults = get_default_stream_config()
-    
+
     if site_config is None:
         return defaults.copy()
-    
+
     result = defaults.copy()
     result.update(site_config)
 
@@ -1287,7 +1293,7 @@ def merge_stream_config(
             result["attachment_monitor"].update(site_attachment_monitor)
     elif isinstance(site_attachment_monitor, dict):
         result["attachment_monitor"] = site_attachment_monitor.copy()
-    
+
     return result
 
 
@@ -1319,7 +1325,7 @@ __all__ = [
     'ErrorResponse',
     'ModelInfo',
     'ModelsResponse',
-    
+
     # 提取器相关
     'ExtractorConfigDict',
     'ExtractorDefinition',
@@ -1328,13 +1334,13 @@ __all__ = [
     'ExtractorVerifyRequest',
     'ExtractorVerifyResponse',
     'ExtractorAssignRequest',
-    
+
     # 常量
     'REQUIRED_SELECTOR_KEYS',
     'OPTIONAL_SELECTOR_KEYS',
     'ALL_SELECTOR_KEYS',
     'DEFAULT_SELECTOR_DEFINITIONS',
-    
+
     # 工具函数
     'get_default_selector_definitions',
     'validate_workflow_step',
@@ -1369,7 +1375,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print("Schema 模型测试")
     print("=" * 50)
-    
+
     # 测试 Pydantic 模型
     test_request = ExtractorTestRequest(
         site_id="chatgpt.com",
@@ -1377,14 +1383,14 @@ if __name__ == "__main__":
         test_prompt="Hello!"
     )
     print(f"\n✅ ExtractorTestRequest: {test_request.model_dump()}")
-    
+
     test_response = ExtractorVerifyResponse(
         similarity=0.98,
         passed=True,
         message="验证通过"
     )
     print(f"✅ ExtractorVerifyResponse: {test_response.model_dump()}")
-    
+
     print("\n" + "=" * 50)
     print("所有测试通过!")
     print("=" * 50)

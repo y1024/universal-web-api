@@ -938,7 +938,7 @@ class ConfigEngine:
             timeout_value = float(normalized.get("input_box_stability_wait_timeout", 1.5))
         except Exception:
             timeout_value = 1.5
-        normalized["input_box_stability_wait_timeout"] = max(0.2, min(timeout_value, 10.0))
+        normalized["input_box_stability_wait_timeout"] = max(0.1, min(timeout_value, 10.0))
         normalized["url_transition_wait_on_new_chat"] = bool(
             normalized.get("url_transition_wait_on_new_chat", False)
         )
