@@ -340,37 +340,74 @@ class CommandEngine(CommandEngineRuntimeMixin, CommandEngineResultsMixin, Comman
     function appendText(parts, value) {
         if (typeof value === 'string' && value) parts.push(value);
     }
-    function collectRootText(root, parts, seen) {
-        if (!root || seen.indexOf(root) !== -1) return;
-        seen.push(root);
-        try {
-            appendText(parts, root.innerText || root.textContent || '');
-        } catch (e) {}
-        var nodes = [];
-        try {
-            nodes = root.querySelectorAll ? root.querySelectorAll('*') : [];
-        } catch (e) {}
-        for (var i = 0; i < nodes.length; i++) {
-            var node = nodes[i];
+    function collectText(node, parts, seen) {
+        if (!node || seen.indexOf(node) !== -1) return;
+        seen.push(node);
+
+        if (node.nodeType === 1) {
+            var tag = String(node.tagName || '').toUpperCase();
+            if (
+                tag === 'SCRIPT' ||
+                tag === 'STYLE' ||
+                tag === 'NOSCRIPT' ||
+                tag === 'TEMPLATE' ||
+                tag === 'META' ||
+                tag === 'HEAD'
+            ) {
+                return;
+            }
             try {
-                if (node && node.shadowRoot) collectRootText(node.shadowRoot, parts, seen);
+                if (node.shadowRoot) collectText(node.shadowRoot, parts, seen);
             } catch (e) {}
+            if (tag === 'IFRAME') {
+                try {
+                    var doc = node.contentDocument || (node.contentWindow && node.contentWindow.document);
+                    if (doc) collectText(doc.documentElement || doc.body, parts, seen);
+                } catch (e) {}
+            }
         }
-        var iframes = [];
+
+        if (node.nodeType === 3) {
+            appendText(parts, String(node.nodeValue || '').trim());
+        }
+
+        var child = null;
         try {
-            iframes = root.querySelectorAll ? root.querySelectorAll('iframe') : [];
+            child = node.firstChild;
         } catch (e) {}
-        for (var j = 0; j < iframes.length; j++) {
+        while (child) {
+            collectText(child, parts, seen);
             try {
-                var frame = iframes[j];
-                var doc = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
-                if (doc) collectRootText(doc.documentElement || doc.body, parts, seen);
-            } catch (e) {}
+                child = child.nextSibling;
+            } catch (e) {
+                child = null;
+            }
         }
     }
-    function hasSelector(selector) {
+    function collectRootText(root, parts, seen) {
+        collectText(root, parts, seen);
+    }
+    function isElementVisible(el) {
+        if (!el) return false;
         try {
-            return !!document.querySelector(selector);
+            var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (style) {
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                if (Number(style.opacity || 1) <= 0.02) return false;
+            }
+            return !!rect && rect.width > 5 && rect.height > 5;
+        } catch (e) {
+            return false;
+        }
+    }
+    function hasVisibleSelector(selector) {
+        try {
+            var els = document.querySelectorAll(selector);
+            for (var i = 0; i < els.length; i++) {
+                if (isElementVisible(els[i])) return true;
+            }
+            return false;
         } catch (e) {
             return false;
         }
@@ -388,11 +425,11 @@ class CommandEngine(CommandEngineRuntimeMixin, CommandEngineResultsMixin, Comman
         if (text.indexOf('checking your browser') !== -1) cfIndicators.push('checking your browser');
         if (text.indexOf('确认您是真人') !== -1) cfIndicators.push('确认您是真人');
         if (
-            hasSelector('iframe[src*="challenges.cloudflare.com"]') ||
-            hasSelector('iframe[src*="turnstile"]') ||
-            hasSelector('.cf-turnstile') ||
-            hasSelector('[name="cf-turnstile-response"]') ||
-            hasSelector('[data-testid*="cf" i]')
+            hasVisibleSelector('iframe[src*="challenges.cloudflare.com"]') ||
+            hasVisibleSelector('iframe[src*="turnstile"]') ||
+            hasVisibleSelector('.cf-turnstile') ||
+            hasVisibleSelector('[name="cf-turnstile-response"]') ||
+            hasVisibleSelector('[data-testid*="cf" i]')
         ) {
             cfIndicators.push('cloudflare');
         } else if (text.indexOf('cloudflare') !== -1) {
@@ -404,12 +441,12 @@ class CommandEngine(CommandEngineRuntimeMixin, CommandEngineResultsMixin, Comman
         var recaptchaIndicators = [];
         if (text.indexOf('protected by recaptcha') !== -1) recaptchaIndicators.push('protected by recaptcha');
         if (
-            hasSelector('iframe[src*="google.com/recaptcha"]') ||
-            hasSelector('iframe[src*="recaptcha"]') ||
-            hasSelector('.g-recaptcha') ||
-            hasSelector('[name="g-recaptcha-response"]') ||
-            hasSelector('[title*="recaptcha" i]') ||
-            hasSelector('[aria-label*="recaptcha" i]')
+            hasVisibleSelector('iframe[src*="google.com/recaptcha"]') ||
+            hasVisibleSelector('iframe[src*="recaptcha"]') ||
+            hasVisibleSelector('.g-recaptcha') ||
+            hasVisibleSelector('[name="g-recaptcha-response"]') ||
+            hasVisibleSelector('[title*="recaptcha" i]') ||
+            hasVisibleSelector('[aria-label*="recaptcha" i]')
         ) {
             recaptchaIndicators.push('recaptcha');
             recaptchaIndicators.push('\u4eba\u673a\u8eab\u4efd\u9a8c\u8bc1');
@@ -461,37 +498,74 @@ return (function() {
     function appendText(parts, value) {
         if (typeof value === 'string' && value) parts.push(value);
     }
-    function collectRootText(root, parts, seen) {
-        if (!root || seen.indexOf(root) !== -1) return;
-        seen.push(root);
-        try {
-            appendText(parts, root.innerText || root.textContent || '');
-        } catch (e) {}
-        var nodes = [];
-        try {
-            nodes = root.querySelectorAll ? root.querySelectorAll('*') : [];
-        } catch (e) {}
-        for (var i = 0; i < nodes.length; i++) {
-            var node = nodes[i];
+    function collectText(node, parts, seen) {
+        if (!node || seen.indexOf(node) !== -1) return;
+        seen.push(node);
+
+        if (node.nodeType === 1) {
+            var tag = String(node.tagName || '').toUpperCase();
+            if (
+                tag === 'SCRIPT' ||
+                tag === 'STYLE' ||
+                tag === 'NOSCRIPT' ||
+                tag === 'TEMPLATE' ||
+                tag === 'META' ||
+                tag === 'HEAD'
+            ) {
+                return;
+            }
             try {
-                if (node && node.shadowRoot) collectRootText(node.shadowRoot, parts, seen);
+                if (node.shadowRoot) collectText(node.shadowRoot, parts, seen);
             } catch (e) {}
+            if (tag === 'IFRAME') {
+                try {
+                    var doc = node.contentDocument || (node.contentWindow && node.contentWindow.document);
+                    if (doc) collectText(doc.documentElement || doc.body, parts, seen);
+                } catch (e) {}
+            }
         }
-        var iframes = [];
+
+        if (node.nodeType === 3) {
+            appendText(parts, String(node.nodeValue || '').trim());
+        }
+
+        var child = null;
         try {
-            iframes = root.querySelectorAll ? root.querySelectorAll('iframe') : [];
+            child = node.firstChild;
         } catch (e) {}
-        for (var j = 0; j < iframes.length; j++) {
+        while (child) {
+            collectText(child, parts, seen);
             try {
-                var frame = iframes[j];
-                var doc = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
-                if (doc) collectRootText(doc.documentElement || doc.body, parts, seen);
-            } catch (e) {}
+                child = child.nextSibling;
+            } catch (e) {
+                child = null;
+            }
         }
     }
-    function hasSelector(selector) {
+    function collectRootText(root, parts, seen) {
+        collectText(root, parts, seen);
+    }
+    function isElementVisible(el) {
+        if (!el) return false;
         try {
-            return !!document.querySelector(selector);
+            var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (style) {
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                if (Number(style.opacity || 1) <= 0.02) return false;
+            }
+            return !!rect && rect.width > 5 && rect.height > 5;
+        } catch (e) {
+            return false;
+        }
+    }
+    function hasVisibleSelector(selector) {
+        try {
+            var els = document.querySelectorAll(selector);
+            for (var i = 0; i < els.length; i++) {
+                if (isElementVisible(els[i])) return true;
+            }
+            return false;
         } catch (e) {
             return false;
         }
@@ -507,11 +581,11 @@ return (function() {
     if (text.indexOf('checking your browser') !== -1) cfIndicators.push('checking your browser');
     if (text.indexOf('确认您是真人') !== -1) cfIndicators.push('确认您是真人');
     if (
-        hasSelector('iframe[src*="challenges.cloudflare.com"]') ||
-        hasSelector('iframe[src*="turnstile"]') ||
-        hasSelector('.cf-turnstile') ||
-        hasSelector('[name="cf-turnstile-response"]') ||
-        hasSelector('[data-testid*="cf" i]')
+        hasVisibleSelector('iframe[src*="challenges.cloudflare.com"]') ||
+        hasVisibleSelector('iframe[src*="turnstile"]') ||
+        hasVisibleSelector('.cf-turnstile') ||
+        hasVisibleSelector('[name="cf-turnstile-response"]') ||
+        hasVisibleSelector('[data-testid*="cf" i]')
     ) {
         cfIndicators.push('cloudflare');
     } else if (text.indexOf('cloudflare') !== -1) {
@@ -523,12 +597,12 @@ return (function() {
     var recaptchaIndicators = [];
     if (text.indexOf('protected by recaptcha') !== -1) recaptchaIndicators.push('protected by recaptcha');
     if (
-        hasSelector('iframe[src*="google.com/recaptcha"]') ||
-        hasSelector('iframe[src*="recaptcha"]') ||
-        hasSelector('.g-recaptcha') ||
-        hasSelector('[name="g-recaptcha-response"]') ||
-        hasSelector('[title*="recaptcha" i]') ||
-        hasSelector('[aria-label*="recaptcha" i]')
+        hasVisibleSelector('iframe[src*="google.com/recaptcha"]') ||
+        hasVisibleSelector('iframe[src*="recaptcha"]') ||
+        hasVisibleSelector('.g-recaptcha') ||
+        hasVisibleSelector('[name="g-recaptcha-response"]') ||
+        hasVisibleSelector('[title*="recaptcha" i]') ||
+        hasVisibleSelector('[aria-label*="recaptcha" i]')
     ) {
         recaptchaIndicators.push('recaptcha');
         recaptchaIndicators.push('\u4eba\u673a\u8eab\u4efd\u9a8c\u8bc1');

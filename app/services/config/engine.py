@@ -1133,6 +1133,9 @@ class ConfigEngine:
         except Exception:
             send_timeout_value = 1.5
         normalized["send_confirmation_check_timeout"] = max(0.1, min(send_timeout_value, 10.0))
+        normalized["skip_new_chat_on_retry"] = _coerce_bool(
+            normalized.get("skip_new_chat_on_retry"), False
+        )
         return normalized
 
     def get_site_advanced_config(self, domain: str, preset_name: str = None) -> Dict[str, Any]:

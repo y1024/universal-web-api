@@ -15,6 +15,7 @@ import hashlib
 import threading
 import base64
 import random
+import math
 import mimetypes
 import pyperclip
 from app.core.config import logger, BrowserConstants, WorkflowError
@@ -1134,7 +1135,29 @@ class TextInputHandler:
             f"tail=...{repr(self._redact_preview_text(sample['tail'], label='tail'))}"
         )
         # ================= 人类化按键辅助（隐身模式专用）=================
-    
+
+    @staticmethod
+    def _bounded_lognormal_delay(min_sec: float, max_sec: float) -> float:
+        """Return a right-skewed delay while preserving the configured bounds."""
+        try:
+            low = max(0.0, float(min_sec or 0.0))
+        except Exception:
+            low = 0.0
+        try:
+            high = max(low, float(max_sec or 0.0))
+        except Exception:
+            high = low
+
+        if high <= low:
+            return low
+
+        median_guess = max(0.001, low + (high - low) * 0.34)
+        sampled = random.lognormvariate(math.log(median_guess), 0.42)
+        return max(low, min(sampled, high))
+
+    def _sleep_human_key_delay(self, min_sec: float, max_sec: float) -> None:
+        time.sleep(self._bounded_lognormal_delay(min_sec, max_sec))
+
     def _human_key_combo(self, *keys):
         """
         人类化组合键：保留轻微随机感，但不刻意拖慢节奏
@@ -1148,10 +1171,10 @@ class TextInputHandler:
         down_up_max = float(BrowserConstants.get('STEALTH_KEY_DOWN_UP_MAX') or 0.04)
         between_min = float(BrowserConstants.get('STEALTH_KEY_BETWEEN_MIN') or 0.02)
         between_max = float(BrowserConstants.get('STEALTH_KEY_BETWEEN_MAX') or 0.06)
-        
+
         if len(keys) == 1:
             self.tab.actions.key_down(keys[0])
-            time.sleep(random.uniform(down_up_min, down_up_max))
+            self._sleep_human_key_delay(down_up_min, down_up_max)
             self.tab.actions.key_up(keys[0])
             return
         
@@ -1159,32 +1182,32 @@ class TextInputHandler:
         targets = keys[1:]
         
         self.tab.actions.key_down(modifier)
-        time.sleep(random.uniform(between_min, between_max))
+        self._sleep_human_key_delay(between_min, between_max)
 
         if len(targets) == 1:
             target = targets[0]
             self.tab.actions.key_down(target)
-            time.sleep(random.uniform(down_up_min, down_up_max))
+            self._sleep_human_key_delay(down_up_min, down_up_max)
 
             # 少量“交叉释放”模拟：先松修饰键再松目标键
-            if random.random() < 0.2:
+            if random.random() < random.uniform(0.14, 0.26):
                 self.tab.actions.key_up(modifier)
-                time.sleep(random.uniform(0.01, 0.04))
+                self._sleep_human_key_delay(0.01, 0.04)
                 self.tab.actions.key_up(target)
             else:
                 self.tab.actions.key_up(target)
-                time.sleep(random.uniform(0.01, 0.04))
+                self._sleep_human_key_delay(0.01, 0.04)
                 self.tab.actions.key_up(modifier)
             return
         
         for i, target in enumerate(targets):
             self.tab.actions.key_down(target)
-            time.sleep(random.uniform(down_up_min, down_up_max))
+            self._sleep_human_key_delay(down_up_min, down_up_max)
             self.tab.actions.key_up(target)
             if i < len(targets) - 1:
-                time.sleep(random.uniform(between_min, between_max))
+                self._sleep_human_key_delay(between_min, between_max)
         
-        time.sleep(random.uniform(down_up_min, down_up_max))
+        self._sleep_human_key_delay(down_up_min, down_up_max)
         self.tab.actions.key_up(modifier)
 
     def _press_primary_combo(self, key: str, *, humanized: bool = False):

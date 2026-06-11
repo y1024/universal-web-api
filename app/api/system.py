@@ -421,6 +421,7 @@ DEFAULT_BROWSER_CONSTANTS: Dict[str, Any] = {
         "acquire_timeout": 60,
         "stuck_timeout": 180,
         "allocation_mode": "first_idle",
+        "excluded_urls": [],
     },
 }
 
@@ -1012,6 +1013,7 @@ async def save_browser_constants(
                         acquire_timeout=tab_pool_config.get("acquire_timeout"),
                         stuck_timeout=tab_pool_config.get("stuck_timeout"),
                         allocation_mode=tab_pool_config.get("allocation_mode"),
+                        excluded_urls=tab_pool_config.get("excluded_urls"),
                     )
                     tab_pool_synced = True
                     logger.info("运行中的标签页池配置已同步")

@@ -29,6 +29,10 @@ window.TabPoolTabComponent = {
             ],
             enabledRouteMethods: ['domain', 'fixed_tab', 'exact_url', 'exact_url_preset'],
             routeMethodUpdating: false,
+            excludedUrls: [],
+            excludedUrlsDraft: '',
+            excludedUrlsDraftDirty: false,
+            excludedUrlsUpdating: false,
             showRouteSettings: false,
             fetchInFlight: false,
             fetchRequestSeq: 0,
@@ -93,11 +97,44 @@ window.TabPoolTabComponent = {
                     allocation_mode: data && data.allocation_mode || '',
                     allocation_mode_options: data && data.allocation_mode_options || [],
                     enabled_route_methods: data && data.enabled_route_methods || [],
-                    route_method_options: data && data.route_method_options || []
+                    route_method_options: data && data.route_method_options || [],
+                    excluded_urls: data && data.excluded_urls || []
                 });
             } catch (e) {
                 return '';
             }
+        },
+
+        sanitizeExcludedUrls(value) {
+            const source = Array.isArray(value)
+                ? value
+                : String(value || '').replace(/\r\n/g, '\n').replace(/;/g, '\n').split('\n');
+            const seen = new Set();
+            const result = [];
+            source.forEach(item => {
+                const text = String(item || '').trim();
+                if (!text || seen.has(text)) return;
+                seen.add(text);
+                result.push(text);
+            });
+            return result;
+        },
+
+        formatExcludedUrls(value) {
+            return this.sanitizeExcludedUrls(value).join('\n');
+        },
+
+        applyExcludedUrlsFromServer(value) {
+            const next = this.sanitizeExcludedUrls(value);
+            this.excludedUrls = next;
+            if (!this.excludedUrlsDraftDirty) {
+                this.excludedUrlsDraft = this.formatExcludedUrls(next);
+            }
+        },
+
+        handleExcludedUrlsDraftInput(event) {
+            this.excludedUrlsDraft = event && event.target ? event.target.value : '';
+            this.excludedUrlsDraftDirty = true;
         },
 
         async fetchTabs(options = {}) {
@@ -142,6 +179,7 @@ window.TabPoolTabComponent = {
                     this.allocationModeOptions = data.allocation_mode_options || this.allocationModeOptions;
                     this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
                     this.routeMethodOptions = data.route_method_options || this.routeMethodOptions;
+                    this.applyExcludedUrlsFromServer(data.excluded_urls || []);
                     this.tabsResponseSignature = signature;
                     this.lastUpdate = new Date().toLocaleTimeString();
                 }
@@ -186,6 +224,7 @@ window.TabPoolTabComponent = {
                 const data = await response.json();
                 this.allocationMode = data.allocation_mode || nextMode;
                 this.allocationModeOptions = data.allocation_mode_options || this.allocationModeOptions;
+                this.applyExcludedUrlsFromServer(data.excluded_urls || this.excludedUrls);
                 this.$emit('notify', { type: 'success', message: '标签页池分配模式已切换' });
                 await this.fetchTabs({ force: true });
             } catch (e) {
@@ -219,6 +258,7 @@ window.TabPoolTabComponent = {
                 const data = await response.json();
                 this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
                 this.routeMethodOptions = data.route_method_options || this.routeMethodOptions;
+                this.applyExcludedUrlsFromServer(data.excluded_urls || this.excludedUrls);
                 this.$emit('notify', { type: 'success', message: '路由显示设置已保存' });
             } catch (e) {
                 this.$emit('notify', { type: 'error', message: '保存路由显示设置失败: ' + e.message });
@@ -247,6 +287,59 @@ window.TabPoolTabComponent = {
                 .map(item => item.value)
                 .filter(item => next.has(item));
             await this.saveRouteMethodSettings();
+        },
+
+        async saveExcludedUrls(nextValue = null) {
+            const nextUrls = this.sanitizeExcludedUrls(
+                nextValue === null ? this.excludedUrlsDraft : nextValue
+            );
+            this.excludedUrlsUpdating = true;
+            try {
+                const token = localStorage.getItem('api_token');
+                const headers = { 'Content-Type': 'application/json' };
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+
+                const response = await fetch('/api/tab-pool/config', {
+                    method: 'PUT',
+                    headers,
+                    body: JSON.stringify({
+                        allocation_mode: this.allocationMode,
+                        enabled_route_methods: this.enabledRouteMethods,
+                        excluded_urls: nextUrls
+                    })
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                this.allocationMode = data.allocation_mode || this.allocationMode;
+                this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
+                this.excludedUrlsDraftDirty = false;
+                this.applyExcludedUrlsFromServer(data.excluded_urls || nextUrls);
+                this.$emit('notify', { type: 'success', message: 'URL 排除列表已保存' });
+                await this.fetchTabs({ force: true });
+            } catch (e) {
+                this.$emit('notify', { type: 'error', message: '保存 URL 排除列表失败: ' + e.message });
+            } finally {
+                this.excludedUrlsUpdating = false;
+            }
+        },
+
+        async toggleTabExcluded(tab) {
+            const url = String(tab && tab.url || '').trim();
+            if (!url) return;
+
+            const current = this.sanitizeExcludedUrls(this.excludedUrls);
+            const isExcluded = !!(tab && tab.route_excluded);
+            const exclusionUrl = String(tab && tab.route_exclusion_url || url).trim();
+            const next = isExcluded
+                ? current.filter(item => item !== exclusionUrl)
+                : this.sanitizeExcludedUrls([...current, url]);
+            await this.saveExcludedUrls(next);
+        },
+
+        resetExcludedUrlsDraft() {
+            this.excludedUrlsDraftDirty = false;
+            this.excludedUrlsDraft = this.formatExcludedUrls(this.excludedUrls);
         },
 
         isDocumentHidden() {
@@ -485,7 +578,7 @@ window.TabPoolTabComponent = {
                         <div
                             v-if="showRouteSettings"
                             data-route-settings-panel
-                            class="absolute right-0 top-11 z-20 w-72 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl p-4"
+                            class="absolute right-0 top-11 z-20 w-[28rem] max-w-[calc(100vw-2rem)] rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl p-4"
                         >
                             <div class="flex items-start justify-between gap-3 mb-3">
                                 <div>
@@ -509,6 +602,36 @@ window.TabPoolTabComponent = {
                                         class="rounded"
                                     >
                                 </label>
+                            </div>
+                            <div class="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+                                <div class="flex items-center justify-between gap-3 mb-2">
+                                    <div class="text-sm font-semibold text-gray-900 dark:text-white">域名路由排除 URL</div>
+                                    <span class="text-xs text-gray-400 dark:text-gray-500">{{ excludedUrls.length }} 条</span>
+                                </div>
+                                <textarea
+                                    :value="excludedUrlsDraft"
+                                    @input="handleExcludedUrlsDraftInput"
+                                    :disabled="excludedUrlsUpdating"
+                                    rows="5"
+                                    class="w-full rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-2 py-2 font-mono text-xs text-gray-700 dark:text-gray-200 focus:ring-2 focus:ring-blue-400 focus:border-transparent disabled:opacity-60"
+                                    placeholder="https://chatgpt.com/c/..."
+                                ></textarea>
+                                <div class="mt-2 flex items-center justify-between gap-2">
+                                    <button
+                                        @click="resetExcludedUrlsDraft"
+                                        :disabled="excludedUrlsUpdating || !excludedUrlsDraftDirty"
+                                        class="px-2 py-1 rounded border border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-300 disabled:opacity-50"
+                                    >
+                                        重置
+                                    </button>
+                                    <button
+                                        @click="saveExcludedUrls()"
+                                        :disabled="excludedUrlsUpdating"
+                                        class="px-3 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700 disabled:opacity-50"
+                                    >
+                                        {{ excludedUrlsUpdating ? '保存中...' : '保存排除列表' }}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -583,6 +706,10 @@ window.TabPoolTabComponent = {
                                 <span v-if="tab.is_isolated_context"
                                       class="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs">
                                     独立 Cookie
+                                </span>
+                                <span v-if="tab.route_excluded"
+                                      class="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 text-xs">
+                                    域名路由已排除
                                 </span>
                             </div>
                             
@@ -697,6 +824,12 @@ window.TabPoolTabComponent = {
                             <div v-if="tab.current_task" class="text-blue-600 dark:text-blue-400 truncate max-w-32">
                                 任务: {{ tab.current_task }}
                             </div>
+                            <button v-if="tab.url"
+                                    @click="toggleTabExcluded(tab)"
+                                    :disabled="excludedUrlsUpdating"
+                                    class="mt-2 px-2 py-1 rounded border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 disabled:opacity-50 text-xs">
+                                {{ tab.route_excluded ? '解除域名排除' : '排除域名路由' }}
+                            </button>
                             <button v-if="tab.status === 'busy' || tab.current_task"
                                     @click="terminateTask(tab)"
                                     class="mt-2 px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700 text-xs">

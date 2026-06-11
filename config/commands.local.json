@@ -1,20 +1,8 @@
 {
   "commands": [
     {
-      "id": "cmd_58625812",
-      "name": "自动清除 Cookie",
-      "enabled": false,
-      "group_name": "arena"
-    },
-    {
       "id": "cmd_b34a8efd",
       "name": "网络错误闭环恢复",
-      "enabled": false,
-      "group_name": "arena"
-    },
-    {
-      "id": "cmd_aab3f583",
-      "name": "清除cookie后恢复",
       "enabled": false,
       "group_name": "arena"
     },
@@ -25,27 +13,9 @@
       "group_name": "arena"
     },
     {
-      "id": "cmd_9b1e4a02",
-      "name": "ARENA_RECOVER_VERIFY_AFTER_COOKIE_CLEAR",
-      "enabled": false,
-      "group_name": "arena"
-    },
-    {
       "id": "cmd_cf_pagecheck_arena_verify",
       "name": "自动过cf盾",
-      "enabled": false,
-      "group_name": "arena"
-    },
-    {
-      "id": "cmd_arena_human_verify_clear_cookie",
-      "name": "人机验证即清Cookie",
-      "enabled": false,
-      "group_name": "arena"
-    },
-    {
-      "id": "cmd_arena_cookie_accept",
-      "name": "自动接受Cookie弹窗",
-      "enabled": false,
+      "enabled": true,
       "group_name": "arena"
     },
     {

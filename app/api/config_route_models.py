@@ -27,6 +27,7 @@ class SiteAdvancedConfigRequest(BaseModel):
     url_transition_wait_patterns: List[str] = Field(default_factory=list)
     send_confirmation_check_enabled: bool = Field(default=False)
     send_confirmation_check_timeout: float = Field(default=1.5, ge=0.1, le=10.0)
+    skip_new_chat_on_retry: bool = Field(default=False)
 
 
 class PresetConfigUpdateRequest(BaseModel):
@@ -98,6 +99,7 @@ def _extract_site_advanced_update_payload(
         ],
         "send_confirmation_check_enabled": bool(body.send_confirmation_check_enabled),
         "send_confirmation_check_timeout": float(body.send_confirmation_check_timeout),
+        "skip_new_chat_on_retry": bool(body.skip_new_chat_on_retry),
     }
     payload.update({
         key: value

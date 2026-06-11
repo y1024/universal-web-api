@@ -1,74 +1,6 @@
 {
   "commands": [
     {
-      "name": "自动清除 Cookie",
-      "enabled": false,
-      "mode": "simple",
-      "trigger": {
-        "type": "request_count",
-        "value": 4,
-        "scope": "domain",
-        "domain": "arena.ai",
-        "tab_index": null,
-        "command_id": "",
-        "priority": 3,
-        "periodic_enabled": true,
-        "periodic_interval_sec": 8,
-        "periodic_jitter_sec": 2,
-        "command_ids": [],
-        "listen_all_commands": false,
-        "informative_only": true,
-        "action_ref": "",
-        "match_rule": "equals",
-        "expected_value": "",
-        "match_mode": "keyword",
-        "status_codes": "403,429,500,502,503,504",
-        "abort_on_match": true,
-        "fire_mode": "edge",
-        "cooldown_sec": 0,
-        "stable_for_sec": 0,
-        "check_while_busy_workflow": true,
-        "allow_during_workflow": false,
-        "interrupt_policy": "auto",
-        "interrupt_message": "",
-        "probe_js": ""
-      },
-      "actions": [
-        {
-          "type": "clear_cookies",
-          "action_id": "step_1_clear"
-        },
-        {
-          "type": "wait",
-          "seconds": 1.5,
-          "action_id": "step_2_wait"
-        },
-        {
-          "type": "refresh_page",
-          "action_id": "step_3_refresh"
-        },
-        {
-          "type": "wait",
-          "seconds": 1,
-          "action_id": "step_4_wait"
-        },
-        {
-          "type": "run_js",
-          "code": "(() => { try { const t = (document.body && document.body.innerText ? document.body.innerText : '').toLowerCase(); const hasVerify = t.includes('security verification') || t.includes('protected by cloudflare') || t.includes('verify you are human') || t.includes('checking your browser') || t.includes('确认您是真人') || t.includes('cloudflare'); if (hasVerify) return 'VERIFY'; const hasInput = !!document.querySelector('textarea, [contenteditable=\"true\"], input[placeholder*=\"ask\" i]'); const links = Array.from(document.querySelectorAll('a')).slice(0, 12); let blueLinks = 0; for (const a of links) { try { if (getComputedStyle(a).color === 'rgb(0, 0, 238)') blueLinks++; } catch (e) {} } const hasArenaHints = t.includes('new chat') || t.includes('leaderboard') || t.includes('battle mode'); if (blueLinks >= 3 && hasArenaHints) return 'BLACK'; if (hasInput) return 'READY'; return 'UNKNOWN'; } catch (e) { return 'UNKNOWN'; } })()",
-          "action_id": "step_5_probe"
-        }
-      ],
-      "script": "",
-      "script_lang": "javascript",
-      "id": "cmd_58625812",
-      "last_triggered": 1773570668.7475963,
-      "trigger_count": 54,
-      "group_name": "arena",
-      "log_enabled": false,
-      "log_level": "GLOBAL",
-      "stop_on_error": false
-    },
-    {
       "name": "网络错误闭环恢复",
       "enabled": false,
       "mode": "simple",
@@ -154,48 +86,6 @@
       "log_level": "GLOBAL"
     },
     {
-      "name": "清除cookie后恢复",
-      "enabled": false,
-      "mode": "simple",
-      "trigger": {
-        "type": "command_result_match",
-        "value": "",
-        "scope": "domain",
-        "domain": "arena.ai",
-        "tab_index": null,
-        "command_id": "cmd_58625812",
-        "action_ref": "step_5_probe",
-        "match_rule": "equals",
-        "expected_value": "READY",
-        "priority": 3,
-        "periodic_enabled": false,
-        "periodic_interval_sec": 8,
-        "periodic_jitter_sec": 2,
-        "command_ids": [],
-        "listen_all_commands": false,
-        "informative_only": true,
-        "match_mode": "keyword",
-        "status_codes": "403,429,500,502,503,504",
-        "abort_on_match": true
-      },
-      "actions": [
-        {
-          "type": "execute_workflow",
-          "prompt": "",
-          "preset_name": "预设_选择模型",
-          "action_id": "step_1_model"
-        }
-      ],
-      "script": "",
-      "script_lang": "javascript",
-      "id": "cmd_aab3f583",
-      "last_triggered": 1772699908.392711,
-      "trigger_count": 30,
-      "group_name": "arena",
-      "log_enabled": true,
-      "log_level": "GLOBAL"
-    },
-    {
       "name": "黑屏后恢复1",
       "enabled": false,
       "mode": "simple",
@@ -257,70 +147,9 @@
       "log_level": "GLOBAL"
     },
     {
-      "name": "ARENA_RECOVER_VERIFY_AFTER_COOKIE_CLEAR",
-      "enabled": false,
-      "mode": "simple",
-      "trigger": {
-        "type": "command_result_match",
-        "value": "",
-        "scope": "domain",
-        "domain": "arena.ai",
-        "tab_index": null,
-        "command_id": "cmd_58625812",
-        "action_ref": "step_5_probe",
-        "match_rule": "equals",
-        "expected_value": "VERIFY",
-        "match_mode": "keyword",
-        "status_codes": "403,429,500,502,503,504",
-        "abort_on_match": true,
-        "priority": 4,
-        "periodic_enabled": false,
-        "periodic_interval_sec": 8,
-        "periodic_jitter_sec": 2,
-        "command_ids": [],
-        "listen_all_commands": false,
-        "informative_only": true,
-        "fire_mode": "edge",
-        "cooldown_sec": 0,
-        "stable_for_sec": 0,
-        "check_while_busy_workflow": true,
-        "allow_during_workflow": false,
-        "interrupt_policy": "auto",
-        "interrupt_message": "",
-        "probe_js": ""
-      },
-      "actions": [
-        {
-          "type": "execute_workflow",
-          "preset_name": "预设_选择模型",
-          "prompt": "",
-          "action_id": "step_1_verify"
-        },
-        {
-          "type": "wait",
-          "seconds": 1,
-          "action_id": "step_2_wait"
-        },
-        {
-          "type": "run_js",
-          "code": "(() => { try { const t = (document.body && document.body.innerText ? document.body.innerText : '').toLowerCase(); const hasVerify = t.includes('security verification') || t.includes('protected by cloudflare') || t.includes('verify you are human') || t.includes('checking your browser') || t.includes('确认您是真人') || t.includes('cloudflare'); if (hasVerify) return 'VERIFY'; const hasInput = !!document.querySelector('textarea, [contenteditable=\"true\"], input[placeholder*=\"ask\" i]'); const links = Array.from(document.querySelectorAll('a')).slice(0, 12); let blueLinks = 0; for (const a of links) { try { if (getComputedStyle(a).color === 'rgb(0, 0, 238)') blueLinks++; } catch (e) {} } const hasArenaHints = t.includes('new chat') || t.includes('leaderboard') || t.includes('battle mode'); if (blueLinks >= 3 && hasArenaHints) return 'BLACK'; if (hasInput) return 'READY'; return 'UNKNOWN'; } catch (e) { return 'UNKNOWN'; } })()",
-          "action_id": "step_3_probe"
-        }
-      ],
-      "script": "",
-      "script_lang": "javascript",
-      "id": "cmd_9b1e4a02",
-      "group_name": "arena",
-      "last_triggered": 1772621496.7491813,
-      "trigger_count": 1,
-      "log_enabled": true,
-      "log_level": "GLOBAL",
-      "stop_on_error": false
-    },
-    {
       "id": "cmd_cf_pagecheck_arena_verify",
       "name": "自动过cf盾",
-      "enabled": false,
+      "enabled": true,
       "mode": "simple",
       "trigger": {
         "type": "page_check",
@@ -346,8 +175,8 @@
         "informative_only": true,
         "stable_for_sec": 0,
         "check_while_busy_workflow": true,
-        "allow_during_workflow": false,
-        "interrupt_policy": "auto",
+        "allow_during_workflow": true,
+        "interrupt_policy": "resume",
         "interrupt_message": "",
         "probe_js": ""
       },
@@ -377,128 +206,6 @@
       "log_enabled": true,
       "log_level": "GLOBAL",
       "stop_on_error": false
-    },
-    {
-      "id": "cmd_arena_human_verify_clear_cookie",
-      "name": "人机验证即清Cookie",
-      "enabled": false,
-      "mode": "simple",
-      "trigger": {
-        "type": "page_check",
-        "value": "security verification && protected by recaptcha",
-        "command_id": "",
-        "action_ref": "",
-        "match_rule": "equals",
-        "expected_value": "",
-        "match_mode": "keyword",
-        "status_codes": "403,429,500,502,503,504",
-        "abort_on_match": true,
-        "scope": "domain",
-        "domain": "arena.ai",
-        "tab_index": null,
-        "priority": 6,
-        "periodic_enabled": true,
-        "periodic_interval_sec": 3,
-        "periodic_jitter_sec": 1,
-        "fire_mode": "edge",
-        "cooldown_sec": 10,
-        "command_ids": [],
-        "listen_all_commands": false,
-        "informative_only": true,
-        "stable_for_sec": 0,
-        "check_while_busy_workflow": true,
-        "allow_during_workflow": false,
-        "interrupt_policy": "auto",
-        "interrupt_message": ""
-      },
-      "actions": [
-        {
-          "type": "clear_cookies",
-          "action_id": "step_1_clear"
-        },
-        {
-          "type": "wait",
-          "seconds": 1.5,
-          "action_id": "step_2_wait"
-        },
-        {
-          "type": "refresh_page",
-          "action_id": "step_3_refresh"
-        },
-        {
-          "type": "wait",
-          "seconds": 1,
-          "action_id": "step_4_wait"
-        },
-        {
-          "type": "run_js",
-          "code": "(() => { try { const t = (document.body && document.body.innerText ? document.body.innerText : '').toLowerCase(); const hasVerify = t.includes('security verification') || t.includes('protected by cloudflare') || t.includes('verify you are human') || t.includes('checking your browser') || t.includes('确认您是真人') || t.includes('cloudflare'); if (hasVerify) return 'VERIFY'; const hasInput = !!document.querySelector('textarea, [contenteditable=\"true\"], input[placeholder*=\"ask\" i]'); const links = Array.from(document.querySelectorAll('a')).slice(0, 12); let blueLinks = 0; for (const a of links) { try { if (getComputedStyle(a).color === 'rgb(0, 0, 238)') blueLinks++; } catch (e) {} } const hasArenaHints = t.includes('new chat') || t.includes('leaderboard') || t.includes('battle mode'); if (blueLinks >= 3 && hasArenaHints) return 'BLACK'; if (hasInput) return 'READY'; return 'UNKNOWN'; } catch (e) { return 'UNKNOWN'; } })()",
-          "action_id": "step_5_probe"
-        }
-      ],
-      "group_name": "arena",
-      "script": "",
-      "script_lang": "javascript",
-      "stop_on_error": false,
-      "log_enabled": true,
-      "log_level": "GLOBAL"
-    },
-    {
-      "id": "cmd_arena_cookie_accept",
-      "name": "自动接受Cookie弹窗",
-      "enabled": false,
-      "mode": "simple",
-      "trigger": {
-        "type": "page_check",
-        "value": "this website uses cookies && accept cookies",
-        "command_id": "",
-        "action_ref": "",
-        "match_rule": "equals",
-        "expected_value": "",
-        "match_mode": "keyword",
-        "status_codes": "403,429,500,502,503,504",
-        "abort_on_match": true,
-        "scope": "domain",
-        "domain": "arena.ai",
-        "tab_index": null,
-        "priority": 5,
-        "periodic_enabled": true,
-        "periodic_interval_sec": 3,
-        "periodic_jitter_sec": 1,
-        "fire_mode": "edge",
-        "cooldown_sec": 5,
-        "command_ids": [],
-        "listen_all_commands": false,
-        "informative_only": true,
-        "stable_for_sec": 0,
-        "check_while_busy_workflow": true,
-        "allow_during_workflow": false,
-        "interrupt_policy": "auto",
-        "interrupt_message": ""
-      },
-      "actions": [
-        {
-          "type": "run_js",
-          "action_id": "step_1_accept",
-          "code": "return (async () => { const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase(); const isVisible = (el) => { if (!el || !el.isConnected) return false; try { const style = window.getComputedStyle(el); if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false; return el.getClientRects().length > 0; } catch (e) { return false; } }; const clickEl = (el) => { if (!isVisible(el)) return false; try { el.click(); return true; } catch (e) {} try { el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); return true; } catch (e) {} return false; }; const getLabel = (el) => norm(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || ''); const allClickables = () => Array.from(document.querySelectorAll('button, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"], a')); const findByTexts = (texts) => { for (const el of allClickables()) { const label = getLabel(el); if (!label) continue; if (texts.some((text) => label === text || label.includes(text))) return el; } return null; }; const findCloseButton = () => { const selectors = ['button[aria-label*=\"close\" i]', 'button[title*=\"close\" i]', '[role=\"button\"][aria-label*=\"close\" i]', '[aria-label*=\"dismiss\" i]']; for (const selector of selectors) { const el = document.querySelector(selector); if (isVisible(el)) return el; } return findByTexts(['×', 'close']); }; const hasBanner = () => { const text = norm(document.body && (document.body.innerText || document.body.textContent || '')); return text.includes('this website uses cookies') && text.includes('accept cookies'); }; const deadline = Date.now() + 8000; while (Date.now() < deadline) { const accept = findByTexts(['accept cookies', 'accept all cookies']); if (accept && clickEl(accept)) return { ok: true, result: 'cookie_accept_clicked' }; const close = findCloseButton(); if (close && clickEl(close)) return { ok: true, result: 'cookie_popup_closed' }; if (!hasBanner()) return { ok: true, result: 'cookie_banner_missing' }; await new Promise((resolve) => setTimeout(resolve, 250)); } return { ok: false, result: 'cookie_popup_not_ready' }; })()"
-        },
-        {
-          "type": "wait",
-          "seconds": 0.8,
-          "action_id": "step_2_wait"
-        },
-        {
-          "type": "run_js",
-          "action_id": "step_3_probe",
-          "code": "return (() => { const text = String((document.body && (document.body.innerText || document.body.textContent)) || '').replace(/\\s+/g, ' ').trim().toLowerCase(); const visible = text.includes('this website uses cookies') && text.includes('accept cookies'); return visible ? { ok: false, result: 'cookie_banner_still_visible' } : { ok: true, result: 'cookie_banner_cleared' }; })()"
-        }
-      ],
-      "group_name": "arena",
-      "script": "",
-      "script_lang": "javascript",
-      "stop_on_error": false,
-      "log_enabled": true,
-      "log_level": "GLOBAL"
     },
     {
       "name": "黑屏后恢复",

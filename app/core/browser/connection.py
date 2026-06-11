@@ -38,6 +38,7 @@ def _load_tab_pool_config() -> Dict:
         "acquire_timeout": 60,
         "stuck_timeout": 180,
         "allocation_mode": "first_idle",
+        "excluded_urls": [],
     }
     
     # 从 browser_config.json 加载
@@ -64,6 +65,7 @@ def _load_tab_pool_config() -> Dict:
         "acquire_timeout",
         "stuck_timeout",
         "allocation_mode",
+        "excluded_urls",
     }
     return {key: value for key, value in config.items() if key in allowed_keys}
 

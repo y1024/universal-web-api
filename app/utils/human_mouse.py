@@ -94,8 +94,23 @@ def smooth_move_mouse(
     dy = y1 - y0
     dist = math.hypot(dx, dy)
     
-    # 距离太短，直接移动
+    # Very small corrections can still be a single event; 5-15px gets a tiny
+    # no-delay glide so short movements do not look like coordinate snaps.
+    if dist < 5:
+        _dispatch_mouse_move(tab, x1, y1)
+        return (x1, y1)
+
     if dist < 15:
+        glide_steps = random.randint(1, 2)
+        for i in range(1, glide_steps + 1):
+            if check_cancelled and check_cancelled():
+                return (x0, y0)
+            raw_t = i / (glide_steps + 1)
+            t = 1 - (1 - raw_t) ** 2
+            jitter = math.sin(raw_t * math.pi)
+            fx = int(round(x0 + dx * t + random.gauss(0, 0.35) * jitter))
+            fy = int(round(y0 + dy * t + random.gauss(0, 0.35) * jitter))
+            _dispatch_mouse_move(tab, fx, fy)
         _dispatch_mouse_move(tab, x1, y1)
         return (x1, y1)
     
@@ -126,6 +141,7 @@ def smooth_move_mouse(
     tremor_amp_x = random.uniform(0.2, 0.8)
     tremor_amp_y = random.uniform(0.2, 0.8)
     tremor_phase = random.uniform(0, math.pi * 2)
+    tremor_phase2 = random.uniform(0, math.pi * 2)
 
     # 逐步移动
     for i in range(1, steps + 1):
@@ -147,8 +163,14 @@ def smooth_move_mouse(
 
         # 高频低幅手部颤抖（tremor）
         tremor_theta = tremor_phase + raw_t * duration * tremor_hz * 2 * math.pi
-        tremor_x = math.sin(tremor_theta) * tremor_amp_x
-        tremor_y = math.cos(tremor_theta) * tremor_amp_y
+        tremor_x = (
+            math.sin(tremor_theta)
+            + 0.35 * math.sin(2.3 * tremor_theta + tremor_phase2)
+        ) * tremor_amp_x * 0.75
+        tremor_y = (
+            math.cos(tremor_theta)
+            + 0.35 * math.sin(1.9 * tremor_theta + tremor_phase2 + 0.8)
+        ) * tremor_amp_y * 0.75
         
         fx = int(round(bx + nx + tremor_x))
         fy = int(round(by + ny + tremor_y))
@@ -164,8 +186,9 @@ def smooth_move_mouse(
     # 最终精确到达目标
     _dispatch_mouse_move(tab, x1, y1)
     
-    # 20% 概率轻微过冲（距离 > 100px 时）
-    if dist > 100 and random.random() < 0.2:
+    # Slightly vary the overshoot chance so long-run samples do not sit on one
+    # sharp probability edge.
+    if dist > 100 and random.random() < random.uniform(0.12, 0.28):
         angle = math.atan2(dy, dx)
         overshoot_dist = random.uniform(3, 8)
         ox = int(x1 + math.cos(angle) * overshoot_dist)

@@ -206,7 +206,8 @@ window.ConfigTab = {
                     url_transition_wait_on_new_chat: false,
                     url_transition_wait_patterns: [],
                     send_confirmation_check_enabled: false,
-                    send_confirmation_check_timeout: 1.5
+                    send_confirmation_check_timeout: 1.5,
+                    skip_new_chat_on_retry: false
                 };
             }
             const siteAdvanced = (this.currentConfig.advanced && typeof this.currentConfig.advanced === 'object')
@@ -223,6 +224,7 @@ window.ConfigTab = {
                 url_transition_wait_patterns: [],
                 send_confirmation_check_enabled: false,
                 send_confirmation_check_timeout: 1.5,
+                skip_new_chat_on_retry: false,
                 ...siteAdvanced,
                 ...presetAdvanced
             };
@@ -241,7 +243,8 @@ window.ConfigTab = {
                 send_confirmation_check_enabled: !!timingAdvanced.send_confirmation_check_enabled,
                 send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(
                     timingAdvanced.send_confirmation_check_timeout
-                )
+                ),
+                skip_new_chat_on_retry: !!timingAdvanced.skip_new_chat_on_retry
             };
         },
         compareLocalParsed() {
@@ -951,6 +954,7 @@ window.ConfigTab = {
                 send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(
                     this.siteAdvancedConfig.send_confirmation_check_timeout
                 ),
+                skip_new_chat_on_retry: !!this.siteAdvancedConfig.skip_new_chat_on_retry,
                 ...overrides
             };
             const payload = {
@@ -964,7 +968,8 @@ window.ConfigTab = {
                 send_confirmation_check_enabled: !!nextAdvanced.send_confirmation_check_enabled,
                 send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(
                     nextAdvanced.send_confirmation_check_timeout
-                )
+                ),
+                skip_new_chat_on_retry: !!nextAdvanced.skip_new_chat_on_retry
             };
             const shouldSendPatterns = (
                 options.includeUrlTransitionWaitPatterns
@@ -986,7 +991,8 @@ window.ConfigTab = {
                 'url_transition_wait_on_new_chat',
                 'url_transition_wait_patterns',
                 'send_confirmation_check_enabled',
-                'send_confirmation_check_timeout'
+                'send_confirmation_check_timeout',
+                'skip_new_chat_on_retry'
             ];
             const result = {};
             keys.forEach(key => {
@@ -1295,6 +1301,26 @@ window.ConfigTab = {
             const previousAdvanced = { ...(this.presetConfig.advanced || {}) };
             const nextAdvanced = this.buildPresetAdvancedPayload({
                 send_confirmation_check_timeout: this.sanitizeSendConfirmationCheckTimeout(value)
+            });
+            this.assignPresetAdvanced(this.filterPresetAdvancedFields(nextAdvanced));
+
+            try {
+                await this.persistSiteAdvancedConfig(nextAdvanced, previousAdvanced, { presetScoped: true });
+            } catch (e) {
+                console.error('保存预设高级配置失败:', e);
+                alert('保存失败: ' + e.message);
+            } finally {
+                this.finishAdvancedConfigSave(saveSeq);
+            }
+        },
+
+        async updateSkipNewChatOnRetry(enabled) {
+            if (!this.currentDomain || !this.currentConfig || !this.presetConfig) return;
+
+            const saveSeq = this.startAdvancedConfigSave();
+            const previousAdvanced = { ...(this.presetConfig.advanced || {}) };
+            const nextAdvanced = this.buildPresetAdvancedPayload({
+                skip_new_chat_on_retry: !!enabled
             });
             this.assignPresetAdvanced(this.filterPresetAdvancedFields(nextAdvanced));
 
@@ -1910,6 +1936,17 @@ window.ConfigTab = {
                                     @change="updateSendConfirmationCheckTimeout($event.target.value)"
                                 >
                                 <span>秒</span>
+                            </label>
+
+                            <label class="flex items-center gap-3 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    class="rounded"
+                                    :checked="siteAdvancedConfig.skip_new_chat_on_retry"
+                                    :disabled="advancedConfigSaving"
+                                    @change="updateSkipNewChatOnRetry($event.target.checked)"
+                                >
+                                <span>重试轮跳过新建对话（适用于 429 或过盾自愈）</span>
                             </label>
                         </div>
                     </div>

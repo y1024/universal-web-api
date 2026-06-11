@@ -544,6 +544,7 @@ class SiteAdvancedConfig(TypedDict, total=False):
     url_transition_wait_patterns: List[str]
     send_confirmation_check_enabled: bool
     send_confirmation_check_timeout: float
+    skip_new_chat_on_retry: bool
 
 
 SITE_ADVANCED_FIELDS = {
@@ -559,6 +560,7 @@ PRESET_ADVANCED_FIELDS = {
     "url_transition_wait_patterns",
     "send_confirmation_check_enabled",
     "send_confirmation_check_timeout",
+    "skip_new_chat_on_retry",
 }
 
 ADVANCED_FIELDS = SITE_ADVANCED_FIELDS | PRESET_ADVANCED_FIELDS
@@ -576,6 +578,7 @@ def get_default_site_advanced_config() -> 'SiteAdvancedConfig':
         "url_transition_wait_patterns": [],
         "send_confirmation_check_enabled": False,
         "send_confirmation_check_timeout": 1.5,
+        "skip_new_chat_on_retry": False,
     }
 
 

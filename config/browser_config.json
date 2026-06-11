@@ -67,6 +67,11 @@
       "fixed_tab",
       "exact_url",
       "exact_url_preset"
+    ],
+    "excluded_urls": [
+      "https://arena.ai/c/019e5457-56df-7ccc-ae08-f709eb2d605b",
+      "https://arena.ai/c/019e62aa-bdd0-73db-a42f-aabede5f46e0",
+      "https://arena.ai/c/019e5458-41e6-7d0b-9ecf-78cec0473d0b"
     ]
   },
   "UPLOAD_HISTORY_IMAGES": false,

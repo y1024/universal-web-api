@@ -197,31 +197,91 @@ class WorkflowExecutorActionMixin:
                         }
                     } catch (error) {}
 
-                    let clicked = false;
-                    if (typeof el.click === 'function') {
-                        el.click();
-                        clicked = true;
-                    } else {
-                        const options = {
-                            bubbles: true,
-                            cancelable: true,
-                            view: window,
-                            button: 0,
-                            buttons: 1
-                        };
-                        for (const type of ['mousedown', 'mouseup', 'click']) {
-                            el.dispatchEvent(new MouseEvent(type, options));
-                        }
-                        clicked = true;
+                    const disabled = !!el.disabled || el.getAttribute('aria-disabled') === 'true';
+                    if (disabled) {
+                        return { ok: false, reason: 'disabled' };
                     }
+
+                    const rect = el.getBoundingClientRect();
+                    if (!rect || !Number.isFinite(rect.left) || rect.width <= 0 || rect.height <= 0) {
+                        return { ok: false, reason: 'empty_rect' };
+                    }
+
+                    const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+                    const viewportW = window.innerWidth || document.documentElement.clientWidth || 1;
+                    const viewportH = window.innerHeight || document.documentElement.clientHeight || 1;
+                    const centeredNoise = () => ((Math.random() + Math.random() + Math.random()) / 3) - 0.5;
+                    const insetX = Math.min(6, Math.max(1, rect.width * 0.18));
+                    const insetY = Math.min(6, Math.max(1, rect.height * 0.18));
+                    const minX = Math.min(rect.left + insetX, rect.right - 1);
+                    const maxX = Math.max(rect.right - insetX, rect.left + 1);
+                    const minY = Math.min(rect.top + insetY, rect.bottom - 1);
+                    const maxY = Math.max(rect.bottom - insetY, rect.top + 1);
+                    const x = Math.round(clamp(rect.left + rect.width * (0.5 + centeredNoise() * 0.62), minX, maxX));
+                    const y = Math.round(clamp(rect.top + rect.height * (0.5 + centeredNoise() * 0.62), minY, maxY));
+                    const clientX = clamp(x, 1, Math.max(1, viewportW - 1));
+                    const clientY = clamp(y, 1, Math.max(1, viewportH - 1));
+                    const eventTarget = (() => {
+                        try {
+                            const hit = document.elementFromPoint(clientX, clientY);
+                            return hit && (hit === el || (el.contains && el.contains(hit))) ? hit : el;
+                        } catch (error) {
+                            return el;
+                        }
+                    })();
+                    const screenX = Math.round((window.screenX || window.screenLeft || 0) + clientX);
+                    const screenY = Math.round((window.screenY || window.screenTop || 0) + clientY);
+                    const base = {
+                        bubbles: true,
+                        cancelable: true,
+                        composed: true,
+                        view: window,
+                        detail: 1,
+                        screenX,
+                        screenY,
+                        clientX,
+                        clientY,
+                        button: 0
+                    };
+                    const sequence = [];
+                    const dispatchMouse = (type, buttons) => {
+                        const event = new MouseEvent(type, { ...base, buttons });
+                        sequence.push(type);
+                        eventTarget.dispatchEvent(event);
+                    };
+                    const dispatchPointer = (type, buttons, pressure) => {
+                        const PointerCtor = window.PointerEvent || window.MouseEvent;
+                        const event = new PointerCtor(type, {
+                            ...base,
+                            buttons,
+                            pointerId: 1,
+                            pointerType: 'mouse',
+                            isPrimary: true,
+                            width: 1,
+                            height: 1,
+                            pressure
+                        });
+                        sequence.push(type);
+                        eventTarget.dispatchEvent(event);
+                    };
+
+                    dispatchMouse('mousemove', 0);
+                    dispatchPointer('pointerdown', 1, 0.5);
+                    dispatchMouse('mousedown', 1);
+                    dispatchPointer('pointerup', 0, 0);
+                    dispatchMouse('mouseup', 0);
+                    dispatchMouse('click', 0);
 
                     const active = document.activeElement === el
                         || (el.contains && el.contains(document.activeElement));
                     return {
-                        ok: clicked,
+                        ok: true,
                         active,
                         tag: (el.tagName || '').toLowerCase(),
-                        href: el.getAttribute ? (el.getAttribute('href') || '') : ''
+                        href: el.getAttribute ? (el.getAttribute('href') || '') : '',
+                        x: clientX,
+                        y: clientY,
+                        sequence: sequence.join('>')
                     };
                 } catch (error) {
                     return {
@@ -242,10 +302,14 @@ class WorkflowExecutorActionMixin:
         elapsed = time.perf_counter() - started_at
         if ok:
             self._mouse_pos = None
+            point_label = ""
+            if isinstance(result, dict):
+                point_label = f"point=({result.get('x', '-')},{result.get('y', '-')}), "
             logger.debug(
                 f"[{log_label}] 后台安全 DOM 点击完成: "
                 f"target={target_label}, total={elapsed:.2f}s, "
                 f"active={bool((result or {}).get('active')) if isinstance(result, dict) else '-'}, "
+                f"{point_label}"
                 f"strategy={self._get_stealth_click_strategy()}"
             )
             return True
@@ -1419,9 +1483,22 @@ class WorkflowExecutorActionMixin:
         )
         return min(timeout, 10.0)
 
+    def _get_adaptive_send_confirmation_check_timeout(self, before_len: int) -> float:
+        base_timeout = self._get_send_confirmation_check_timeout()
+        try:
+            prompt_len = max(0, int(before_len or 0))
+        except Exception:
+            prompt_len = 0
+
+        if prompt_len <= 0:
+            return base_timeout
+
+        extra_timeout = prompt_len / 50000.0
+        return min(base_timeout + extra_timeout, 10.0)
+
     def _confirm_send_click_response_or_raise(self, before_len: int) -> None:
         """Confirm the page physically reacted to send_btn by clearing/shrinking input."""
-        timeout = self._get_send_confirmation_check_timeout()
+        timeout = self._get_adaptive_send_confirmation_check_timeout(before_len)
         interval = 0.1
         started_at = time.perf_counter()
         latest_len = before_len

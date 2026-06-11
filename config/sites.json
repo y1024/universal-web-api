@@ -2806,7 +2806,7 @@
           "input_box": "textarea[name=\"message\"]",
           "send_btn": "button[type=\"submit\"]",
           "result_container": "main ol > div.w-full:not(.flex) .flex.flex-col.gap-3",
-          "new_chat_btn": "a[data-sidebar=\"menu-button\"][href*=\"direct\"], a[data-sidebar=\"menu-button\"][href=\"/\"]",
+          "new_chat_btn": "a[data-sidebar=\"menu-button\"][href*=\"direct\"], a[data-sidebar=\"menu-button\"][href=\"/\"], a[data-sidebar=\"menu-button\"][href*=\"image\"]",
           "message_wrapper": null,
           "generating_indicator": null
         },
@@ -2861,7 +2861,8 @@
           "input_box_stability_wait_timeout": 1.5,
           "url_transition_wait_on_new_chat": true,
           "send_confirmation_check_enabled": true,
-          "send_confirmation_check_timeout": 1.5
+          "send_confirmation_check_timeout": 6.0,
+          "skip_new_chat_on_retry": true
         },
         "stream_config": {
           "mode": "network",
@@ -3155,7 +3156,8 @@
           "input_box_stability_wait_timeout": 4,
           "url_transition_wait_on_new_chat": true,
           "send_confirmation_check_enabled": true,
-          "send_confirmation_check_timeout": 1.5
+          "send_confirmation_check_timeout": 6.0,
+          "skip_new_chat_on_retry": true
         }
       },
       "预设_过CF盾": {

@@ -530,12 +530,62 @@ def _normalize_enabled_route_methods(value: Any) -> List[str]:
     return normalized
 
 
+def _normalize_excluded_urls(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: List[str] = []
+    seen = set()
+    for item in value:
+        text = str(item or "").strip()
+        normalized_text = normalize_exact_tab_url(text) or text
+        if not normalized_text or normalized_text in seen:
+            continue
+        seen.add(normalized_text)
+        normalized.append(normalized_text)
+    return normalized
+
+
 def _get_enabled_route_methods_from_config(config: Optional[Dict[str, Any]] = None) -> List[str]:
     payload = config if isinstance(config, dict) else _read_browser_config()
     tab_pool_config = payload.get("tab_pool") if isinstance(payload, dict) else {}
     if not isinstance(tab_pool_config, dict):
         tab_pool_config = {}
     return _normalize_enabled_route_methods(tab_pool_config.get("enabled_route_methods"))
+
+
+def _get_excluded_urls_from_config(config: Optional[Dict[str, Any]] = None) -> List[str]:
+    payload = config if isinstance(config, dict) else _read_browser_config()
+    tab_pool_config = payload.get("tab_pool") if isinstance(payload, dict) else {}
+    if not isinstance(tab_pool_config, dict):
+        tab_pool_config = {}
+    return _normalize_excluded_urls(tab_pool_config.get("excluded_urls"))
+
+
+def _get_tab_pool_excluded_urls(tab_pool: Any, config: Optional[Dict[str, Any]] = None) -> List[str]:
+    try:
+        excluded_urls = getattr(tab_pool, "excluded_urls", None)
+        if excluded_urls is not None:
+            return _normalize_excluded_urls(excluded_urls)
+    except Exception:
+        pass
+    return _get_excluded_urls_from_config(config)
+
+
+def _tab_item_is_excluded(item: Dict[str, Any], excluded_urls: List[str]) -> bool:
+    return bool(_get_tab_item_exclusion_url(item, excluded_urls))
+
+
+def _get_tab_item_exclusion_url(item: Dict[str, Any], excluded_urls: List[str]) -> str:
+    if not excluded_urls:
+        return ""
+    actual_url = str(item.get("url") or "").strip()
+    if not actual_url:
+        return ""
+    for excluded_url in excluded_urls:
+        if tab_url_matches(excluded_url, actual_url):
+            return excluded_url
+    return ""
 
 
 def _get_pool_default_selector(browser) -> str:
@@ -591,10 +641,15 @@ def _list_candidate_tabs(browser, route_domain: str = "") -> List[Dict[str, Any]
     if not target:
         return tabs
 
+    excluded_urls = _get_tab_pool_excluded_urls(browser.tab_pool)
     result: List[Dict[str, Any]] = []
     for item in tabs:
         actual_domain = str(item.get("current_domain") or item.get("route_domain") or "").strip()
-        if actual_domain and route_domain_matches(target, actual_domain):
+        if (
+            actual_domain
+            and route_domain_matches(target, actual_domain)
+            and not _tab_item_is_excluded(item, excluded_urls)
+        ):
             result.append(item)
     return result
 
@@ -952,6 +1007,7 @@ class TabPoolConfigRequest(BaseModel):
     """标签页池配置更新请求。"""
     allocation_mode: str = Field(default="first_idle")
     enabled_route_methods: Optional[List[str]] = Field(default=None)
+    excluded_urls: Optional[List[str]] = Field(default=None)
 
 
 # ================= 认证依赖 =================
@@ -1015,6 +1071,11 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
         allocation_mode = _get_tab_pool_allocation_mode(browser.tab_pool)
         browser_config = _read_browser_config()
         enabled_route_methods = _get_enabled_route_methods_from_config(browser_config)
+        excluded_urls = _get_tab_pool_excluded_urls(browser.tab_pool, browser_config)
+        for tab_info in tabs:
+            exclusion_url = _get_tab_item_exclusion_url(tab_info, excluded_urls)
+            tab_info["route_excluded"] = bool(exclusion_url)
+            tab_info["route_exclusion_url"] = exclusion_url
         
         # 🆕 为每个标签页附加可用预设列表
         try:
@@ -1035,6 +1096,7 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "allocation_mode_options": TAB_POOL_ALLOCATION_OPTIONS,
             "enabled_route_methods": enabled_route_methods,
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
+            "excluded_urls": excluded_urls,
         }
     except Exception as e:
         logger.error(f"获取标签页列表失败: {e}")
@@ -1046,6 +1108,7 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "allocation_mode_options": TAB_POOL_ALLOCATION_OPTIONS,
             "enabled_route_methods": [item["value"] for item in TAB_ROUTE_METHOD_OPTIONS],
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
+            "excluded_urls": [],
         }
 
 
@@ -1059,6 +1122,8 @@ async def update_tab_pool_config(
     if allocation_mode not in {"first_idle", "round_robin", "random"}:
         raise HTTPException(status_code=400, detail="invalid_allocation_mode")
     enabled_route_methods = _normalize_enabled_route_methods(body.enabled_route_methods)
+    request_includes_excluded_urls = body.excluded_urls is not None
+    excluded_urls = _normalize_excluded_urls(body.excluded_urls)
 
     try:
         with _browser_config_lock:
@@ -1068,6 +1133,9 @@ async def update_tab_pool_config(
                 tab_pool_config = {}
             tab_pool_config["allocation_mode"] = allocation_mode
             tab_pool_config["enabled_route_methods"] = enabled_route_methods
+            if request_includes_excluded_urls:
+                tab_pool_config["excluded_urls"] = excluded_urls
+            current_excluded_urls = _normalize_excluded_urls(tab_pool_config.get("excluded_urls"))
             config["tab_pool"] = tab_pool_config
             _write_browser_config_unlocked(config)
 
@@ -1081,7 +1149,10 @@ async def update_tab_pool_config(
         pool_synced = False
         try:
             browser = get_browser(auto_connect=False)
-            browser.tab_pool.apply_runtime_config(allocation_mode=allocation_mode)
+            runtime_kwargs: Dict[str, Any] = {"allocation_mode": allocation_mode}
+            if request_includes_excluded_urls:
+                runtime_kwargs["excluded_urls"] = excluded_urls
+            browser.tab_pool.apply_runtime_config(**runtime_kwargs)
             pool_synced = True
         except Exception as sync_error:
             logger.warning(f"同步运行中标签页池配置失败: {sync_error}")
@@ -1093,6 +1164,7 @@ async def update_tab_pool_config(
             "allocation_mode_options": TAB_POOL_ALLOCATION_OPTIONS,
             "enabled_route_methods": enabled_route_methods,
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
+            "excluded_urls": current_excluded_urls,
             "pool_synced": pool_synced,
         }
     except HTTPException:

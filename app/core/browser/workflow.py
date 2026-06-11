@@ -777,76 +777,81 @@ class BrowserWorkflowMixin:
         attempt = 0
         retry_origin_chunk = None
 
-        while True:
-            stream = self._execute_workflow_stream_once(
-                session,
-                messages,
-                preset_name=preset_name,
-                stop_checker=stop_checker,
-                workflow_priority=workflow_priority,
-                allow_media_postprocess=allow_media_postprocess,
-            )
-            saw_content = False
-            retry_requested = False
+        try:
+            while True:
+                setattr(session, "_workflow_attempt", attempt)
+                stream = self._execute_workflow_stream_once(
+                    session,
+                    messages,
+                    preset_name=preset_name,
+                    stop_checker=stop_checker,
+                    workflow_priority=workflow_priority,
+                    allow_media_postprocess=allow_media_postprocess,
+                )
+                saw_content = False
+                retry_requested = False
 
-            try:
-                for chunk in stream:
-                    is_terminal_error = self._is_stream_terminal_error_chunk(chunk)
-                    if (
-                        not saw_content
-                        and attempt < max_terminal_retries
-                        and is_terminal_error
-                        and self._is_retriable_stream_terminal_error_chunk(chunk)
-                        and not (stop_checker or self._should_stop_checker)()
-                    ):
-                        retry_requested = True
-                        retry_origin_chunk = chunk
-                        logger.warning(
-                            self._build_stream_terminal_alert_message(
-                                session.id,
-                                chunk,
-                                retrying=True,
-                                attempt=attempt + 1,
-                                max_attempts=max_terminal_retries,
+                try:
+                    for chunk in stream:
+                        is_terminal_error = self._is_stream_terminal_error_chunk(chunk)
+                        if (
+                            not saw_content
+                            and attempt < max_terminal_retries
+                            and is_terminal_error
+                            and self._is_retriable_stream_terminal_error_chunk(chunk)
+                            and not (stop_checker or self._should_stop_checker)()
+                        ):
+                            retry_requested = True
+                            retry_origin_chunk = chunk
+                            logger.warning(
+                                self._build_stream_terminal_alert_message(
+                                    session.id,
+                                    chunk,
+                                    retrying=True,
+                                    attempt=attempt + 1,
+                                    max_attempts=max_terminal_retries,
+                                )
                             )
-                        )
-                        break
+                            break
 
-                    if not is_terminal_error and self._chunk_has_stream_content(chunk):
-                        saw_content = True
+                        if not is_terminal_error and self._chunk_has_stream_content(chunk):
+                            saw_content = True
 
-                    if is_terminal_error:
-                        if retry_origin_chunk and attempt > 0 and not saw_content:
-                            chunk = self._build_retry_failure_error_chunk(
-                                retry_origin_chunk,
-                                chunk,
+                        if is_terminal_error:
+                            if retry_origin_chunk and attempt > 0 and not saw_content:
+                                chunk = self._build_retry_failure_error_chunk(
+                                    retry_origin_chunk,
+                                    chunk,
+                                )
+                            logger.error(
+                                self._build_stream_terminal_alert_message(
+                                    session.id,
+                                    chunk,
+                                    retrying=False,
+                                    saw_content=saw_content,
+                                )
                             )
-                        logger.error(
-                            self._build_stream_terminal_alert_message(
-                                session.id,
+                            self._emit_stream_terminal_alert_event(
+                                session,
                                 chunk,
-                                retrying=False,
                                 saw_content=saw_content,
                             )
-                        )
-                        self._emit_stream_terminal_alert_event(
-                            session,
-                            chunk,
-                            saw_content=saw_content,
-                        )
 
-                    yield chunk
-            finally:
-                with contextlib.suppress(Exception):
-                    stream.close()
+                        yield chunk
+                finally:
+                    with contextlib.suppress(Exception):
+                        stream.close()
 
-            if not retry_requested:
-                return
+                if not retry_requested:
+                    return
 
-            attempt += 1
-            setattr(session, "_workflow_stop_reason", None)
-            setattr(session, "_workflow_user_stop_logged", False)
-            time.sleep(0.5)
+                attempt += 1
+                setattr(session, "_workflow_stop_reason", None)
+                setattr(session, "_workflow_user_stop_logged", False)
+                time.sleep(0.5)
+        finally:
+            with contextlib.suppress(Exception):
+                setattr(session, "_workflow_attempt", 0)
 
     @staticmethod
     def _extract_stream_error_payload(chunk: str) -> Optional[Dict]:
@@ -1221,8 +1226,22 @@ class BrowserWorkflowMixin:
             threshold_seconds=conversation_threshold,
             force_new=force_new_conversation,
         )
+        advanced_config = site_config.get("advanced", {}) if isinstance(site_config, dict) else {}
+        if not isinstance(advanced_config, dict):
+            advanced_config = {}
+        workflow_attempt = int(getattr(session, "_workflow_attempt", 0) or 0)
+        skip_new_chat_on_retry = bool(advanced_config.get("skip_new_chat_on_retry", False))
+        retry_skip_new_chat = workflow_attempt > 0 and skip_new_chat_on_retry
+        if retry_skip_new_chat:
+            skip_new_chat = True
+            logger.info(
+                f"[{session.id}] 重试轮启用原地自愈，跳过新建对话: "
+                f"attempt={workflow_attempt}, domain={domain}, preset={resolved_preset_name}"
+            )
 
-        if force_new_conversation:
+        if retry_skip_new_chat:
+            logger.debug(f"[{session.id}] 重试轮跳过新建对话优先于本轮新建判定")
+        elif force_new_conversation:
             logger.debug(f"[{session.id}] 已启用强制新建对话")
         elif skip_new_chat:
             logger.debug(
@@ -1599,6 +1618,7 @@ class BrowserWorkflowMixin:
                             logger.info(f"[{session.id}] 步骤完成后检测到取消，提前结束工作流")
                             if command_engine is not None and command_engine.workflow_interrupt_requested(session):
                                 setattr(session, "_workflow_stop_reason", "command_interrupt")
+                                step_index += 1
                                 continue
                             break
 

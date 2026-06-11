@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from app.core.config import BrowserConstants, logger
 from app.utils.site_url import (
     extract_remote_site_domain,
+    normalize_exact_tab_url,
     normalize_route_domain,
     route_domain_matches,
     tab_url_matches,
@@ -83,6 +84,7 @@ class TabPoolManager:
         acquire_timeout: float = 60,
         stuck_timeout: float = STUCK_TIMEOUT,
         allocation_mode: str = "first_idle",
+        excluded_urls: Optional[List[str]] = None,
     ):
         self.page = browser_page
         self.max_tabs = max_tabs
@@ -91,6 +93,7 @@ class TabPoolManager:
         self.acquire_timeout = acquire_timeout
         self.stuck_timeout = max(1.0, float(stuck_timeout))
         self.allocation_mode = self._normalize_allocation_mode(allocation_mode)
+        self.excluded_urls = self._normalize_excluded_urls(excluded_urls)
 
         self._tabs: Dict[str, TabSession] = {}
         self._lock = threading.RLock()
@@ -160,6 +163,32 @@ class TabPoolManager:
             f"allocation_mode={self.allocation_mode})"
         )
 
+    @staticmethod
+    def _normalize_excluded_urls(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+
+        normalized: List[str] = []
+        seen = set()
+        for item in value:
+            text = str(item or "").strip()
+            normalized_text = normalize_exact_tab_url(text) or text
+            if not normalized_text or normalized_text in seen:
+                continue
+            seen.add(normalized_text)
+            normalized.append(normalized_text)
+        return normalized
+
+    def is_url_excluded(self, url: str) -> bool:
+        current_url = str(url or "").strip()
+        if not current_url:
+            return False
+
+        with self._lock:
+            excluded_urls = list(self.excluded_urls)
+
+        return any(tab_url_matches(excluded_url, current_url) for excluded_url in excluded_urls)
+
     def apply_runtime_config(
         self,
         *,
@@ -169,6 +198,7 @@ class TabPoolManager:
         acquire_timeout: Optional[float] = None,
         stuck_timeout: Optional[float] = None,
         allocation_mode: Optional[str] = None,
+        excluded_urls: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """同步更新运行中的标签页池参数。"""
         with self._lock:
@@ -188,6 +218,8 @@ class TabPoolManager:
                 self.stuck_timeout = max(1.0, float(stuck_timeout))
             if allocation_mode is not None:
                 self.allocation_mode = self._normalize_allocation_mode(allocation_mode)
+            if excluded_urls is not None:
+                self.excluded_urls = self._normalize_excluded_urls(excluded_urls)
 
             updated = {
                 "max_tabs": self.max_tabs,
@@ -196,13 +228,15 @@ class TabPoolManager:
                 "acquire_timeout": self.acquire_timeout,
                 "stuck_timeout": self.stuck_timeout,
                 "allocation_mode": self.allocation_mode,
+                "excluded_urls": list(self.excluded_urls),
             }
 
             logger.info(
                 "[TabPool] 运行时配置已更新: "
                 f"max_tabs={self.max_tabs}, min_tabs={self.min_tabs}, "
                 f"idle_timeout={self.idle_timeout}, acquire_timeout={self.acquire_timeout}, "
-                f"stuck_timeout={self.stuck_timeout}, allocation_mode={self.allocation_mode}"
+                f"stuck_timeout={self.stuck_timeout}, allocation_mode={self.allocation_mode}, "
+                f"excluded_urls={len(self.excluded_urls)}"
             )
             return updated
 
@@ -2079,8 +2113,10 @@ class TabPoolManager:
 
         matches: List[TabSession] = []
         for session in self._tabs.values():
-            _cached_url, actual_domain = session.get_cached_route_snapshot()
+            current_url, actual_domain = session.get_cached_route_snapshot()
             if route_domain_matches(target, actual_domain):
+                if self.is_url_excluded(current_url):
+                    continue
                 matches.append(session)
 
         return matches
@@ -2763,6 +2799,7 @@ class TabPoolManager:
             acquire_timeout = self.acquire_timeout
             stuck_timeout = self.stuck_timeout
             allocation_mode = self.allocation_mode
+            excluded_urls = list(self.excluded_urls)
             global_network_enabled = self._global_network_enabled
             known_raw_tabs = len(self._known_tab_ids)
             last_scan = round(time.time() - self._last_scan_time, 1)
@@ -2779,6 +2816,7 @@ class TabPoolManager:
             "acquire_timeout": acquire_timeout,
             "stuck_timeout": stuck_timeout,
             "allocation_mode": allocation_mode,
+            "excluded_urls": excluded_urls,
             "global_network_enabled": global_network_enabled,
             "known_raw_tabs": known_raw_tabs,
             "last_scan": last_scan,
