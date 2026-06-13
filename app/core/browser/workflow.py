@@ -118,6 +118,58 @@ class BrowserWorkflowMixin:
         detail_text = f" | {detail}" if detail else ""
         logger.debug(f"[请求块 {block_no}/4] ---------- {title}{detail_text} ----------")
 
+    @staticmethod
+    def _find_next_stream_step_index(workflow: List[Dict[str, Any]], start_index: int) -> Optional[int]:
+        for index in range(max(0, int(start_index or 0)), len(workflow or [])):
+            step = workflow[index] or {}
+            action = str(step.get("action", "") or "").strip().upper()
+            if action in {"STREAM_WAIT", "STREAM_OUTPUT"}:
+                return index
+        return None
+
+    @staticmethod
+    def _find_resume_step_after_interrupt(workflow: List[Dict[str, Any]], start_index: int) -> int:
+        index = max(0, int(start_index or 0))
+        cleanup_targets = {"retry_send_btn", "stop_btn"}
+        skipped_cleanup = False
+
+        while index < len(workflow or []):
+            step = workflow[index] or {}
+            action = str(step.get("action", "") or "").strip().upper()
+            target = str(step.get("target", "") or "").strip().lower()
+
+            if action == "WAIT":
+                next_index = index + 1
+                while next_index < len(workflow or []):
+                    next_step = workflow[next_index] or {}
+                    next_action = str(next_step.get("action", "") or "").strip().upper()
+                    if next_action != "WAIT":
+                        break
+                    next_index += 1
+                next_target = str(
+                    ((workflow or [])[next_index] or {}).get("target", "") if next_index < len(workflow or []) else ""
+                ).strip().lower()
+                next_action = str(
+                    ((workflow or [])[next_index] or {}).get("action", "") if next_index < len(workflow or []) else ""
+                ).strip().upper()
+                if next_action == "CLICK" and next_target in cleanup_targets:
+                    skipped_cleanup = True
+                    index += 1
+                    continue
+
+            if action == "CLICK" and target in cleanup_targets:
+                skipped_cleanup = True
+                index += 1
+                continue
+
+            if skipped_cleanup and action == "WAIT":
+                index += 1
+                continue
+
+            break
+
+        return index
+
     def set_stop_checker(self, checker: Callable[[], bool]):
         """设置停止检查器"""
         self._should_stop_checker = checker or (lambda: False)
@@ -900,9 +952,12 @@ class BrowserWorkflowMixin:
 
         status_code = cls._extract_stream_terminal_http_status(detail)
         if status_code:
-            return status_code == 429 or status_code >= 500
+            return status_code >= 500
 
-        return "too many requests" in detail_lower or "rate limit" in detail_lower
+        if "too many requests" in detail_lower or "rate limit" in detail_lower:
+            return False
+
+        return False
 
     @classmethod
     def _get_stream_terminal_error_detail(cls, chunk: str) -> str:
@@ -1494,6 +1549,39 @@ class BrowserWorkflowMixin:
                             break
                         if interrupt_result.get("handled"):
                             logger.info(f"[{session.id}] 工作流恢复执行")
+                            try:
+                                executor.rebuild_network_listener_after_external_interruption(
+                                    "workflow_interrupt_resume"
+                                )
+                            except Exception:
+                                pass
+
+                            stream_index = None
+                            try:
+                                if executor.page_looks_generating(selectors.get("send_btn", "")):
+                                    stream_index = self._find_next_stream_step_index(workflow, step_index)
+                            except Exception:
+                                stream_index = None
+
+                            if stream_index is not None and stream_index != step_index:
+                                logger.info(
+                                    f"[{session.id}] 外部验证后检测到页面已在生成，"
+                                    f"跳过到监听步骤: {step_index + 1}->{stream_index + 1}"
+                                )
+                                step_index = stream_index
+                                continue
+
+                            resume_index = self._find_resume_step_after_interrupt(
+                                workflow,
+                                step_index,
+                            )
+                            if resume_index != step_index:
+                                logger.info(
+                                    f"[{session.id}] 外部验证后跳过清理/停止步骤，"
+                                    f"恢复到安全步骤: {step_index + 1}->{resume_index + 1}"
+                                )
+                                step_index = resume_index
+                                continue
                             continue
 
                     if effective_stop_checker():
@@ -1614,11 +1702,36 @@ class BrowserWorkflowMixin:
                             f"chunks={chunk_count}, stream_chars={delta_chars}"
                         )
 
+                        retry_current_stream_step = bool(
+                            getattr(session, "_workflow_retry_current_stream_step", False)
+                        )
+                        if retry_current_stream_step:
+                            setattr(session, "_workflow_retry_current_stream_step", False)
+                            if action_upper in {"STREAM_WAIT", "STREAM_OUTPUT"}:
+                                setattr(session, "_workflow_stop_reason", "command_interrupt")
+                                logger.info(
+                                    f"[{session.id}] 当前监听步骤被验证码/限流打断，"
+                                    f"保持在 {step_tag} 等待命令恢复"
+                                )
+                                continue
+
+                        if command_engine is not None and command_engine.workflow_interrupt_requested(session):
+                            setattr(session, "_workflow_stop_reason", "command_interrupt")
+                            if action_upper in {"STREAM_WAIT", "STREAM_OUTPUT"}:
+                                logger.info(
+                                    f"[{session.id}] 监听步骤收到命令插队请求，"
+                                    f"保持在 {step_tag} 等待恢复"
+                                )
+                            else:
+                                step_index += 1
+                            continue
+
                         if effective_stop_checker():
                             logger.info(f"[{session.id}] 步骤完成后检测到取消，提前结束工作流")
                             if command_engine is not None and command_engine.workflow_interrupt_requested(session):
                                 setattr(session, "_workflow_stop_reason", "command_interrupt")
-                                step_index += 1
+                                if action_upper not in {"STREAM_WAIT", "STREAM_OUTPUT"}:
+                                    step_index += 1
                                 continue
                             break
 

@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 # ================= 导入配置 =================
 
 from app.core.config import AppConfig, get_logger, get_shared_file_log_handler
@@ -509,7 +509,13 @@ if AppConfig.is_cors_enabled():
 
 @app.middleware("http")
 async def disable_dashboard_cache(request, call_next):
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except RuntimeError as e:
+        if str(e) == "No response returned." and await request.is_disconnected():
+            logger.debug("客户端已断开连接，忽略空响应中间件噪音")
+            return Response(status_code=204)
+        raise
     path = request.url.path or ""
     if path in ("/", "/dashboard") or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"

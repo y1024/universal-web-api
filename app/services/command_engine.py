@@ -1825,6 +1825,53 @@ return (function() {
                 except Exception as e:
                     logger.error(f"trigger check failed [{cmd.get('name')}]: {e}")
 
+    def check_workflow_triggers_now(self, session: 'TabSession') -> bool:
+        """Check commands for an active workflow and enqueue matching interrupts immediately."""
+        if not self._has_active_workflow(session):
+            return False
+
+        self.ensure_scheduler_running()
+        try:
+            commands = self._load_commands_for_checks()
+        except Exception as e:
+            logger.debug(f"命令加载失败，跳过工作流触发检查: {e}")
+            return False
+
+        ordered_commands = [
+            (idx, cmd) for idx, cmd in enumerate(commands)
+            if cmd.get("enabled", True)
+        ]
+        ordered_commands.sort(key=lambda item: (-self._get_command_priority(item[1]), item[0]))
+
+        scheduled_any = False
+        for _, cmd in ordered_commands:
+            with self._command_logging_context(cmd):
+                try:
+                    trigger = cmd.get("trigger", {}) or {}
+                    trigger_type = str(trigger.get("type", "")).strip().lower()
+                    if (
+                        trigger_type == "page_check"
+                        and not self._should_evaluate_page_check_while_busy_workflow(cmd)
+                    ):
+                        continue
+                    if not self._should_trigger(cmd, session):
+                        continue
+                    meta = self._take_pending_async_trigger_meta(cmd, session) or {}
+                    scheduled = self._schedule_command_for_active_workflow(
+                        cmd,
+                        session,
+                        interrupt_context=meta.get("interrupt_context"),
+                        trigger_rollback=meta.get("rollback"),
+                    )
+                    if scheduled:
+                        scheduled_any = True
+                    elif meta.get("rollback"):
+                        self._rollback_trigger_consumption(cmd, session, meta.get("rollback"))
+                except Exception as e:
+                    logger.error(f"workflow trigger check failed [{cmd.get('name')}]: {e}")
+
+        return scheduled_any
+
     def submit_background_task(self, fn, *args, **kwargs):
         """Submit non-trigger command work to the bounded command executor."""
         return self._command_executor.submit(fn, *args, **kwargs)

@@ -14,6 +14,7 @@ window.FilePastePanel = {
             defaultFilePaste: {
                 enabled: false,
                 threshold: 50000,
+                temp_file_type: 'txt',
                 hint_text: '完全专注于文件内容',
                 reacquire_input_after_upload: false,
                 post_upload_input_selector: '',
@@ -25,6 +26,10 @@ window.FilePastePanel = {
                     code: ''
                 }
             },
+            tempFileTypeOptions: [
+                { value: 'txt', label: 'TXT' },
+                { value: 'pdf', label: 'PDF' }
+            ],
             defaultSendConfirmation: {
                 attachment_sensitivity: 'medium',
                 max_retry_count: 2,
@@ -146,6 +151,11 @@ window.FilePastePanel = {
             }
         },
 
+        updateTempFileType(value) {
+            const normalized = String(value || '').trim().toLowerCase();
+            this.getMutableFilePaste().temp_file_type = ['txt', 'pdf'].includes(normalized) ? normalized : 'txt';
+        },
+
         updateHintText(value) {
             this.getMutableFilePaste().hint_text = value;
         },
@@ -214,7 +224,7 @@ window.FilePastePanel = {
                         <div>
                             <div class="text-sm font-medium text-gray-800 dark:text-gray-100">文件粘贴模式</div>
                             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 leading-5">
-                                当文本长度超过阈值时，将文本写入临时 txt 文件并走附件上传。下面这些上传后处理项只在文件粘贴模式生效。
+                                当文本长度超过阈值时，将文本写入所选临时文件并走附件上传。下面这些上传后处理项只在文件粘贴模式生效。
                             </p>
                         </div>
                         <label class="toggle-label scale-90 flex-shrink-0">
@@ -223,7 +233,7 @@ window.FilePastePanel = {
                         </label>
                     </div>
 
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
                             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">阈值</label>
                             <div class="flex items-center gap-2">
@@ -235,6 +245,18 @@ window.FilePastePanel = {
                                        class="flex-1 border dark:border-gray-600 px-3 py-2 rounded-md text-sm text-right bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-400 focus:border-transparent">
                                 <span class="text-sm text-gray-500 dark:text-gray-400">字符</span>
                             </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">临时文件类型</label>
+                            <select :value="resolvedFilePaste.temp_file_type"
+                                    @change="updateTempFileType($event.target.value)"
+                                    class="w-full border dark:border-gray-600 px-3 py-2 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-400 focus:border-transparent">
+                                <option v-for="option in tempFileTypeOptions"
+                                        :key="option.value"
+                                        :value="option.value">
+                                    {{ option.label }}
+                                </option>
+                            </select>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">引导文本</label>

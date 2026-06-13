@@ -2484,6 +2484,11 @@ class ConfigEngine:
             except (ValueError, TypeError):
                 pass
 
+        if "temp_file_type" in config:
+            val = str(config.get("temp_file_type") or "").strip().lower().lstrip(".")
+            if val in {"txt", "pdf"}:
+                result["temp_file_type"] = val
+
         if "hint_text" in config:
             val = str(config["hint_text"]).strip()
             # 限制长度，避免过长的引导文本

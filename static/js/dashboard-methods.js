@@ -2480,6 +2480,32 @@
                     { action: 'FILL_INPUT', target: 'input_box', optional: false, value: null },
                     { action: 'KEY_PRESS', target: 'Enter', optional: false, value: null },
                     { action: 'STREAM_WAIT', target: 'result_container', optional: false, value: null }
+                ],
+                'battle_winner': [
+                    { action: 'WAIT', target: '', optional: false, value: 2 },
+                    { action: 'FILL_INPUT', target: 'input_box', optional: false, value: null },
+                    { action: 'WAIT', target: '', optional: false, value: 0.5 },
+                    { action: 'CLICK', target: 'retry_send_btn', optional: true, value: null },
+                    { action: 'WAIT', target: '', optional: false, value: 0.2 },
+                    { action: 'CLICK', target: 'send_btn', optional: false, value: null },
+                    { action: 'STREAM_WAIT', target: 'result_container', optional: false, value: null }
+                ],
+                'battle_left': [
+                    { action: 'WAIT', target: '', optional: false, value: 1 },
+                    { action: 'FILL_INPUT', target: 'input_box', optional: false, value: null },
+                    { action: 'CLICK', target: 'retry_send_btn', optional: true, value: null },
+                    { action: 'WAIT', target: '', optional: false, value: 0.8 },
+                    { action: 'CLICK', target: 'send_btn', optional: true, value: null },
+                    { action: 'STREAM_WAIT', target: 'result_container', optional: false, value: null }
+                ],
+                'battle_right': [
+                    { action: 'WAIT', target: '', optional: false, value: 2 },
+                    { action: 'FILL_INPUT', target: 'input_box', optional: false, value: null },
+                    { action: 'WAIT', target: '', optional: false, value: 0.5 },
+                    { action: 'CLICK', target: 'retry_send_btn', optional: true, value: null },
+                    { action: 'WAIT', target: '', optional: false, value: 0.2 },
+                    { action: 'CLICK', target: 'send_btn', optional: false, value: null },
+                    { action: 'STREAM_WAIT', target: 'result_container', optional: false, value: null }
                 ]
             }
 
@@ -2490,6 +2516,43 @@
             const pc = this.getActivePresetConfig()
             if (!pc) return
             pc.workflow = JSON.parse(JSON.stringify(templates[type]))
+
+            const battleParserMap = {
+                battle_winner: 'lmarena_battle_winner',
+                battle_left: 'lmarena_battle_side_left',
+                battle_right: 'lmarena_battle_side_right'
+            }
+            if (battleParserMap[type]) {
+                pc.selectors = {
+                    ...(pc.selectors || {}),
+                    retry_send_btn: pc.selectors?.retry_send_btn || 'button[aria-label="Rerun stopped messages"], button[data-slot="tooltip-trigger"]:has(svg path[d*="21.8883"])',
+                    send_btn: pc.selectors?.send_btn || 'button[aria-label="Send message"][type="submit"]:not(:disabled):not([aria-disabled="true"]), button[aria-label="Stop generation"]',
+                    generating_indicator: pc.selectors?.generating_indicator || 'button[aria-label="Stop generation"]'
+                }
+                pc.stream_config = {
+                    ...((pc && pc.stream_config) || {}),
+                    mode: 'network',
+                    send_confirmation: {
+                        ...(((pc && pc.stream_config) || {}).send_confirmation || {}),
+                        max_retry_count: 0,
+                        retry_on_unconfirmed_send: false,
+                        post_click_observe_window: 0.5,
+                        pre_retry_probe_window: 0,
+                        retry_observe_window: 0,
+                        trust_generating_indicator: true,
+                        trust_network_activity: true
+                    },
+                    network: {
+                        ...(((pc && pc.stream_config) || {}).network || {}),
+                        parser: battleParserMap[type],
+                        url_pattern: '**/nextjs-api/stream/create-evaluation**',
+                        method: 'POST',
+                        listen_pattern: '/nextjs-api/stream/create-evaluation',
+                        silence_threshold: 10,
+                        response_interval: 1
+                    }
+                }
+            }
             this.showStepTemplates = false
             this.notify('模板已应用', 'success')
         },

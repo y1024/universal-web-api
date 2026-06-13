@@ -116,6 +116,27 @@ window.ConfigTab = {
                     profile: '',
                     options: {}
                 },
+                send_confirmation: {
+                    attachment_sensitivity: 'medium',
+                    post_click_observe_window: 1.8,
+                    pre_retry_probe_window: 0.12,
+                    retry_observe_window: 0.9,
+                    attachment_observe_window: 6.0,
+                    max_retry_count: 2,
+                    retry_interval: 0.6,
+                    retry_cooldown_window: 1.5,
+                    retry_action: 'click_send_btn',
+                    retry_key_combo: 'Enter',
+                    retry_on_unconfirmed_send: true,
+                    accept_attachment_change: false,
+                    accept_attachment_disappear: false,
+                    accept_probe_confirmation: true,
+                    retry_block_on_stop_button: true,
+                    retry_block_if_generating: true,
+                    trust_network_activity: true,
+                    trust_generating_indicator: true,
+                    trust_send_disabled_with_input_shrink: true
+                },
                 hard_timeout: 300,
                 network: null
             }
@@ -176,6 +197,7 @@ window.ConfigTab = {
             const streamConfig = this.presetConfig.stream_config || {};
             return {
                 ...this.defaultStreamConfig,
+                ...streamConfig,
                 mode: streamConfig.mode || this.defaultStreamConfig.mode,
                 request_transport: {
                     ...(this.defaultStreamConfig.request_transport || {}),
@@ -184,6 +206,10 @@ window.ConfigTab = {
                         ...((this.defaultStreamConfig.request_transport && this.defaultStreamConfig.request_transport.options) || {}),
                         ...((streamConfig && streamConfig.request_transport && streamConfig.request_transport.options) || {})
                     }
+                },
+                send_confirmation: {
+                    ...(this.defaultStreamConfig.send_confirmation || {}),
+                    ...((streamConfig && streamConfig.send_confirmation) || {})
                 },
                 hard_timeout: streamConfig.hard_timeout || this.defaultStreamConfig.hard_timeout,
                 network: streamConfig.network || this.defaultStreamConfig.network

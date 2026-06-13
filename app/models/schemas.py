@@ -37,6 +37,8 @@ REQUIRED_SELECTOR_KEYS = [
 
 OPTIONAL_SELECTOR_KEYS = [
     "new_chat_btn",
+    "retry_send_btn",
+    "stop_btn",
     "message_wrapper",
     "generating_indicator",
     "upload_btn",
@@ -83,7 +85,7 @@ DEFAULT_SELECTOR_DEFINITIONS: List[SelectorDefinition] = [
     },
     {
         "key": "send_btn",
-        "description": "发送消息的按钮（通常是 type=submit 或带有发送图标的按钮）",
+        "description": "发送消息的按钮（通常是 type=submit 或带有发送图标 of 按钮）",
         "enabled": True,
         "required": True
     },
@@ -97,6 +99,18 @@ DEFAULT_SELECTOR_DEFINITIONS: List[SelectorDefinition] = [
         "key": "new_chat_btn",
         "description": "新建对话的按钮（点击后开始新的对话）",
         "enabled": True,
+        "required": False
+    },
+    {
+        "key": "retry_send_btn",
+        "description": "重新运行/重试当前回复的按钮（通常是回复卡片顶部的圆形箭头）",
+        "enabled": False,
+        "required": False
+    },
+    {
+        "key": "stop_btn",
+        "description": "停止/打断大模型输出的按钮（通常在生成过程中显示）",
+        "enabled": False,
         "required": False
     },
     {
@@ -180,7 +194,7 @@ class FilePasteConfig(TypedDict, total=False):
     """
     文件粘贴配置
 
-    当文本长度超过阈值时，将文本写入临时 txt 文件，
+    当文本长度超过阈值时，将文本写入临时 txt/pdf 文件，
     然后以文件形式粘贴到输入框（通过 CF_HDROP 剪贴板格式）。
     粘贴文件后，自动在输入框中追加一句引导文本，确保能正常发送。
     附件发送确认规则也优先挂在这里，避免和网络监听配置混在一起。
@@ -189,6 +203,7 @@ class FilePasteConfig(TypedDict, total=False):
     """
     enabled: bool       # 是否启用文件粘贴模式，默认 False
     threshold: int      # 字符数阈值，超过此值时使用文件粘贴，默认 50000
+    temp_file_type: Literal["txt", "pdf"]  # 临时文件类型，默认 txt
     hint_text: str      # 粘贴文件后追加的引导文本，默认 "完全专注于文件内容"
     reacquire_input_after_upload: bool  # 上传完成后是否重新定位输入框
     post_upload_input_selector: str     # 上传后专用输入框选择器
@@ -205,6 +220,7 @@ def get_default_file_paste_config() -> 'FilePasteConfig':
     return {
         "enabled": False,
         "threshold": 50000,
+        "temp_file_type": "txt",
         "hint_text": "完全专注于文件内容",
         "reacquire_input_after_upload": False,
         "post_upload_input_selector": "",
@@ -617,6 +633,7 @@ class AIAnalysisResult(TypedDict, total=False):
     send_btn: Optional[str]
     result_container: Optional[str]
     new_chat_btn: Optional[str]
+    retry_send_btn: Optional[str]
     message_wrapper: Optional[str]
     generating_indicator: Optional[str]
     upload_btn: Optional[str]
@@ -1100,6 +1117,10 @@ def validate_site_config(config: Dict[str, Any]) -> bool:
             return False
         if "threshold" in file_paste and not isinstance(file_paste["threshold"], int):
             return False
+        if "temp_file_type" in file_paste:
+            temp_file_type = str(file_paste["temp_file_type"]).strip().lower()
+            if temp_file_type not in {"txt", "pdf"}:
+                return False
         if "hint_text" in file_paste and not isinstance(file_paste["hint_text"], str):
             return False
         if "reacquire_input_after_upload" in file_paste and not isinstance(file_paste["reacquire_input_after_upload"], bool):

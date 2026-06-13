@@ -21,6 +21,11 @@ from .qwen_parser import QwenParser
 from .mimo_parser import MimoParser
 from .lmarena_parser import LmarenaParser
 from .lmarena_side_left_parser import LmarenaSideLeftParser
+from .lmarena_battle_side_parser import (
+    LmarenaBattleSideLeftParser,
+    LmarenaBattleSideRightParser,
+    LmarenaBattleWinnerParser,
+)
 from .lmarena_image_side_left_parser import LmarenaImageSideLeftParser
 from .lmarena_image_side_right_parser import LmarenaImageSideRightParser
 from .grok_parser import GrokParser
@@ -38,6 +43,9 @@ ParserRegistry.register_class(QwenParser)
 ParserRegistry.register_class(MimoParser)
 ParserRegistry.register_class(LmarenaParser)
 ParserRegistry.register_class(LmarenaSideLeftParser)
+ParserRegistry.register_class(LmarenaBattleWinnerParser)
+ParserRegistry.register_class(LmarenaBattleSideLeftParser)
+ParserRegistry.register_class(LmarenaBattleSideRightParser)
 ParserRegistry.register_class(LmarenaImageSideLeftParser)
 ParserRegistry.register_class(LmarenaImageSideRightParser)
 ParserRegistry.register_class(GrokParser)
@@ -57,6 +65,9 @@ __all__ = [
     'MimoParser',
     'LmarenaParser',
     'LmarenaSideLeftParser',
+    'LmarenaBattleWinnerParser',
+    'LmarenaBattleSideLeftParser',
+    'LmarenaBattleSideRightParser',
     'LmarenaImageSideLeftParser',
     'LmarenaImageSideRightParser',
     'GrokParser',

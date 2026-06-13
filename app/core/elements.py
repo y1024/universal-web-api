@@ -1,4 +1,4 @@
-﻿"""
+"""
 app/core/elements.py - 元素查找和缓存
 
 职责：
@@ -48,10 +48,10 @@ class ElementFinder:
             'css:[contenteditable="true"]',
         ],
         "send_btn": [
-            'css:button[type="submit"]',
-            'tag:button@@type=submit',
-            'css:form button[type="submit"]',
-            'css:[role="button"][type="submit"]',
+            'css:button[aria-label="Send message"][type="submit"]:not(:disabled):not([aria-disabled="true"])',
+            'css:form button[type="submit"]:not(:disabled):not([aria-disabled="true"])',
+            'css:button[type="submit"]:not(:disabled):not([aria-disabled="true"])',
+            'css:[role="button"][type="submit"]:not(:disabled):not([aria-disabled="true"])',
         ],
         "result_container": [
             'css:div[class*="message"]',
@@ -133,6 +133,180 @@ class ElementFinder:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_visible_enabled(ele: Any) -> bool:
+        try:
+            states = getattr(ele, "states", None)
+            if states is not None:
+                if hasattr(states, "is_displayed") and not states.is_displayed:
+                    return False
+                if hasattr(states, "is_enabled") and not states.is_enabled:
+                    return False
+        except Exception:
+            return False
+
+        try:
+            if str(ele.attr("disabled") or "").strip():
+                return False
+            if str(ele.attr("aria-disabled") or "").strip().lower() == "true":
+                return False
+        except Exception:
+            pass
+
+        return True
+
+    @staticmethod
+    def _split_css_selector_groups(selector: str) -> List[str]:
+        groups: List[str] = []
+        current: List[str] = []
+        quote = ""
+        bracket_depth = 0
+        paren_depth = 0
+        escape = False
+
+        for ch in selector:
+            current.append(ch)
+
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if quote:
+                if ch == quote:
+                    quote = ""
+                continue
+            if ch in {"'", '"'}:
+                quote = ch
+                continue
+            if ch == "[":
+                bracket_depth += 1
+                continue
+            if ch == "]" and bracket_depth > 0:
+                bracket_depth -= 1
+                continue
+            if ch == "(":
+                paren_depth += 1
+                continue
+            if ch == ")" and paren_depth > 0:
+                paren_depth -= 1
+                continue
+            if ch == "," and bracket_depth == 0 and paren_depth == 0:
+                current.pop()
+                group = "".join(current).strip()
+                if group:
+                    groups.append(group)
+                current = []
+
+        tail = "".join(current).strip()
+        if tail:
+            groups.append(tail)
+        return groups
+
+    def _find_css_groups_in_order(self, selector: str, timeout: float) -> Optional[Any]:
+        if not selector or selector.startswith(('tag:', '@', 'xpath:', 'css:')) or '@@' in selector:
+            return None
+
+        groups = self._split_css_selector_groups(selector)
+        if len(groups) <= 1:
+            return None
+
+        per_group_timeout = max(0.02, min(float(timeout or 0), 0.25))
+        for group in groups:
+            ele = self._find_with_syntax(group, per_group_timeout)
+            if ele and self._is_visible_enabled(ele):
+                return ele
+        return None
+
+    @staticmethod
+    def _element_text_signature(ele: Any) -> str:
+        parts: List[str] = []
+        for attr in ("aria-label", "title", "data-testid", "class"):
+            try:
+                value = ele.attr(attr)
+            except Exception:
+                value = ""
+            if value:
+                parts.append(str(value))
+        for prop in ("text", "html"):
+            try:
+                value = getattr(ele, prop, "")
+            except Exception:
+                value = ""
+            if value:
+                parts.append(str(value))
+        return " ".join(parts).lower()
+
+    @classmethod
+    def _looks_like_stop_button(cls, ele: Any) -> bool:
+        signature = cls._element_text_signature(ele)
+        if not signature:
+            return False
+        return any(
+            token in signature
+            for token in (
+                "stop generation",
+                "stop generating",
+                "stop",
+                "cancel",
+                "abort",
+                "停止",
+                "中止",
+                "取消",
+            )
+        )
+
+    @classmethod
+    def _looks_like_send_button(cls, ele: Any) -> bool:
+        signature = cls._element_text_signature(ele)
+        if not signature:
+            return False
+        return any(
+            token in signature
+            for token in (
+                "send message",
+                "send",
+                "submit",
+                "发送",
+                "提交",
+            )
+        )
+
+    def _find_send_button_safely(self, selector: str, timeout: float) -> Optional[Any]:
+        self._last_send_btn_blocked_by_stop = False
+        candidates: List[Any] = []
+
+        groups = self._split_css_selector_groups(selector) if selector else []
+        if not groups and selector:
+            groups = [selector]
+
+        per_group_timeout = max(0.02, min(float(timeout or 0), 0.25))
+        for group in groups:
+            ele = self._find_with_syntax(group, per_group_timeout)
+            if not ele or not self._is_visible_enabled(ele):
+                continue
+            candidates.append(ele)
+            if self._looks_like_send_button(ele) and not self._looks_like_stop_button(ele):
+                return ele
+
+        for fb_selector in self.FALLBACK_SELECTORS.get("send_btn", []):
+            ele = self._find_with_syntax(fb_selector, BrowserConstants.FALLBACK_ELEMENT_TIMEOUT)
+            if not ele or not self._is_visible_enabled(ele):
+                continue
+            candidates.append(ele)
+            if not self._looks_like_stop_button(ele):
+                return ele
+
+        for ele in candidates:
+            if not self._looks_like_stop_button(ele):
+                return ele
+
+        if candidates:
+            self._last_send_btn_blocked_by_stop = True
+            logger.warning("[ELEMENT] send_btn 只匹配到停止/取消态按钮，已跳过点击以避免中断生成")
+        return None
+
     def find(self, selector: str, timeout: float = None) -> Optional[Any]:
         """
         查找单个元素（公开方法）
@@ -158,7 +332,11 @@ class ElementFinder:
                 del self._cache[cache_key]
         
         # 查找元素
-        ele = self._find_with_syntax(selector, timeout)
+        ele = self._find_css_groups_in_order(selector, timeout)
+        if not ele:
+            ele = self._find_with_syntax(selector, timeout)
+        if ele and not self._is_visible_enabled(ele):
+            ele = None
         
         # 缓存有效元素
         if ele:
@@ -215,6 +393,18 @@ class ElementFinder:
         """
         if timeout is None:
             timeout = BrowserConstants.DEFAULT_ELEMENT_TIMEOUT
+
+        if target_key == "send_btn":
+            ele = self._find_send_button_safely(primary_selector, timeout)
+            if ele:
+                cache_key = primary_selector or target_key
+                self._cache[cache_key] = CachedElement(
+                    element=ele,
+                    selector=primary_selector or target_key,
+                    cached_at=time.time(),
+                    content_hash=self._compute_element_hash(ele),
+                )
+            return ele
         
         # 先尝试主选择器
         if primary_selector:

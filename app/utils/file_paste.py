@@ -2,7 +2,7 @@
 app/utils/file_paste.py - 文件粘贴工具
 
 职责：
-- 创建临时 txt 文件（存放超长文本）
+- 创建临时 txt/pdf 文件（存放超长文本）
 - 通过 Win32 CF_HDROP 格式将文件复制到系统剪贴板
 - 管理 temp 目录的生命周期（启动时清理、退出时清理）
 """
@@ -28,6 +28,8 @@ logger = get_logger("FPASTE")
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 TEMP_DIR = _PROJECT_ROOT / "temp"
 TRANSCODED_CACHE_DIR = _PROJECT_ROOT / "download_images" / "_transcoded"
+SUPPORTED_TEMP_FILE_TYPES = ("txt", "pdf")
+DEFAULT_TEMP_FILE_TYPE = "txt"
 
 
 def _get_temp_cleanup_min_age_seconds() -> float:
@@ -50,7 +52,11 @@ PASTE_TEMP_CLEANUP_MIN_AGE_SECONDS = _get_paste_temp_cleanup_min_age_seconds()
 
 def _get_cleanup_min_age_seconds(path: Path) -> float:
     try:
-        if path.is_file() and path.name.startswith("paste_") and path.suffix.lower() == ".txt":
+        if (
+            path.is_file()
+            and path.name.startswith("paste_")
+            and path.suffix.lower() in {".txt", ".pdf"}
+        ):
             return PASTE_TEMP_CLEANUP_MIN_AGE_SECONDS
     except Exception:
         pass
@@ -83,6 +89,14 @@ def ensure_temp_dir() -> Path:
     """确保 temp 目录存在"""
     TEMP_DIR.mkdir(exist_ok=True)
     return TEMP_DIR
+
+
+def normalize_temp_file_type(file_type: str) -> str:
+    """Normalize the configured temporary attachment type."""
+    normalized = str(file_type or DEFAULT_TEMP_FILE_TYPE).strip().lower().lstrip(".")
+    if normalized in SUPPORTED_TEMP_FILE_TYPES:
+        return normalized
+    return DEFAULT_TEMP_FILE_TYPE
 
 
 def cleanup_temp_dir():
@@ -172,6 +186,225 @@ def create_temp_txt(text: str, prefix: str = "paste_") -> Optional[str]:
         return None
 
 
+def _pdf_font_candidates() -> list[str]:
+    """Return likely local fonts that can render Chinese and Latin text."""
+    env_path = os.getenv("FILE_PASTE_PDF_FONT_PATH", "").strip()
+    candidates = []
+    if env_path:
+        candidates.append(env_path)
+
+    candidates.extend([
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyh.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/System/Library/Fonts/PingFang.ttc",
+    ])
+    return candidates
+
+
+def _find_pdf_font_path(*, prefer_single_face: bool = False) -> Optional[str]:
+    """Find a local font for generated PDFs."""
+    candidates = _pdf_font_candidates()
+    if prefer_single_face:
+        candidates = sorted(
+            candidates,
+            key=lambda path: 0 if Path(str(path)).suffix.lower() in {".ttf", ".otf"} else 1,
+        )
+    for path in candidates:
+        try:
+            if path and os.path.exists(path):
+                return path
+        except Exception:
+            continue
+    return None
+
+
+def _write_pdf_with_pillow(text: str, filepath: str) -> None:
+    """Render text pages to a PDF using Pillow, which is already a project dependency."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    page_width, page_height = 2480, 3508
+    margin_x, margin_y = 48, 48
+    font_size = 12
+    line_spacing = 1
+    font_path = _find_pdf_font_path()
+    font = (
+        ImageFont.truetype(font_path, font_size)
+        if font_path
+        else ImageFont.load_default()
+    )
+
+    max_width = page_width - (margin_x * 2)
+    max_lines = max(1, (page_height - (margin_y * 2)) // (font_size + line_spacing))
+
+    def text_width(value: str) -> float:
+        if not value:
+            return 0.0
+        try:
+            return float(font.getlength(value))
+        except Exception:
+            bbox = font.getbbox(value)
+            return float(bbox[2] - bbox[0])
+
+    def wrap_paragraph(paragraph: str) -> list[str]:
+        if paragraph == "":
+            return [""]
+        lines = []
+        current = ""
+        for char in paragraph:
+            candidate = current + char
+            if current and text_width(candidate) > max_width:
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        lines.append(current)
+        return lines
+
+    wrapped_lines = []
+    normalized_text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for paragraph in normalized_text.split("\n"):
+        wrapped_lines.extend(wrap_paragraph(paragraph))
+
+    if not wrapped_lines:
+        wrapped_lines = [""]
+
+    pages = []
+    for start in range(0, len(wrapped_lines), max_lines):
+        page = Image.new("RGB", (page_width, page_height), "white")
+        draw = ImageDraw.Draw(page)
+        y = margin_y
+        for line in wrapped_lines[start:start + max_lines]:
+            draw.text((margin_x, y), line, fill=(20, 24, 33), font=font)
+            y += font_size + line_spacing
+        pages.append(page)
+
+    first, rest = pages[0], pages[1:]
+    first.save(filepath, "PDF", resolution=300.0, save_all=True, append_images=rest)
+
+
+def _write_pdf_with_reportlab(text: str, filepath: str) -> None:
+    """Write a text-layer PDF when reportlab is available."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+
+    page_width, page_height = A4
+    margin_x, margin_y = 12, 12
+    font_size = 4.0
+    line_height = 4.8
+    font_name = "Helvetica"
+    font_path = _find_pdf_font_path(prefer_single_face=True)
+    if font_path:
+        font_name = "FilePasteFont"
+        pdfmetrics.registerFont(TTFont(font_name, font_path))
+
+    max_width = page_width - (margin_x * 2)
+
+    def string_width(value: str) -> float:
+        return pdfmetrics.stringWidth(value, font_name, font_size)
+
+    def wrap_paragraph(paragraph: str) -> list[str]:
+        if paragraph == "":
+            return [""]
+        lines = []
+        current = ""
+        for char in paragraph:
+            candidate = current + char
+            if current and string_width(candidate) > max_width:
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        lines.append(current)
+        return lines
+
+    pdf = canvas.Canvas(filepath, pagesize=A4)
+    pdf.setTitle("Temporary context")
+    pdf.setAuthor("Universal Web-to-API")
+
+    y = page_height - margin_y
+    normalized_text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for paragraph in normalized_text.split("\n") or [""]:
+        for line in wrap_paragraph(paragraph):
+            if y < margin_y:
+                pdf.showPage()
+                y = page_height - margin_y
+            pdf.setFont(font_name, font_size)
+            pdf.drawString(margin_x, y, line)
+            y -= line_height
+
+    pdf.save()
+
+
+def _write_temp_pdf(text: str, filepath: str) -> None:
+    """Create a readable PDF from text with optional text-layer support."""
+    try:
+        _write_pdf_with_reportlab(text, filepath)
+    except Exception as reportlab_error:
+        logger.debug(f"reportlab PDF 生成不可用，改用 Pillow 渲染: {reportlab_error}")
+        _write_pdf_with_pillow(text, filepath)
+
+
+def create_temp_pdf(text: str, prefix: str = "paste_") -> Optional[str]:
+    """
+    将文本写入临时 pdf 文件
+
+    Args:
+        text: 要写入的文本内容
+        prefix: 文件名前缀
+
+    Returns:
+        文件的绝对路径，失败返回 None
+    """
+    fd: Optional[int] = None
+    filepath: Optional[str] = None
+    try:
+        ensure_temp_dir()
+
+        fd, filepath = tempfile.mkstemp(
+            suffix=".pdf",
+            prefix=prefix,
+            dir=str(TEMP_DIR)
+        )
+        os.close(fd)
+        fd = None
+
+        _write_temp_pdf(text, filepath)
+
+        logger.debug(f"PDF 临时文件已创建: {_temp_log_label(filepath)} ({len(text)} 字符)")
+        return filepath
+
+    except Exception as e:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        if filepath:
+            try:
+                os.unlink(filepath)
+                logger.debug(f"已清理创建失败的临时文件: {_temp_log_label(filepath)}")
+            except Exception:
+                pass
+        logger.error(f"创建 PDF 临时文件失败: {e}")
+        return None
+
+
+def create_temp_file(text: str, prefix: str = "paste_", file_type: str = DEFAULT_TEMP_FILE_TYPE) -> Optional[str]:
+    """Create a temporary attachment for large text using the configured file type."""
+    normalized_type = normalize_temp_file_type(file_type)
+    if normalized_type == "pdf":
+        return create_temp_pdf(text, prefix=prefix)
+    return create_temp_txt(text, prefix=prefix)
+
+
 # ================= Win32 剪贴板文件复制 =================
 
 def copy_file_to_clipboard(filepath: str) -> bool:
@@ -210,10 +443,10 @@ def copy_file_to_clipboard(filepath: str) -> bool:
 
 # ================= 组合操作 =================
 
-def prepare_file_paste(text: str) -> Optional[str]:
+def prepare_file_paste(text: str, file_type: str = DEFAULT_TEMP_FILE_TYPE) -> Optional[str]:
     """
     完整的文件粘贴准备流程：
-    1. 创建临时 txt 文件
+    1. 创建临时 txt/pdf 文件
     2. 将文件复制到剪贴板
     
     Args:
@@ -222,7 +455,7 @@ def prepare_file_paste(text: str) -> Optional[str]:
     Returns:
         临时文件路径（成功时），失败返回 None
     """
-    filepath = create_temp_txt(text)
+    filepath = create_temp_file(text, file_type=file_type)
     if not filepath:
         return None
     
@@ -239,9 +472,14 @@ def prepare_file_paste(text: str) -> Optional[str]:
 
 __all__ = [
     'TEMP_DIR',
+    'SUPPORTED_TEMP_FILE_TYPES',
+    'DEFAULT_TEMP_FILE_TYPE',
     'ensure_temp_dir',
     'cleanup_temp_dir',
+    'normalize_temp_file_type',
+    'create_temp_file',
     'create_temp_txt',
+    'create_temp_pdf',
     'copy_file_to_clipboard',
     'prepare_file_paste',
 ]

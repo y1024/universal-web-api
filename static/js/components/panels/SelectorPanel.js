@@ -95,6 +95,7 @@ window.SelectorPanel = {
                 'new_chat_btn',
                 'message_wrapper',
                 'generating_indicator',
+                'retry_send_btn',
                 'upload_btn',
                 'file_input',
                 'drop_zone'
@@ -187,6 +188,14 @@ window.SelectorPanel = {
                     chip: '辅助',
                     placeholder: '例如：button[aria-label*="停止"], .typing-indicator'
                 },
+                retry_send_btn: {
+                    title: '重试/重新运行按钮',
+                    description: '用于重新运行当前回复或把停止后的回复重新拉起，常见是圆形箭头按钮。',
+                    hint: 'Battle 或双栏对比模式里，通常需要先点这个按钮，再点右下角发送/停止态按钮完成本轮发送。',
+                    required: false,
+                    chip: '辅助',
+                    placeholder: '例如：button[aria-label="Rerun stopped messages"]'
+                },
                 upload_btn: {
                     title: '上传按钮',
                     description: '点一下会弹出上传面板或系统文件选择窗口的按钮。',
@@ -274,6 +283,11 @@ window.SelectorPanel = {
                                 class="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-xs transition-colors">
                             <div class="font-semibold text-gray-900 dark:text-white">generating_indicator</div>
                             <div class="text-gray-500 dark:text-gray-400">生成中提示，适合辅助判断结束</div>
+                        </button>
+                        <button @click="addSelector('retry_send_btn')"
+                                class="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-xs transition-colors">
+                            <div class="font-semibold text-gray-900 dark:text-white">retry_send_btn</div>
+                            <div class="text-gray-500 dark:text-gray-400">重新运行或重试当前回复</div>
                         </button>
                         <button @click="addSelector('upload_btn')"
                                 class="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-700 text-xs transition-colors">

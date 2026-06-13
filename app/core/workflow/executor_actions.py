@@ -956,6 +956,9 @@ class WorkflowExecutorActionMixin:
             elif self.stealth_mode and last_error is not None:
                 raise last_error
         elif target_key == "send_btn":
+            if bool(getattr(self.finder, "_last_send_btn_blocked_by_stop", False)):
+                logger.warning("[CLICK] send_btn 当前处于停止态，跳过 Enter 降级以避免重复提交/中断")
+                return
             self._execute_keypress("Enter")
         
         elif not optional:
@@ -1502,6 +1505,21 @@ class WorkflowExecutorActionMixin:
         interval = 0.1
         started_at = time.perf_counter()
         latest_len = before_len
+
+        try:
+            retry_on_unconfirmed = self._get_send_confirmation_flag(
+                "retry_on_unconfirmed_send",
+                True,
+                raw_only=True,
+            )
+        except Exception:
+            retry_on_unconfirmed = True
+
+        if not retry_on_unconfirmed:
+            logger.debug(
+                "[SEND_CONFIRM_SKIP] 发送未确认自动重试已禁用，跳过发送按钮硬确认"
+            )
+            return
 
         if not self._is_send_confirmation_check_enabled():
             try:

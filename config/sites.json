@@ -54,6 +54,18 @@
         "description": "支持拖拽上传的区域（某些站点不支持粘贴但支持拖拽）",
         "enabled": false,
         "required": false
+      },
+      {
+        "key": "retry_send_btn",
+        "description": "重新运行/重试当前回复的按钮（通常是回复卡片顶部的圆形箭头）",
+        "enabled": false,
+        "required": false
+      },
+      {
+        "key": "stop_btn",
+        "description": "停止/打断大模型输出的按钮",
+        "enabled": true,
+        "required": false
       }
     ]
   },
@@ -234,6 +246,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 129999,
+          "temp_file_type": "txt",
           "hint_text": "文件内容为需要回复的上下文，按上下文回复",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -414,6 +427,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -587,6 +601,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 5000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -625,6 +640,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 180000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -1033,6 +1049,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 30000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -1301,6 +1318,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 30000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -1569,6 +1587,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 30000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -1809,6 +1828,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 163840,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -2016,6 +2036,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 2621440,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -2240,6 +2261,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 163840,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -2434,6 +2456,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -2596,6 +2619,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -2779,6 +2803,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -2861,7 +2886,7 @@
           "input_box_stability_wait_timeout": 1.5,
           "url_transition_wait_on_new_chat": true,
           "send_confirmation_check_enabled": true,
-          "send_confirmation_check_timeout": 6.0,
+          "send_confirmation_check_timeout": 6,
           "skip_new_chat_on_retry": true
         },
         "stream_config": {
@@ -2869,9 +2894,9 @@
           "hard_timeout": 300,
           "network": {
             "parser": "lmarena",
-            "url_pattern": "**/nextjs-api/stream/create-evaluation**",
+            "url_pattern": "**/nextjs-api/stream/**",
             "method": "POST",
-            "listen_pattern": "/nextjs-api/stream/create-evaluation",
+            "listen_pattern": "/nextjs-api/stream/",
             "silence_threshold": 3,
             "response_interval": 1
           }
@@ -2975,6 +3000,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -3028,9 +3054,9 @@
           "hard_timeout": 300,
           "network": {
             "parser": "lmarena",
-            "url_pattern": "**/nextjs-api/stream/create-evaluation**",
+            "url_pattern": "**/nextjs-api/stream/**",
             "method": "POST",
-            "listen_pattern": "/nextjs-api/stream/create-evaluation",
+            "listen_pattern": "/nextjs-api/stream/",
             "silence_threshold": 3,
             "response_interval": 1
           }
@@ -3134,6 +3160,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -3156,7 +3183,7 @@
           "input_box_stability_wait_timeout": 4,
           "url_transition_wait_on_new_chat": true,
           "send_confirmation_check_enabled": true,
-          "send_confirmation_check_timeout": 6.0,
+          "send_confirmation_check_timeout": 6,
           "skip_new_chat_on_retry": true
         }
       },
@@ -3187,9 +3214,9 @@
           "hard_timeout": 300,
           "network": {
             "parser": "lmarena",
-            "url_pattern": "**/nextjs-api/stream/create-evaluation**",
+            "url_pattern": "**/nextjs-api/stream/**",
             "method": "POST",
-            "listen_pattern": "/nextjs-api/stream/create-evaluation",
+            "listen_pattern": "/nextjs-api/stream/",
             "silence_threshold": 3,
             "response_interval": 1
           }
@@ -3293,6 +3320,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -3363,9 +3391,9 @@
           "hard_timeout": 300,
           "network": {
             "parser": "lmarena_side_left",
-            "url_pattern": "**/nextjs-api/stream/create-evaluation**",
+            "url_pattern": "**/nextjs-api/stream/**",
             "method": "POST",
-            "listen_pattern": "/nextjs-api/stream/create-evaluation",
+            "listen_pattern": "/nextjs-api/stream/",
             "silence_threshold": 3,
             "response_interval": 1
           }
@@ -3471,6 +3499,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -3651,6 +3680,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -3831,6 +3861,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -3840,6 +3871,627 @@
           "state_probe": {
             "enabled": false,
             "code": ""
+          }
+        },
+        "prompt_padding": {
+          "enabled": false,
+          "marker_text": "测试号，无实际意义",
+          "segments_per_side": 12
+        }
+      },
+      "Battle-左侧": {
+        "selectors": {
+          "input_box": "textarea[name=\"message\"]",
+          "send_btn": "button[aria-label=\"Stop generation\"], button[aria-label=\"Send message\"][type=\"submit\"]:not(:disabled):not([aria-disabled=\"true\"])",
+          "stop_btn": "button[aria-label=\"Stop generation\"]",
+          "result_container": "main ol > div.w-full:not(.flex) .flex.flex-col.gap-3",
+          "new_chat_btn": "a[href*=\"/text/side-by-side\"], a[data-sidebar=\"menu-button\"][href*=\"side-by-side\"], button[aria-label*=\"side by side\" i]",
+          "message_wrapper": null,
+          "generating_indicator": "button[aria-label=\"Stop generation\"]",
+          "retry_send_btn": "button[aria-label=\"Rerun stopped messages\"], button[data-slot=\"tooltip-trigger\"]:has(svg path[d*=\"21.8883\"])"
+        },
+        "workflow": [
+          {
+            "action": "CLICK",
+            "target": "retry_send_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "CLICK",
+            "target": "stop_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 0.8
+          },
+          {
+            "action": "FILL_INPUT",
+            "target": "input_box",
+            "optional": false,
+            "value": null
+          },
+          {
+            "action": "CLICK",
+            "target": "send_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "STREAM_WAIT",
+            "target": "result_container",
+            "optional": false,
+            "value": null
+          }
+        ],
+        "stealth": true,
+        "advanced": {
+          "send_confirmation_check_enabled": false,
+          "skip_new_chat_on_retry": false
+        },
+        "stream_config": {
+          "mode": "network",
+          "hard_timeout": 300,
+          "network": {
+            "parser": "lmarena_battle_side_left",
+            "url_pattern": "**/nextjs-api/stream/**",
+            "listen_pattern": "/nextjs-api/stream/",
+            "silence_threshold": 3,
+            "response_interval": 0.5
+          }
+        },
+        "image_extraction": {
+          "enabled": true,
+          "modalities": {
+            "image": {
+              "enabled": true,
+              "run_policy": "on_signal",
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
+            },
+            "audio": {
+              "enabled": false,
+              "run_policy": "disabled",
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
+            },
+            "video": {
+              "enabled": false,
+              "run_policy": "disabled",
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
+            }
+          },
+          "selector": "img",
+          "audio_selector": "audio, audio source",
+          "video_selector": "video, video source",
+          "container_selector": null,
+          "force_postprocess": false,
+          "debounce_seconds": 2,
+          "wait_for_load": true,
+          "load_timeout_seconds": 5,
+          "download_blobs": true,
+          "max_size_mb": 10,
+          "canvas_export_mime": "image/jpeg",
+          "canvas_export_quality": 0.88,
+          "src_allow_patterns": [],
+          "mode": "first",
+          "audio_capture_enabled": true,
+          "audio_capture_mute_playback": true,
+          "audio_capture_preload_enabled": true,
+          "audio_capture_reload_before_workflow": false,
+          "audio_capture_preserve_graph": true,
+          "audio_capture_terminal_settle_seconds": 0.35,
+          "audio_trigger_selector": "",
+          "audio_trigger_labels": [
+            "朗读",
+            "语音朗读",
+            "收听",
+            "read aloud",
+            "listen",
+            "tts",
+            "voice"
+          ],
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
+          "audio_capture_estimated_chars_per_second": 4.8,
+          "audio_capture_wait_padding_seconds": 1.2,
+          "audio_network_capture": {
+            "enabled": false,
+            "timeout_seconds": 2.5,
+            "transport": "page_websocket_probe",
+            "url_patterns": [
+              "voicegenie",
+              "speech",
+              "audio",
+              "tts"
+            ],
+            "extractor": "voicegenie_ogg_pages",
+            "settle_seconds": 0.35,
+            "max_payload_bytes": 10485760
+          },
+          "audio_browser_tts_fallback": {
+            "enabled": false,
+            "provider": "doubao_samantha",
+            "speaker": "2",
+            "speech_rate": 0,
+            "pitch": 0,
+            "format": "aac",
+            "timeout_seconds": 30,
+            "pc_version": "3.20.2",
+            "aid": "497858",
+            "real_aid": "497858",
+            "language": "zh",
+            "device_platform": "web",
+            "pkg_type": "release_version",
+            "region": "CN",
+            "sys_region": "CN",
+            "use_olympus_account": "1",
+            "samantha_web": "1"
+          },
+          "audio_capture_poll_seconds": 0.25,
+          "audio_capture_silence_seconds": 1.2,
+          "audio_capture_activity_threshold": 0.006,
+          "audio_capture_activity_silence_seconds": 0.65
+        },
+        "file_paste": {
+          "enabled": false,
+          "threshold": 50000,
+          "temp_file_type": "txt",
+          "hint_text": "完全专注于文件内容",
+          "reacquire_input_after_upload": false,
+          "post_upload_input_selector": "",
+          "post_upload_settle": 0,
+          "upload_signal_timeout": 2.5,
+          "upload_signal_grace": 3,
+          "state_probe": {
+            "enabled": false,
+            "code": ""
+          },
+          "send_confirmation": {
+            "attachment_sensitivity": "medium",
+            "post_click_observe_window": 1.8,
+            "pre_retry_probe_window": 0.12,
+            "retry_observe_window": 0.9,
+            "attachment_observe_window": 6,
+            "max_retry_count": 2,
+            "retry_interval": 0.6,
+            "retry_cooldown_window": 1.5,
+            "retry_action": "click_send_btn",
+            "retry_key_combo": "Enter",
+            "retry_on_unconfirmed_send": false,
+            "accept_attachment_change": false,
+            "accept_attachment_disappear": false,
+            "accept_probe_confirmation": true,
+            "retry_block_on_stop_button": true,
+            "retry_block_if_generating": true,
+            "trust_network_activity": true,
+            "trust_generating_indicator": true,
+            "trust_send_disabled_with_input_shrink": true
+          }
+        },
+        "prompt_padding": {
+          "enabled": false,
+          "marker_text": "测试号，无实际意义",
+          "segments_per_side": 12
+        }
+      },
+      "Battle-右侧": {
+        "selectors": {
+          "input_box": "textarea[name=\"message\"]",
+          "send_btn": "button[aria-label=\"Stop generation\"], button[aria-label=\"Send message\"][type=\"submit\"]:not(:disabled):not([aria-disabled=\"true\"])",
+          "stop_btn": "button[aria-label=\"Stop generation\"]",
+          "result_container": "main ol > div.w-full:not(.flex) .flex.flex-col.gap-3",
+          "new_chat_btn": "a[href*=\"/text/side-by-side\"], a[data-sidebar=\"menu-button\"][href*=\"side-by-side\"], button[aria-label*=\"side by side\" i]",
+          "message_wrapper": null,
+          "generating_indicator": "button[aria-label=\"Stop generation\"]",
+          "retry_send_btn": "button[aria-label=\"Rerun stopped messages\"], button[data-slot=\"tooltip-trigger\"]:has(svg path[d*=\"21.8883\"])"
+        },
+        "workflow": [
+          {
+            "action": "CLICK",
+            "target": "retry_send_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "CLICK",
+            "target": "stop_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 0.8
+          },
+          {
+            "action": "FILL_INPUT",
+            "target": "input_box",
+            "optional": false,
+            "value": null
+          },
+          {
+            "action": "CLICK",
+            "target": "send_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "STREAM_WAIT",
+            "target": "result_container",
+            "optional": false,
+            "value": null
+          }
+        ],
+        "stealth": true,
+        "advanced": {
+          "send_confirmation_check_enabled": false,
+          "skip_new_chat_on_retry": false
+        },
+        "stream_config": {
+          "mode": "network",
+          "hard_timeout": 300,
+          "network": {
+            "parser": "lmarena_battle_side_right",
+            "url_pattern": "**/nextjs-api/stream/**",
+            "listen_pattern": "/nextjs-api/stream/",
+            "silence_threshold": 3,
+            "response_interval": 0.5
+          }
+        },
+        "image_extraction": {
+          "enabled": true,
+          "modalities": {
+            "image": {
+              "enabled": true,
+              "run_policy": "on_signal",
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
+            },
+            "audio": {
+              "enabled": false,
+              "run_policy": "disabled",
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
+            },
+            "video": {
+              "enabled": false,
+              "run_policy": "disabled",
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
+            }
+          },
+          "selector": "img",
+          "audio_selector": "audio, audio source",
+          "video_selector": "video, video source",
+          "container_selector": null,
+          "force_postprocess": false,
+          "debounce_seconds": 2,
+          "wait_for_load": true,
+          "load_timeout_seconds": 5,
+          "download_blobs": true,
+          "max_size_mb": 10,
+          "canvas_export_mime": "image/jpeg",
+          "canvas_export_quality": 0.88,
+          "src_allow_patterns": [],
+          "mode": "first",
+          "audio_capture_enabled": true,
+          "audio_capture_mute_playback": true,
+          "audio_capture_preload_enabled": true,
+          "audio_capture_reload_before_workflow": false,
+          "audio_capture_preserve_graph": true,
+          "audio_capture_terminal_settle_seconds": 0.35,
+          "audio_trigger_selector": "",
+          "audio_trigger_labels": [
+            "朗读",
+            "语音朗读",
+            "收听",
+            "read aloud",
+            "listen",
+            "tts",
+            "voice"
+          ],
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
+          "audio_capture_estimated_chars_per_second": 4.8,
+          "audio_capture_wait_padding_seconds": 1.2,
+          "audio_network_capture": {
+            "enabled": false,
+            "timeout_seconds": 2.5,
+            "transport": "page_websocket_probe",
+            "url_patterns": [
+              "voicegenie",
+              "speech",
+              "audio",
+              "tts"
+            ],
+            "extractor": "voicegenie_ogg_pages",
+            "settle_seconds": 0.35,
+            "max_payload_bytes": 10485760
+          },
+          "audio_browser_tts_fallback": {
+            "enabled": false,
+            "provider": "doubao_samantha",
+            "speaker": "2",
+            "speech_rate": 0,
+            "pitch": 0,
+            "format": "aac",
+            "timeout_seconds": 30,
+            "pc_version": "3.20.2",
+            "aid": "497858",
+            "real_aid": "497858",
+            "language": "zh",
+            "device_platform": "web",
+            "pkg_type": "release_version",
+            "region": "CN",
+            "sys_region": "CN",
+            "use_olympus_account": "1",
+            "samantha_web": "1"
+          },
+          "audio_capture_poll_seconds": 0.25,
+          "audio_capture_silence_seconds": 1.2,
+          "audio_capture_activity_threshold": 0.006,
+          "audio_capture_activity_silence_seconds": 0.65
+        },
+        "file_paste": {
+          "enabled": false,
+          "threshold": 50000,
+          "temp_file_type": "txt",
+          "hint_text": "完全专注于文件内容",
+          "reacquire_input_after_upload": false,
+          "post_upload_input_selector": "",
+          "post_upload_settle": 0,
+          "upload_signal_timeout": 2.5,
+          "upload_signal_grace": 3,
+          "state_probe": {
+            "enabled": false,
+            "code": ""
+          },
+          "send_confirmation": {
+            "attachment_sensitivity": "medium",
+            "post_click_observe_window": 1.8,
+            "pre_retry_probe_window": 0.12,
+            "retry_observe_window": 0.9,
+            "attachment_observe_window": 6,
+            "max_retry_count": 2,
+            "retry_interval": 0.6,
+            "retry_cooldown_window": 1.5,
+            "retry_action": "click_send_btn",
+            "retry_key_combo": "Enter",
+            "retry_on_unconfirmed_send": false,
+            "accept_attachment_change": false,
+            "accept_attachment_disappear": false,
+            "accept_probe_confirmation": true,
+            "retry_block_on_stop_button": true,
+            "retry_block_if_generating": true,
+            "trust_network_activity": true,
+            "trust_generating_indicator": true,
+            "trust_send_disabled_with_input_shrink": true
+          }
+        },
+        "prompt_padding": {
+          "enabled": false,
+          "marker_text": "测试号，无实际意义",
+          "segments_per_side": 12
+        }
+      },
+      "Battle-赢家优先（非流式）": {
+        "selectors": {
+          "input_box": "textarea[name=\"message\"]",
+          "send_btn": "button[aria-label=\"Stop generation\"], button[aria-label=\"Send message\"][type=\"submit\"]:not(:disabled):not([aria-disabled=\"true\"])",
+          "stop_btn": "button[aria-label=\"Stop generation\"]",
+          "result_container": "main ol > div.w-full:not(.flex) .flex.flex-col.gap-3",
+          "new_chat_btn": "a[href*=\"/text/side-by-side\"], a[data-sidebar=\"menu-button\"][href*=\"side-by-side\"], button[aria-label*=\"side by side\" i]",
+          "message_wrapper": null,
+          "generating_indicator": "button[aria-label=\"Stop generation\"]",
+          "retry_send_btn": "button[aria-label=\"Rerun stopped messages\"], button[data-slot=\"tooltip-trigger\"]:has(svg path[d*=\"21.8883\"])"
+        },
+        "workflow": [
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 2
+          },
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 0.5
+          },
+          {
+            "action": "CLICK",
+            "target": "retry_send_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "CLICK",
+            "target": "stop_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 0.8
+          },
+          {
+            "action": "FILL_INPUT",
+            "target": "input_box",
+            "optional": false,
+            "value": null
+          },
+          {
+            "action": "CLICK",
+            "target": "send_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "STREAM_WAIT",
+            "target": "result_container",
+            "optional": false,
+            "value": null
+          }
+        ],
+        "stealth": true,
+        "advanced": {
+          "send_confirmation_check_enabled": false,
+          "skip_new_chat_on_retry": false
+        },
+        "stream_config": {
+          "mode": "network",
+          "hard_timeout": 300,
+          "network": {
+            "parser": "lmarena_battle_winner",
+            "url_pattern": "**/nextjs-api/stream/**",
+            "listen_pattern": "/nextjs-api/stream/",
+            "silence_threshold": 3,
+            "response_interval": 0.5
+          }
+        },
+        "image_extraction": {
+          "enabled": true,
+          "modalities": {
+            "image": {
+              "enabled": true,
+              "run_policy": "on_signal",
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 45,
+              "blind_wait_timeout_seconds": 1
+            },
+            "audio": {
+              "enabled": false,
+              "run_policy": "disabled",
+              "quick_probe_timeout_seconds": 1,
+              "capture_timeout_seconds": 12
+            },
+            "video": {
+              "enabled": false,
+              "run_policy": "disabled",
+              "quick_probe_timeout_seconds": 1,
+              "late_wait_timeout_seconds": 90
+            }
+          },
+          "selector": "img",
+          "audio_selector": "audio, audio source",
+          "video_selector": "video, video source",
+          "container_selector": null,
+          "force_postprocess": false,
+          "debounce_seconds": 2,
+          "wait_for_load": true,
+          "load_timeout_seconds": 5,
+          "download_blobs": true,
+          "max_size_mb": 10,
+          "canvas_export_mime": "image/jpeg",
+          "canvas_export_quality": 0.88,
+          "src_allow_patterns": [],
+          "mode": "first",
+          "audio_capture_enabled": true,
+          "audio_capture_mute_playback": true,
+          "audio_capture_preload_enabled": true,
+          "audio_capture_reload_before_workflow": false,
+          "audio_capture_preserve_graph": true,
+          "audio_capture_terminal_settle_seconds": 0.35,
+          "audio_trigger_selector": "",
+          "audio_trigger_labels": [
+            "朗读",
+            "语音朗读",
+            "收听",
+            "read aloud",
+            "listen",
+            "tts",
+            "voice"
+          ],
+          "audio_capture_max_wait_seconds": 12,
+          "audio_capture_min_wait_seconds": 2,
+          "audio_capture_hard_max_wait_seconds": 45,
+          "audio_capture_estimated_chars_per_second": 4.8,
+          "audio_capture_wait_padding_seconds": 1.2,
+          "audio_network_capture": {
+            "enabled": false,
+            "timeout_seconds": 2.5,
+            "transport": "page_websocket_probe",
+            "url_patterns": [
+              "voicegenie",
+              "speech",
+              "audio",
+              "tts"
+            ],
+            "extractor": "voicegenie_ogg_pages",
+            "settle_seconds": 0.35,
+            "max_payload_bytes": 10485760
+          },
+          "audio_browser_tts_fallback": {
+            "enabled": false,
+            "provider": "doubao_samantha",
+            "speaker": "2",
+            "speech_rate": 0,
+            "pitch": 0,
+            "format": "aac",
+            "timeout_seconds": 30,
+            "pc_version": "3.20.2",
+            "aid": "497858",
+            "real_aid": "497858",
+            "language": "zh",
+            "device_platform": "web",
+            "pkg_type": "release_version",
+            "region": "CN",
+            "sys_region": "CN",
+            "use_olympus_account": "1",
+            "samantha_web": "1"
+          },
+          "audio_capture_poll_seconds": 0.25,
+          "audio_capture_silence_seconds": 1.2,
+          "audio_capture_activity_threshold": 0.006,
+          "audio_capture_activity_silence_seconds": 0.65
+        },
+        "file_paste": {
+          "enabled": false,
+          "threshold": 50000,
+          "temp_file_type": "txt",
+          "hint_text": "完全专注于文件内容",
+          "reacquire_input_after_upload": false,
+          "post_upload_input_selector": "",
+          "post_upload_settle": 0,
+          "upload_signal_timeout": 2.5,
+          "upload_signal_grace": 3,
+          "state_probe": {
+            "enabled": false,
+            "code": ""
+          },
+          "send_confirmation": {
+            "attachment_sensitivity": "medium",
+            "post_click_observe_window": 1.8,
+            "pre_retry_probe_window": 0.12,
+            "retry_observe_window": 0.9,
+            "attachment_observe_window": 6,
+            "max_retry_count": 2,
+            "retry_interval": 0.6,
+            "retry_cooldown_window": 1.5,
+            "retry_action": "click_send_btn",
+            "retry_key_combo": "Enter",
+            "retry_on_unconfirmed_send": false,
+            "accept_attachment_change": false,
+            "accept_attachment_disappear": false,
+            "accept_probe_confirmation": true,
+            "retry_block_on_stop_button": true,
+            "retry_block_if_generating": true,
+            "trust_network_activity": true,
+            "trust_generating_indicator": true,
+            "trust_send_disabled_with_input_shrink": true
           }
         },
         "prompt_padding": {
@@ -4019,6 +4671,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 40000,
+          "temp_file_type": "txt",
           "hint_text": "继续",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -4258,6 +4911,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 40000,
+          "temp_file_type": "txt",
           "hint_text": "继续",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -4508,6 +5162,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 40000,
+          "temp_file_type": "txt",
           "hint_text": "文件内容为需要回复的上下文，按上下文回复",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -4744,6 +5399,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -4925,6 +5581,7 @@
         "file_paste": {
           "enabled": true,
           "threshold": 20000,
+          "temp_file_type": "txt",
           "hint_text": "文件内容为需要回复的上下文，按上下文回复",
           "reacquire_input_after_upload": true,
           "post_upload_input_selector": ".input-box-inner textarea",
@@ -5168,6 +5825,7 @@
         "file_paste": {
           "enabled": false,
           "threshold": 50000,
+          "temp_file_type": "txt",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",

@@ -19,8 +19,14 @@ import math
 import mimetypes
 import pyperclip
 from app.core.config import logger, BrowserConstants, WorkflowError
+from app.core.elements import ElementFinder
 from app.core.tab_pool import get_clipboard_lock
-from app.utils.file_paste import create_temp_txt, copy_file_to_clipboard
+from app.utils.file_paste import (
+    DEFAULT_TEMP_FILE_TYPE,
+    create_temp_file,
+    copy_file_to_clipboard,
+    normalize_temp_file_type,
+)
 from app.utils.human_mouse import smooth_move_mouse
 from app.utils.platform import get_primary_modifier_key
 
@@ -1294,6 +1300,27 @@ class TextInputHandler:
         value = self._selectors.get(key)
         return str(value).strip() if value else ""
 
+    def _to_query_selector(self, selector: str) -> str:
+        """Return the first querySelector-compatible CSS candidate."""
+        value = str(selector or "").strip()
+        if not value:
+            return ""
+
+        groups = ElementFinder._split_css_selector_groups(value)
+        if len(groups) > 1:
+            for group in groups:
+                css_group = self._to_query_selector(group)
+                if css_group:
+                    return css_group
+            return ""
+
+        lowered = value.lower()
+        if lowered.startswith("css:"):
+            return value[4:].strip()
+        if lowered.startswith(("xpath:", "tag:")) or value.startswith("@") or "@@" in value:
+            return ""
+        return value
+
     def _normalize_selector(self, selector: str) -> str:
         """统一补全选择器语法，默认按 CSS 处理。"""
         selector = (selector or "").strip()
@@ -1378,7 +1405,10 @@ class TextInputHandler:
         stem = os.path.splitext(filename)[0].strip()
         needles = [item.lower() for item in (filename, stem) if item]
         expected_names_js = json.dumps(needles, ensure_ascii=False)
-        send_selector_js = json.dumps(self._get_selector_value("send_btn"), ensure_ascii=False)
+        send_selector_js = json.dumps(
+            self._to_query_selector(self._get_selector_value("send_btn")),
+            ensure_ascii=False,
+        )
         configured_upload_signal_selectors = self._file_paste_config.get("upload_signal_selectors") or []
         if not isinstance(configured_upload_signal_selectors, list):
             configured_upload_signal_selectors = [configured_upload_signal_selectors]
@@ -1987,6 +2017,11 @@ class TextInputHandler:
         threshold = self._file_paste_config.get("threshold", 50000)
         return len(text) > threshold
 
+    def _get_file_paste_temp_file_type(self) -> str:
+        return normalize_temp_file_type(
+            self._file_paste_config.get("temp_file_type", DEFAULT_TEMP_FILE_TYPE)
+        )
+
     def _cleanup_file_paste_temp_file(self, filepath: str, *, keep_for_browser: bool) -> None:
         if not filepath or not os.path.exists(filepath):
             return
@@ -2013,18 +2048,20 @@ class TextInputHandler:
 
     def _fill_via_file_paste(self, ele, text: str) -> bool:
         """
-        Upload large text by turning it into a temporary txt attachment.
+        Upload large text by turning it into a temporary attachment.
 
         Flow:
-        1. Create a temporary txt file with the prompt content.
+        1. Create a temporary txt/pdf file with the prompt content.
         2. Prefer site-native upload entry points and file inputs.
         3. Only fall back to clipboard file paste when there was no ambiguous upload activity.
         """
         from app.core.tab_pool import get_clipboard_lock
 
         threshold = self._file_paste_config.get("threshold", 50000)
+        temp_file_type = self._get_file_paste_temp_file_type()
         logger.info(
-            f"[FILE_PASTE] text length {len(text)} exceeds threshold {threshold}, using file-paste mode"
+            f"[FILE_PASTE] text length {len(text)} exceeds threshold {threshold}, "
+            f"using file-paste mode (type={temp_file_type})"
         )
 
         clipboard_lock = get_clipboard_lock()
@@ -2060,9 +2097,9 @@ class TextInputHandler:
             if self._check_cancelled():
                 return False
 
-            filepath = create_temp_txt(text)
+            filepath = create_temp_file(text, file_type=temp_file_type)
             if not filepath:
-                logger.error("[FILE_PASTE] failed to create temp file")
+                logger.error(f"[FILE_PASTE] failed to create temp {temp_file_type} file")
                 return False
 
             logger.debug(f"[FILE_PASTE] temp file: temp/{os.path.basename(filepath)}")

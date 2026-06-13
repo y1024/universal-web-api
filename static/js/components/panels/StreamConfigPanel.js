@@ -101,6 +101,36 @@ window.StreamConfigPanel = {
             };
         },
 
+        sendConfirmationConfig() {
+            const defaults = {
+                max_retry_count: 2,
+                retry_interval: 0.6,
+                retry_cooldown_window: 1.5,
+                post_click_observe_window: 1.8,
+                pre_retry_probe_window: 0.12,
+                retry_observe_window: 0.9,
+                retry_action: 'click_send_btn',
+                retry_key_combo: 'Enter',
+                retry_on_unconfirmed_send: true,
+                retry_block_on_stop_button: true,
+                retry_block_if_generating: true,
+                trust_network_activity: true,
+                trust_generating_indicator: true,
+                trust_send_disabled_with_input_shrink: true
+            };
+            return {
+                ...defaults,
+                ...((this.streamConfig && this.streamConfig.send_confirmation) || {})
+            };
+        },
+
+        sendConfirmationSummary() {
+            if (!this.sendConfirmationConfig.retry_on_unconfirmed_send || Number(this.sendConfirmationConfig.max_retry_count) <= 0) {
+                return '不自动补点';
+            }
+            return '最多重试 ' + Number(this.sendConfirmationConfig.max_retry_count || 0) + ' 次';
+        },
+
         selectedParserMeta() {
             return this.findParserMeta(this.networkConfig.parser);
         },
@@ -197,6 +227,15 @@ window.StreamConfigPanel = {
         updateNetworkField(field, value) {
             const network = { ...this.networkConfig, [field]: value };
             const newConfig = { ...this.streamConfig, network };
+            this.$emit('save-stream-config', newConfig);
+        },
+
+        updateSendConfirmationField(field, value) {
+            const send_confirmation = {
+                ...this.sendConfirmationConfig,
+                [field]: value
+            };
+            const newConfig = { ...this.streamConfig, send_confirmation };
             this.$emit('save-stream-config', newConfig);
         },
 
@@ -573,6 +612,93 @@ window.StreamConfigPanel = {
                                        min="0.1" max="5" step="0.1" class="flex-1 border dark:border-gray-600 px-3 py-2 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-purple-400 focus:border-transparent">
                                 <span class="text-sm text-gray-500 dark:text-gray-400">秒</span>
                             </div>
+                        </div>
+                    </div>
+
+                    <div class="rounded-xl border border-amber-200/80 dark:border-amber-800/70 bg-amber-50/70 dark:bg-amber-900/20 p-4">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <div class="text-sm font-medium text-gray-800 dark:text-gray-100">发送确认与重试</div>
+                                <p class="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-300">
+                                    控制点击 <code>send_btn</code> 后，如果没有马上观察到输入框清空、网络活动或生成态，是否自动再点一次。Battle 模式里通常应关闭自动重试，避免第二次点击方形按钮变成中断输出。
+                                </p>
+                            </div>
+                            <span class="px-2 py-0.5 text-xs rounded-full bg-white/80 dark:bg-gray-800/80 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-700">
+                                {{ sendConfirmationSummary }}
+                            </span>
+                        </div>
+
+                        <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">首次点击观察窗</label>
+                                <div class="flex items-center gap-2">
+                                    <input type="number"
+                                           :value="sendConfirmationConfig.post_click_observe_window"
+                                           @input="updateSendConfirmationField('post_click_observe_window', parseFloat($event.target.value) || 0)"
+                                           min="0"
+                                           max="15"
+                                           step="0.1"
+                                           class="flex-1 border dark:border-gray-600 px-3 py-2 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-amber-400 focus:border-transparent">
+                                    <span class="text-sm text-gray-500 dark:text-gray-400">秒</span>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">最大重试次数</label>
+                                <div class="flex items-center gap-2">
+                                    <input type="number"
+                                           :value="sendConfirmationConfig.max_retry_count"
+                                           @input="updateSendConfirmationField('max_retry_count', parseInt($event.target.value) || 0)"
+                                           min="0"
+                                           max="10"
+                                           step="1"
+                                           class="flex-1 border dark:border-gray-600 px-3 py-2 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-amber-400 focus:border-transparent">
+                                    <span class="text-sm text-gray-500 dark:text-gray-400">次</span>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">重试间隔</label>
+                                <div class="flex items-center gap-2">
+                                    <input type="number"
+                                           :value="sendConfirmationConfig.retry_interval"
+                                           @input="updateSendConfirmationField('retry_interval', parseFloat($event.target.value) || 0)"
+                                           min="0"
+                                           max="30"
+                                           step="0.1"
+                                           class="flex-1 border dark:border-gray-600 px-3 py-2 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-amber-400 focus:border-transparent">
+                                    <span class="text-sm text-gray-500 dark:text-gray-400">秒</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <label class="flex items-center gap-3 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                                <input type="checkbox"
+                                       class="rounded"
+                                       :checked="sendConfirmationConfig.retry_on_unconfirmed_send"
+                                       @change="updateSendConfirmationField('retry_on_unconfirmed_send', $event.target.checked)">
+                                <span>发送未确认时允许自动重试</span>
+                            </label>
+                            <label class="flex items-center gap-3 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                                <input type="checkbox"
+                                       class="rounded"
+                                       :checked="sendConfirmationConfig.retry_block_on_stop_button"
+                                       @change="updateSendConfirmationField('retry_block_on_stop_button', $event.target.checked)">
+                                <span>发送按钮变成 stop 时禁止重试</span>
+                            </label>
+                            <label class="flex items-center gap-3 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                                <input type="checkbox"
+                                       class="rounded"
+                                       :checked="sendConfirmationConfig.retry_block_if_generating"
+                                       @change="updateSendConfirmationField('retry_block_if_generating', $event.target.checked)">
+                                <span>页面进入生成态时禁止重试</span>
+                            </label>
+                            <label class="flex items-center gap-3 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                                <input type="checkbox"
+                                       class="rounded"
+                                       :checked="sendConfirmationConfig.trust_generating_indicator"
+                                       @change="updateSendConfirmationField('trust_generating_indicator', $event.target.checked)">
+                                <span>生成态可作为发送成功信号</span>
+                            </label>
                         </div>
                     </div>
 

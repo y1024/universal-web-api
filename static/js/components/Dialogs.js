@@ -137,6 +137,27 @@ window.StepTemplatesDialog = {
                             填入 → 回车 → 流式监听
                         </div>
                     </button>
+                    <button @click="$emit('apply', 'battle_winner')"
+                            class="w-full text-left p-3 border dark:border-gray-700 rounded hover:border-amber-400 dark:hover:border-amber-500 transition-colors">
+                        <div class="font-semibold text-sm dark:text-white">Battle 赢家优先</div>
+                        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                            填入 → 点圆形重试 → 点方形发送 → 等待两侧结束，输出先完成的一侧
+                        </div>
+                    </button>
+                    <button @click="$emit('apply', 'battle_left')"
+                            class="w-full text-left p-3 border dark:border-gray-700 rounded hover:border-amber-400 dark:hover:border-amber-500 transition-colors">
+                        <div class="font-semibold text-sm dark:text-white">Battle 左侧</div>
+                        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                            填入 → 点圆形重试 → 点方形发送 → 流式输出左侧，等待两侧结束
+                        </div>
+                    </button>
+                    <button @click="$emit('apply', 'battle_right')"
+                            class="w-full text-left p-3 border dark:border-gray-700 rounded hover:border-amber-400 dark:hover:border-amber-500 transition-colors">
+                        <div class="font-semibold text-sm dark:text-white">Battle 右侧</div>
+                        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                            填入 → 点圆形重试 → 点方形发送 → 流式输出右侧，等待两侧结束
+                        </div>
+                    </button>
                 </div>
                 <div class="flex justify-end">
                     <button @click="$emit('close')" 

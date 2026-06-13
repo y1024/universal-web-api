@@ -1,5 +1,3 @@
 {
-  "default_presets": {
-    "chat.deepseek.com": "快速模式"
-  }
+  "default_presets": {}
 }

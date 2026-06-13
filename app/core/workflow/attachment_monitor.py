@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable, Dict, Iterable, Optional
 
 from app.core.config import BrowserConstants, logger
+from app.core.elements import ElementFinder
 
 
 _ATTACHMENT_MONITOR_BOOTSTRAP_JS = r"""
@@ -659,6 +660,27 @@ class AttachmentMonitor:
         value = self._selectors.get(key)
         return str(value).strip() if value else ""
 
+    @staticmethod
+    def _to_query_selector(selector: Any) -> str:
+        value = str(selector or "").strip()
+        if not value:
+            return ""
+
+        groups = ElementFinder._split_css_selector_groups(value)
+        if len(groups) > 1:
+            for group in groups:
+                css_group = AttachmentMonitor._to_query_selector(group)
+                if css_group:
+                    return css_group
+            return ""
+
+        lowered = value.lower()
+        if lowered.startswith("css:"):
+            return value[4:].strip()
+        if lowered.startswith(("xpath:", "tag:")) or value.startswith("@") or "@@" in value:
+            return ""
+        return value
+
     def _config_list(self, key: str):
         raw_value = self._config.get(key) if isinstance(self._config, dict) else None
         if not isinstance(raw_value, list):
@@ -721,7 +743,7 @@ class AttachmentMonitor:
                 names.append(value)
         return {
             "inputSelector": self._selector_value("input_box"),
-            "sendSelector": self._selector_value("send_btn"),
+            "sendSelector": self._to_query_selector(self._selector_value("send_btn")),
             "expectedNames": names,
             "rootSelectors": self._config_list("root_selectors"),
             "useDefaultAttachmentSelectors": self._config_flag("use_default_attachment_selectors", True),

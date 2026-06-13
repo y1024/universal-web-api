@@ -189,7 +189,7 @@
         },
         {
           "type": "wait",
-          "seconds": 1,
+          "seconds": 3,
           "action_id": "step_2_wait"
         },
         {

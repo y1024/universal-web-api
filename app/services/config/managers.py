@@ -134,6 +134,7 @@ class GlobalConfigManager:
             "send_btn": 'button[type="submit"]',
             "result_container": "div",
             "new_chat_btn": None,
+            "retry_send_btn": None,
             "message_wrapper": None,
             "generating_indicator": None,
             "upload_btn": None,

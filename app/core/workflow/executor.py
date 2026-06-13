@@ -214,6 +214,134 @@ class WorkflowExecutor(
         if self.stealth_mode:
             logger.debug("[STEALTH] 低熵模式已启用")
 
+    def rebuild_network_listener_after_external_interruption(self, reason: str = "external_interrupt") -> None:
+        monitor = getattr(self, "_network_monitor", None)
+        if monitor is None:
+            return
+        try:
+            if hasattr(monitor, "rebuild_after_external_interruption"):
+                monitor.rebuild_after_external_interruption(reason)
+            else:
+                monitor.pre_start()
+                monitor.mark_send_attempt()
+            logger.debug(f"[Executor] 外部中断后已重建网络监听: {reason}")
+        except Exception as e:
+            logger.debug(f"[Executor] 外部中断后重建网络监听失败（忽略）: {e}")
+
+    def page_looks_generating(self, send_selector: str = "") -> bool:
+        try:
+            state = self._probe_send_post_click_state(send_selector)
+        except Exception:
+            state = {}
+        return self._is_send_post_click_confirmed(state)
+
+    @staticmethod
+    def _is_rate_limit_terminal_error(error: Any) -> bool:
+        detail = str(error or "").strip().lower()
+        return "429" in detail or "too many requests" in detail or "rate limit" in detail
+
+    def _page_has_security_verification(self) -> bool:
+        script = r"""
+        return (function() {
+            try {
+                function visible(el) {
+                    if (!el) return false;
+                    var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+                    if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+                    if (style && Number(style.opacity || 1) <= 0.02) return false;
+                    var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+                    return !rect || (rect.width > 5 && rect.height > 5);
+                }
+                var text = String((document.body && document.body.innerText) || '').toLowerCase();
+                var textHit = text.indexOf('security verification') !== -1
+                    || text.indexOf('protected by recaptcha') !== -1
+                    || text.indexOf('verify you are human') !== -1
+                    || text.indexOf('checking your browser') !== -1
+                    || text.indexOf('人机身份验证') !== -1
+                    || text.indexOf('确认您是真人') !== -1;
+                if (textHit) return true;
+                var selectors = [
+                    'iframe[src*="recaptcha"]',
+                    'iframe[src*="google.com/recaptcha"]',
+                    'iframe[src*="challenges.cloudflare.com"]',
+                    'iframe[src*="turnstile"]',
+                    '.g-recaptcha',
+                    '.cf-turnstile',
+                    '[name="g-recaptcha-response"]',
+                    '[name="cf-turnstile-response"]',
+                    '[title*="recaptcha" i]',
+                    '[aria-label*="recaptcha" i]'
+                ];
+                for (var i = 0; i < selectors.length; i++) {
+                    try {
+                        var nodes = document.querySelectorAll(selectors[i]);
+                        for (var j = 0; j < nodes.length; j++) {
+                            if (visible(nodes[j])) return true;
+                        }
+                    } catch (e) {}
+                }
+                return false;
+            } catch (e) {
+                return false;
+            }
+        })();
+        """
+        try:
+            return bool(self.tab.run_js(script))
+        except Exception as e:
+            logger.debug(f"[Executor] 验证页面探测失败（忽略）: {e}")
+            return False
+
+    def _wait_for_verification_interrupt_after_rate_limit(self, error: Any) -> bool:
+        if self.session is None or not self._is_rate_limit_terminal_error(error):
+            return False
+
+        try:
+            wait_seconds = float(
+                (self._stream_config or {}).get("verification_recovery_wait_seconds", 6.0)
+            )
+        except Exception:
+            wait_seconds = 6.0
+        wait_seconds = min(15.0, max(0.5, wait_seconds))
+        deadline = time.time() + wait_seconds
+        saw_verification = False
+        trigger_check_requested = False
+
+        while time.time() < deadline:
+            try:
+                from app.services.command_engine import command_engine
+                if command_engine.workflow_interrupt_requested(self.session):
+                    setattr(self.session, "_workflow_stop_reason", "command_interrupt")
+                    setattr(self.session, "_workflow_retry_current_stream_step", True)
+                    logger.warning(
+                        "[Executor] 429 后检测到验证码命令已接管，暂停当前监听等待恢复"
+                    )
+                    return True
+            except Exception:
+                pass
+
+            if self._check_cancelled():
+                return False
+
+            if not saw_verification and self._page_has_security_verification():
+                saw_verification = True
+                logger.warning(
+                    "[Executor] 目标流返回 429，但页面处于人机验证态，等待验证命令接管"
+                )
+
+            if saw_verification and not trigger_check_requested:
+                trigger_check_requested = True
+                try:
+                    from app.services.command_engine import command_engine
+                    if not command_engine.check_workflow_triggers_now(self.session):
+                        command_engine.submit_background_task(command_engine.check_triggers, self.session)
+                except Exception as e:
+                    logger.debug(f"[Executor] 主动触发验证码命令检查失败（忽略）: {e}")
+
+            time.sleep(0.2 if saw_verification else 0.1)
+
+        return False
+
     def cleanup_after_workflow(self) -> None:
         """Release page-side helpers installed for this executor."""
         try:
@@ -664,6 +792,8 @@ class WorkflowExecutor(
                         raise WorkflowError("network_intercepted")
 
                     except NetworkMonitorTerminalError as e:
+                        if self._wait_for_verification_interrupt_after_rate_limit(e):
+                            return
                         logger.error(f"[Executor] 目标流已确认失败，终止工作流: {e}")
                         raise WorkflowError(f"stream_terminal_error:{e}")
                     

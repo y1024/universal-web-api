@@ -578,6 +578,21 @@ class NetworkMonitor:
             f"queued={snapshot['queued_packets']})"
         )
 
+    def rebuild_after_external_interruption(self, reason: str = "external_interrupt") -> None:
+        """Restart listening after a command/captcha interruption may have replayed the request."""
+        if not self._listen_pattern:
+            return
+        self._send_attempt_baseline_targets = 0
+        self._send_attempt_baseline_requests = 0
+        self._send_attempt_marked_at = 0.0
+        self._is_listening = False
+        self._pre_started = False
+        self._safe_stop_listen()
+        self._force_reset_listen_state()
+        self._start_listen()
+        logger.debug(f"[NetworkMonitor] 已重建监听 ({reason or 'external_interrupt'})")
+        self.mark_send_attempt()
+
     def poll_send_activity(self, timeout: float = 0.25) -> Dict[str, Any]:
         """
         发送后短窗口里轻量探测一次网络活动。

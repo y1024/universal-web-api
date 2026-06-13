@@ -9,6 +9,7 @@ import time
 from typing import Any, Dict, Optional
 
 from app.core.config import BrowserConstants, WorkflowError, logger
+from app.core.elements import ElementFinder
 from .attachment_monitor import AttachmentMonitor
 
 
@@ -621,6 +622,14 @@ class WorkflowExecutorSendMixin:
         """Convert a configured selector into querySelector-compatible CSS when possible."""
         value = str(selector or "").strip()
         if not value:
+            return ""
+
+        groups = ElementFinder._split_css_selector_groups(value)
+        if len(groups) > 1:
+            for group in groups:
+                css_group = WorkflowExecutorSendMixin._to_query_selector(group)
+                if css_group:
+                    return css_group
             return ""
 
         lowered = value.lower()
