@@ -21,6 +21,8 @@ WORKER_QUEUE_FINAL_GRACE_SEC = 5.0
 WORKER_QUEUE_MAX_PUT_BLOCK_SEC = 0.1
 WORKER_QUEUE_CANCEL_PUT_BLOCK_SEC = 0.01
 WORKER_QUEUE_WAIT_BACKOFF_FACTOR = 1.8
+COMPLETED_WORKER_FAST_JOIN_SEC = 0.5
+COMPLETED_WORKER_RETIRE_GRACE_SEC = 30.0
 
 
 class TrackedWorkerExecutionCancelled(Exception):
@@ -403,7 +405,15 @@ def retire_bound_tab_after_worker_leak(ctx: RequestContext, reason: str) -> None
             except Exception as e:
                 logger.debug(f"[{tab_id}] stop leaked tab global monitor failed: {e}")
 
-        close_submitted = _submit_raw_tab_close(pool, tab_id, raw_tab_id, context_id, reason)
+        preserve_error_tabs = bool(getattr(pool, "preserve_error_tabs", False)) if pool is not None else False
+        if preserve_error_tabs:
+            close_submitted = False
+            logger.warning(
+                f"[{tab_id}] leaked worker tab close skipped by config "
+                f"(reason={reason}, raw={raw_tab_id or '-'}, preserve_error_tabs=True)"
+            )
+        else:
+            close_submitted = _submit_raw_tab_close(pool, tab_id, raw_tab_id, context_id, reason)
 
         if pool is not None and hasattr(pool, "_condition"):
             try:
@@ -415,7 +425,7 @@ def retire_bound_tab_after_worker_leak(ctx: RequestContext, reason: str) -> None
         logger.warning(
             f"[{tab_id}] worker did not exit in time; marked tab ERROR "
             f"(request={ctx.request_id}, reason={reason}, raw={raw_tab_id or '-'}, "
-            f"close_submitted={close_submitted})"
+            f"close_submitted={close_submitted}, preserve_error_tabs={preserve_error_tabs})"
         )
     except Exception as e:
         logger.debug(f"retire leaked worker tab failed: {e}")
@@ -435,6 +445,94 @@ def cleanup_worker_thread(
 
     ctx.request_cancel(cancel_reason)
     worker_thread.join(timeout=max(0.0, float(join_timeout or 0.0)))
+    if worker_thread.is_alive():
+        retire_bound_tab_after_worker_leak(ctx, retire_reason)
+        return True
+    return False
+
+
+def schedule_completed_worker_retire_check(
+    worker_thread: threading.Thread,
+    ctx: RequestContext,
+    reason: str,
+    *,
+    delay_sec: float = COMPLETED_WORKER_RETIRE_GRACE_SEC,
+) -> None:
+    """Watch a completed request's slow worker cleanup without blocking response finalization."""
+    try:
+        delay = max(0.1, float(delay_sec or COMPLETED_WORKER_RETIRE_GRACE_SEC))
+    except Exception:
+        delay = COMPLETED_WORKER_RETIRE_GRACE_SEC
+
+    def _wait_and_retire_if_still_alive() -> None:
+        started_at = time.monotonic()
+        worker_thread.join(timeout=delay)
+        elapsed = time.monotonic() - started_at
+        if worker_thread.is_alive():
+            logger.warning(
+                f"[{ctx.request_id}] completed request worker still alive after cleanup grace; "
+                f"retiring bound tab (tab={ctx.tab_id or '-'}, reason={reason}, "
+                f"grace={delay:.1f}s)"
+            )
+            retire_bound_tab_after_worker_leak(ctx, reason)
+            return
+        logger.debug(
+            f"[{ctx.request_id}] completed request worker cleanup finished in background "
+            f"(elapsed={elapsed:.2f}s, tab={ctx.tab_id or '-'})"
+        )
+
+    threading.Thread(
+        target=_wait_and_retire_if_still_alive,
+        daemon=True,
+        name=f"completed-worker-cleanup-{ctx.request_id[:8]}",
+    ).start()
+
+
+async def cleanup_worker_thread_after_request(
+    worker_thread: Optional[threading.Thread],
+    ctx: RequestContext,
+    *,
+    completed: bool = False,
+    cancel_reason: str = "cleanup",
+    join_timeout: float = 5.0,
+    retire_reason: str = "worker_cleanup_timeout",
+    completed_join_timeout: float = COMPLETED_WORKER_FAST_JOIN_SEC,
+    completed_retire_delay: float = COMPLETED_WORKER_RETIRE_GRACE_SEC,
+) -> bool:
+    """Cleanup a request worker, deferring leak retirement for already-completed requests.
+
+    Returns True when the worker was still alive after the immediate cleanup window.
+    """
+    if not isinstance(worker_thread, threading.Thread) or not worker_thread.is_alive():
+        return False
+
+    if completed:
+        try:
+            fast_join = max(0.0, float(completed_join_timeout or 0.0))
+        except Exception:
+            fast_join = COMPLETED_WORKER_FAST_JOIN_SEC
+        await asyncio.to_thread(worker_thread.join, timeout=fast_join)
+        if worker_thread.is_alive():
+            logger.warning(
+                f"[{ctx.request_id}] completed request worker cleanup is still running; "
+                f"defer tab retirement check (tab={ctx.tab_id or '-'}, "
+                f"fast_join={fast_join:.1f}s, grace={completed_retire_delay:.1f}s)"
+            )
+            schedule_completed_worker_retire_check(
+                worker_thread,
+                ctx,
+                retire_reason,
+                delay_sec=completed_retire_delay,
+            )
+            return True
+        return False
+
+    ctx.request_cancel(cancel_reason)
+    try:
+        timeout = max(0.0, float(join_timeout or 0.0))
+    except Exception:
+        timeout = 5.0
+    await asyncio.to_thread(worker_thread.join, timeout=timeout)
     if worker_thread.is_alive():
         retire_bound_tab_after_worker_leak(ctx, retire_reason)
         return True

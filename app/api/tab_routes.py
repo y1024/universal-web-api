@@ -34,10 +34,10 @@ from app.services.request_manager import (
 )
 from app.services.request_lifecycle import (
     TrackedWorkerExecutionCancelled,
+    cleanup_worker_thread_after_request,
     get_max_request_execute_time_sec,
     mark_request_hard_timeout,
     put_worker_queue_item,
-    retire_bound_tab_after_worker_leak,
     run_tracked_blocking_call,
     wait_worker_queue_item,
 )
@@ -192,25 +192,6 @@ _route_round_robin_lock = threading.Lock()
 _browser_config_lock = threading.RLock()
 
 
-def _schedule_route_worker_delayed_retire(
-    worker_thread: threading.Thread,
-    ctx: RequestContext,
-    reason: str,
-    *,
-    delay_sec: float = 5.0,
-) -> None:
-    def _wait_and_retire() -> None:
-        worker_thread.join(timeout=max(0.1, float(delay_sec or 0.1)))
-        if worker_thread.is_alive():
-            retire_bound_tab_after_worker_leak(ctx, reason)
-
-    threading.Thread(
-        target=_wait_and_retire,
-        daemon=True,
-        name=f"route-worker-retire-{ctx.request_id[:8]}",
-    ).start()
-
-
 async def _cleanup_route_worker_thread(
     worker_thread: Optional[threading.Thread],
     ctx: RequestContext,
@@ -224,25 +205,30 @@ async def _cleanup_route_worker_thread(
     if fast_returned_on_audio:
         ctx.mark_worker_stop_requested("audio_media_fast_return")
         ctx.mark_completed()
-        join_timeout = 0.2
-        retire_reason = "worker_audio_fast_return_timeout"
-    elif done_emitted:
-        ctx.request_cancel("stream_done")
-        join_timeout = 0.2
-        retire_reason = "worker_cleanup_timeout"
+        return await cleanup_worker_thread_after_request(
+            worker_thread,
+            ctx,
+            completed=True,
+            retire_reason="worker_audio_fast_return_timeout",
+            completed_join_timeout=0.2,
+        )
+    elif ctx.status == RequestStatus.COMPLETED:
+        return await cleanup_worker_thread_after_request(
+            worker_thread,
+            ctx,
+            completed=True,
+            retire_reason="worker_cleanup_timeout",
+            completed_join_timeout=0.2,
+        )
     else:
-        ctx.request_cancel("cleanup")
-        join_timeout = 5.0
-        retire_reason = "worker_cleanup_timeout"
-
-    await asyncio.to_thread(worker_thread.join, timeout=join_timeout)
-    if worker_thread.is_alive():
-        if fast_returned_on_audio:
-            _schedule_route_worker_delayed_retire(worker_thread, ctx, retire_reason)
-            return True
-        retire_bound_tab_after_worker_leak(ctx, retire_reason)
-        return True
-    return False
+        return await cleanup_worker_thread_after_request(
+            worker_thread,
+            ctx,
+            completed=False,
+            cancel_reason="cleanup",
+            join_timeout=5.0,
+            retire_reason="worker_cleanup_timeout",
+        )
 
 
 def _put_route_worker_queue_item(
@@ -546,6 +532,14 @@ def _normalize_excluded_urls(value: Any) -> List[str]:
     return normalized
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _get_enabled_route_methods_from_config(config: Optional[Dict[str, Any]] = None) -> List[str]:
     payload = config if isinstance(config, dict) else _read_browser_config()
     tab_pool_config = payload.get("tab_pool") if isinstance(payload, dict) else {}
@@ -570,6 +564,24 @@ def _get_tab_pool_excluded_urls(tab_pool: Any, config: Optional[Dict[str, Any]] 
     except Exception:
         pass
     return _get_excluded_urls_from_config(config)
+
+
+def _get_preserve_error_tabs_from_config(config: Optional[Dict[str, Any]] = None) -> bool:
+    payload = config if isinstance(config, dict) else _read_browser_config()
+    tab_pool_config = payload.get("tab_pool") if isinstance(payload, dict) else {}
+    if not isinstance(tab_pool_config, dict):
+        tab_pool_config = {}
+    return _coerce_bool(tab_pool_config.get("preserve_error_tabs"), False)
+
+
+def _get_tab_pool_preserve_error_tabs(tab_pool: Any, config: Optional[Dict[str, Any]] = None) -> bool:
+    try:
+        value = getattr(tab_pool, "preserve_error_tabs", None)
+        if value is not None:
+            return _coerce_bool(value, False)
+    except Exception:
+        pass
+    return _get_preserve_error_tabs_from_config(config)
 
 
 def _tab_item_is_excluded(item: Dict[str, Any], excluded_urls: List[str]) -> bool:
@@ -1008,6 +1020,7 @@ class TabPoolConfigRequest(BaseModel):
     allocation_mode: str = Field(default="first_idle")
     enabled_route_methods: Optional[List[str]] = Field(default=None)
     excluded_urls: Optional[List[str]] = Field(default=None)
+    preserve_error_tabs: Optional[bool] = Field(default=None)
 
 
 # ================= 认证依赖 =================
@@ -1072,6 +1085,7 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
         browser_config = _read_browser_config()
         enabled_route_methods = _get_enabled_route_methods_from_config(browser_config)
         excluded_urls = _get_tab_pool_excluded_urls(browser.tab_pool, browser_config)
+        preserve_error_tabs = _get_tab_pool_preserve_error_tabs(browser.tab_pool, browser_config)
         for tab_info in tabs:
             exclusion_url = _get_tab_item_exclusion_url(tab_info, excluded_urls)
             tab_info["route_excluded"] = bool(exclusion_url)
@@ -1097,6 +1111,7 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "enabled_route_methods": enabled_route_methods,
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
             "excluded_urls": excluded_urls,
+            "preserve_error_tabs": preserve_error_tabs,
         }
     except Exception as e:
         logger.error(f"获取标签页列表失败: {e}")
@@ -1109,6 +1124,7 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "enabled_route_methods": [item["value"] for item in TAB_ROUTE_METHOD_OPTIONS],
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
             "excluded_urls": [],
+            "preserve_error_tabs": False,
         }
 
 
@@ -1124,6 +1140,8 @@ async def update_tab_pool_config(
     enabled_route_methods = _normalize_enabled_route_methods(body.enabled_route_methods)
     request_includes_excluded_urls = body.excluded_urls is not None
     excluded_urls = _normalize_excluded_urls(body.excluded_urls)
+    request_includes_preserve_error_tabs = body.preserve_error_tabs is not None
+    preserve_error_tabs = _coerce_bool(body.preserve_error_tabs, False)
 
     try:
         with _browser_config_lock:
@@ -1135,7 +1153,10 @@ async def update_tab_pool_config(
             tab_pool_config["enabled_route_methods"] = enabled_route_methods
             if request_includes_excluded_urls:
                 tab_pool_config["excluded_urls"] = excluded_urls
+            if request_includes_preserve_error_tabs:
+                tab_pool_config["preserve_error_tabs"] = preserve_error_tabs
             current_excluded_urls = _normalize_excluded_urls(tab_pool_config.get("excluded_urls"))
+            current_preserve_error_tabs = _coerce_bool(tab_pool_config.get("preserve_error_tabs"), False)
             config["tab_pool"] = tab_pool_config
             _write_browser_config_unlocked(config)
 
@@ -1149,7 +1170,10 @@ async def update_tab_pool_config(
         pool_synced = False
         try:
             browser = get_browser(auto_connect=False)
-            runtime_kwargs: Dict[str, Any] = {"allocation_mode": allocation_mode}
+            runtime_kwargs: Dict[str, Any] = {
+                "allocation_mode": allocation_mode,
+                "preserve_error_tabs": current_preserve_error_tabs,
+            }
             if request_includes_excluded_urls:
                 runtime_kwargs["excluded_urls"] = excluded_urls
             browser.tab_pool.apply_runtime_config(**runtime_kwargs)
@@ -1165,6 +1189,7 @@ async def update_tab_pool_config(
             "enabled_route_methods": enabled_route_methods,
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
             "excluded_urls": current_excluded_urls,
+            "preserve_error_tabs": current_preserve_error_tabs,
             "pool_synced": pool_synced,
         }
     except HTTPException:

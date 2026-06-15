@@ -649,6 +649,24 @@ class TextInputHandler:
             if not self._ensure_input_focus_native(ele):
                 logger.warning("[FILE_PASTE] 低熵模式下原生聚焦失败，跳过引导文本追加")
                 return False
+
+            try:
+                self._paste_text_via_clipboard(
+                    hint_text,
+                    humanized=True,
+                    copy_delay_range=(0.06, 0.12),
+                    settle_delay_range=(0.2, 0.4),
+                )
+            except Exception as e:
+                logger.warning(f"[FILE_PASTE] 低熵模式下剪贴板追加引导文本失败: {e}")
+                return False
+
+            self._smart_delay(0.15, 0.3)
+            if self._input_contains_text_loose(ele, hint_text):
+                return True
+
+            logger.warning("[FILE_PASTE] 低熵模式下剪贴板追加引导文本未生效")
+            return False
         else:
             # 上传控件经常会抢走焦点，先显式把焦点拉回真实输入框末尾。
             self.focus_to_end(ele)
@@ -668,10 +686,6 @@ class TextInputHandler:
                     return True
 
                 logger.warning("[FILE_PASTE] 剪贴板追加引导文本未生效，回退到原子追加")
-
-        if self.stealth_mode:
-            logger.warning("[FILE_PASTE] 低熵模式下跳过 JS 回退追加，避免增加风控风险")
-            return False
 
         if self.set_input_atomic(ele, hint_text, mode="append"):
             self._smart_delay(0.12, 0.25)
@@ -1737,26 +1751,17 @@ class TextInputHandler:
 
                 baseline = self._probe_upload_signal(filepath)
                 file_input.input(filepath)
-                try:
-                    file_input.run_js(
-                        """
-                        this.dispatchEvent(new Event('input', { bubbles: true }));
-                        this.dispatchEvent(new Event('change', { bubbles: true }));
-                        """
-                    )
-                except Exception:
-                    pass
 
                 selected_count = self._get_element_file_count(file_input)
-                if selected_count <= 0:
-                    wait_state = self._wait_for_upload_signal(filepath, timeout=1.2, baseline=baseline)
-                    if wait_state.get("confirmed"):
-                        logger.debug(
-                            f"[FILE_PASTE] file input #{index} triggered a confirmed attachment signal "
-                            f"(selector={selector or 'input[type=file]'})"
-                        )
-                        return True
+                wait_state = self._wait_for_upload_signal(filepath, timeout=1.2, baseline=baseline)
+                if wait_state.get("confirmed"):
+                    logger.debug(
+                        f"[FILE_PASTE] file input #{index} triggered a confirmed attachment signal "
+                        f"(selector={selector or 'input[type=file]'})"
+                    )
+                    return True
 
+                if selected_count <= 0:
                     if wait_state.get("weak_signal_seen"):
                         logger.warning(
                             f"[FILE_PASTE] file input #{index} produced only a weak signal; "
@@ -1768,6 +1773,23 @@ class TextInputHandler:
                         f"(selector={selector or 'input[type=file]'})"
                     )
                     continue
+
+                if not wait_state.get("weak_signal_seen"):
+                    try:
+                        file_input.run_js(
+                            """
+                            this.dispatchEvent(new Event('change', { bubbles: true }));
+                            """
+                        )
+                    except Exception:
+                        pass
+                    wait_state = self._wait_for_upload_signal(filepath, timeout=0.8, baseline=baseline)
+                    if wait_state.get("confirmed"):
+                        logger.debug(
+                            f"[FILE_PASTE] file input #{index} triggered a confirmed attachment signal "
+                            f"after change event (selector={selector or 'input[type=file]'})"
+                        )
+                        return True
 
                 logger.debug(
                     f"[FILE_PASTE] uploaded file via file input "
@@ -2196,11 +2218,19 @@ class TextInputHandler:
                     f"hint_target_tag={getattr(hint_ele, 'tag', '') or 'unknown'}"
                 )
                 logger.debug(f"[FILE_PASTE] appending hint text: {hint_text}")
-                self._append_file_paste_hint(hint_ele, hint_text)
+                if not self._append_file_paste_hint(hint_ele, hint_text):
+                    logger.error("[FILE_PASTE] 引导文本未能写入输入框，取消本次 file-paste 完成状态")
+                    raise WorkflowError("file_paste_hint_unconfirmed")
 
             logger.info(f"[FILE_PASTE] file paste completed ({len(text)} chars)")
             return True
 
+        except WorkflowError as e:
+            if str(e) in {"file_paste_upload_unconfirmed", "file_paste_hint_unconfirmed"}:
+                logger.error(f"[FILE_PASTE] file paste failed with fatal state: {e}")
+                raise
+            logger.error(f"[FILE_PASTE] file paste failed: {e}")
+            return False
         except Exception as e:
             logger.error(f"[FILE_PASTE] file paste failed: {e}")
             return False

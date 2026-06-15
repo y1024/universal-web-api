@@ -333,6 +333,16 @@ class NetworkMonitor:
             return f"HTTP {status_code} {reason}: {detail}"
         return f"HTTP {status_code} {reason}"
 
+    @staticmethod
+    def _should_preserve_listener_after_terminal_error(error: Any) -> bool:
+        """Keep Network listeners alive for challenge flows that auto-replay the request."""
+        detail = str(error or "").strip().lower()
+        return (
+            "429" in detail
+            or "too many requests" in detail
+            or "rate limit" in detail
+        )
+
     def _listen_is_active(self) -> bool:
         try:
             listen = getattr(self.tab, "listen", None)
@@ -491,12 +501,33 @@ class NetworkMonitor:
         self,
         event: Dict[str, Any],
         raw_body: str,
+        raw_body_source: str = "",
+        is_event_stream: bool = False,
     ) -> None:
         status_code = self._extract_http_status(event)
         if status_code < 400:
             return
 
         error_text = self._build_http_status_error_text(event, raw_body)
+        self._write_parser_debug_dump(
+            raw_body,
+            event,
+            {
+                "content": "",
+                "images": [],
+                "done": False,
+                "error": error_text or f"HTTP {status_code}",
+            },
+            raw_body_source or "http_error",
+            is_event_stream,
+            force_stage="http_error",
+            extra_payload={
+                "http_status": status_code,
+                "recoverable_listener_preserve": self._should_preserve_listener_after_terminal_error(
+                    error_text or f"HTTP {status_code}"
+                ),
+            },
+        )
         logger.warning(
             "[NetworkMonitor] 目标流返回异常状态码，终止工作流 "
             f"(status={status_code}, url={event.get('url', '')[:120]}, "
@@ -585,6 +616,16 @@ class NetworkMonitor:
         self._send_attempt_baseline_targets = 0
         self._send_attempt_baseline_requests = 0
         self._send_attempt_marked_at = 0.0
+        if self._listen_is_active():
+            self._is_listening = True
+            self._pre_started = True
+            counters = self._read_listen_counters()
+            logger.debug(
+                f"[NetworkMonitor] 外部中断后保留现有监听 ({reason or 'external_interrupt'}, "
+                f"targets={counters['running_targets']}, requests={counters['running_requests']}, "
+                f"queued={counters['queued_packets']})"
+            )
+            return
         self._is_listening = False
         self._pre_started = False
         self._safe_stop_listen()
@@ -1200,6 +1241,9 @@ class NetworkMonitor:
         parse_result: Dict[str, Any],
         raw_body_source: str,
         is_event_stream: bool,
+        *,
+        force_stage: str = "",
+        extra_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not self._is_network_debug_capture_enabled():
             return
@@ -1210,9 +1254,15 @@ class NetworkMonitor:
             if parser_filter and parser_id != parser_filter:
                 return
 
-            capture_stage = self._select_network_debug_capture_stage(parse_result)
+            capture_stage = str(force_stage or "").strip() or self._select_network_debug_capture_stage(parse_result)
             if not capture_stage:
                 return
+            if force_stage:
+                if capture_stage in self._debug_capture_written_stages:
+                    return
+                max_files = self._get_network_debug_capture_max_files_per_request()
+                if self._debug_capture_counter >= max_files:
+                    return
 
             self._debug_capture_counter += 1
             max_chars = self._get_network_debug_capture_max_body_chars()
@@ -1259,6 +1309,8 @@ class NetworkMonitor:
                 },
                 "parser_debug": parser_debug,
             }
+            if extra_payload:
+                payload["diagnostics"] = sanitize_sensitive_data(dict(extra_payload))
 
             dump_dir = Path("logs") / "network_parser_debug"
             dump_dir.mkdir(parents=True, exist_ok=True)
@@ -1419,12 +1471,24 @@ class NetworkMonitor:
             )
             self._ensure_listening("monitor_start")
         
+        preserve_listener = False
         try:
             yield from self._stream_output_phase(completion_id)
+        except NetworkMonitorTerminalError as e:
+            preserve_listener = self._should_preserve_listener_after_terminal_error(e)
+            if preserve_listener:
+                logger.warning(
+                    "[NetworkMonitor] 目标流触发可恢复验证/限流状态，保留监听等待页面自动重发"
+                )
+            raise
         finally:
-            # 立即停止：关闭 Network.enable + 释放额外 CDP session
-            self._cleanup()
-            self._pre_started = False
+            if preserve_listener:
+                self._is_listening = self._listen_is_active()
+                self._pre_started = self._is_listening
+            else:
+                # 立即停止：关闭 Network.enable + 释放额外 CDP session
+                self._cleanup()
+                self._pre_started = False
     
     def _stream_output_phase(self, completion_id: str) -> Generator[str, None, None]:
         """
@@ -1733,7 +1797,7 @@ class NetworkMonitor:
             # 读取响应体，流式协议优先使用 _stream.fullText
             raw_body, raw_body_source = self._extract_raw_body(response)
             raw_body = self._normalize_raw_body(raw_body)
-            self._raise_for_http_error_status(event, raw_body)
+            self._raise_for_http_error_status(event, raw_body, raw_body_source)
 
             if getattr(response_obj, "_response", None) is None and not raw_body:
                 logger.warning(
@@ -1776,7 +1840,12 @@ class NetworkMonitor:
                 if raw_body and not is_event_stream and self._looks_like_sse_payload(raw_body):
                     is_event_stream = True
 
-            self._raise_for_http_error_status(event, raw_body)
+            self._raise_for_http_error_status(
+                event,
+                raw_body,
+                raw_body_source,
+                is_event_stream,
+            )
 
             if not raw_body:
                 empty_body_skips += 1

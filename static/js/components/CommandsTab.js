@@ -132,6 +132,13 @@ window.CommandsTabComponent = {
                 create_dirs: true,
                 encoding: 'utf-8'
             },
+            runJsFileDefaults: {
+                file_path: 'js/arena-stream-hard-stop.user.js',
+                encoding: 'utf-8-sig',
+                inject_on_new_document: true,
+                apply_now: true,
+                fail_on_falsy: false
+            },
             fetchCommandsSeq: 0,
             commandsResponseSignature: '',
             presetOptionsRequestSeq: 0

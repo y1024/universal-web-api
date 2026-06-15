@@ -1,6 +1,6 @@
 {
   "CONNECTION_TIMEOUT": 10,
-  "MAX_REQUEST_EXECUTE_TIME_SEC": 300.0,
+  "MAX_REQUEST_EXECUTE_TIME_SEC": 0,
   "STEALTH_DELAY_MIN": 0.03,
   "STEALTH_DELAY_MAX": 0.1,
   "ACTION_DELAY_MIN": 0.06,
@@ -30,7 +30,7 @@
   "MAX_MESSAGE_LENGTH": 1000000,
   "MAX_MESSAGES_COUNT": 1000,
   "TEXT_INPUT_CHUNK_SIZE": 40000,
-  "STEALTH_PAUSE_PROBABILITY": 0.0,
+  "STEALTH_PAUSE_PROBABILITY": 0,
   "STEALTH_PAUSE_EXTRA_MAX": 0.15,
   "STEALTH_KEY_DOWN_UP_MIN": 0.015,
   "STEALTH_KEY_DOWN_UP_MAX": 0.04,
@@ -60,7 +60,7 @@
     "min_tabs": 1,
     "idle_timeout": 300,
     "acquire_timeout": 60,
-    "stuck_timeout": 300,
+    "stuck_timeout": 600,
     "allocation_mode": "round_robin",
     "enabled_route_methods": [
       "domain",
@@ -72,12 +72,18 @@
       "https://arena.ai/c/019e5457-56df-7ccc-ae08-f709eb2d605b",
       "https://arena.ai/c/019e62aa-bdd0-73db-a42f-aabede5f46e0",
       "https://arena.ai/c/019e5458-41e6-7d0b-9ecf-78cec0473d0b",
-      "https://arena.ai/c/019e6ea4-69b0-7a92-9e9d-84e08244192e"
-    ]
+      "https://arena.ai/c/019e6ea4-69b0-7a92-9e9d-84e08244192e",
+      "https://arena.ai/c/019e7462-981a-7a91-9f72-bf2b04599dbd",
+      "https://arena.ai/c/019ecbd2-afe7-70a8-96f9-f952bca359a2",
+      "https://arena.ai/c/019e7466-98b7-7ee5-ad83-5c3ef0176987"
+    ],
+    "preserve_error_tabs": true
   },
   "UPLOAD_HISTORY_IMAGES": false,
   "NETWORK_DEBUG_CAPTURE_ENABLED": true,
   "NETWORK_DEBUG_CAPTURE_MAX_BODY_CHARS": 50000,
   "NETWORK_DEBUG_CAPTURE_MAX_FILES_PER_REQUEST": 3,
-  "NETWORK_DEBUG_CAPTURE_PARSER_FILTER": ""
+  "NETWORK_DEBUG_CAPTURE_PARSER_FILTER": "",
+  "CONVERSATION_TIMEOUT_THRESHOLD": 0,
+  "FORCE_NEW_CONVERSATION": false
 }

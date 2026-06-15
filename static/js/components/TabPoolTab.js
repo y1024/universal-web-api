@@ -33,6 +33,8 @@ window.TabPoolTabComponent = {
             excludedUrlsDraft: '',
             excludedUrlsDraftDirty: false,
             excludedUrlsUpdating: false,
+            preserveErrorTabs: false,
+            preserveErrorTabsUpdating: false,
             showRouteSettings: false,
             fetchInFlight: false,
             fetchRequestSeq: 0,
@@ -98,7 +100,8 @@ window.TabPoolTabComponent = {
                     allocation_mode_options: data && data.allocation_mode_options || [],
                     enabled_route_methods: data && data.enabled_route_methods || [],
                     route_method_options: data && data.route_method_options || [],
-                    excluded_urls: data && data.excluded_urls || []
+                    excluded_urls: data && data.excluded_urls || [],
+                    preserve_error_tabs: !!(data && data.preserve_error_tabs)
                 });
             } catch (e) {
                 return '';
@@ -180,6 +183,7 @@ window.TabPoolTabComponent = {
                     this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
                     this.routeMethodOptions = data.route_method_options || this.routeMethodOptions;
                     this.applyExcludedUrlsFromServer(data.excluded_urls || []);
+                    this.preserveErrorTabs = !!data.preserve_error_tabs;
                     this.tabsResponseSignature = signature;
                     this.lastUpdate = new Date().toLocaleTimeString();
                 }
@@ -216,7 +220,8 @@ window.TabPoolTabComponent = {
                     headers,
                     body: JSON.stringify({
                         allocation_mode: nextMode,
-                        enabled_route_methods: this.enabledRouteMethods
+                        enabled_route_methods: this.enabledRouteMethods,
+                        preserve_error_tabs: this.preserveErrorTabs
                     })
                 });
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -225,6 +230,7 @@ window.TabPoolTabComponent = {
                 this.allocationMode = data.allocation_mode || nextMode;
                 this.allocationModeOptions = data.allocation_mode_options || this.allocationModeOptions;
                 this.applyExcludedUrlsFromServer(data.excluded_urls || this.excludedUrls);
+                this.preserveErrorTabs = !!data.preserve_error_tabs;
                 this.$emit('notify', { type: 'success', message: '标签页池分配模式已切换' });
                 await this.fetchTabs({ force: true });
             } catch (e) {
@@ -250,7 +256,8 @@ window.TabPoolTabComponent = {
                     headers,
                     body: JSON.stringify({
                         allocation_mode: this.allocationMode,
-                        enabled_route_methods: this.enabledRouteMethods
+                        enabled_route_methods: this.enabledRouteMethods,
+                        preserve_error_tabs: this.preserveErrorTabs
                     })
                 });
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -259,6 +266,7 @@ window.TabPoolTabComponent = {
                 this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
                 this.routeMethodOptions = data.route_method_options || this.routeMethodOptions;
                 this.applyExcludedUrlsFromServer(data.excluded_urls || this.excludedUrls);
+                this.preserveErrorTabs = !!data.preserve_error_tabs;
                 this.$emit('notify', { type: 'success', message: '路由显示设置已保存' });
             } catch (e) {
                 this.$emit('notify', { type: 'error', message: '保存路由显示设置失败: ' + e.message });
@@ -305,7 +313,8 @@ window.TabPoolTabComponent = {
                     body: JSON.stringify({
                         allocation_mode: this.allocationMode,
                         enabled_route_methods: this.enabledRouteMethods,
-                        excluded_urls: nextUrls
+                        excluded_urls: nextUrls,
+                        preserve_error_tabs: this.preserveErrorTabs
                     })
                 });
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -313,6 +322,7 @@ window.TabPoolTabComponent = {
                 const data = await response.json();
                 this.allocationMode = data.allocation_mode || this.allocationMode;
                 this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
+                this.preserveErrorTabs = !!data.preserve_error_tabs;
                 this.excludedUrlsDraftDirty = false;
                 this.applyExcludedUrlsFromServer(data.excluded_urls || nextUrls);
                 this.$emit('notify', { type: 'success', message: 'URL 排除列表已保存' });
@@ -321,6 +331,47 @@ window.TabPoolTabComponent = {
                 this.$emit('notify', { type: 'error', message: '保存 URL 排除列表失败: ' + e.message });
             } finally {
                 this.excludedUrlsUpdating = false;
+            }
+        },
+
+        async updatePreserveErrorTabs(enabled) {
+            const previous = !!this.preserveErrorTabs;
+            const nextValue = !!enabled;
+            this.preserveErrorTabs = nextValue;
+            this.preserveErrorTabsUpdating = true;
+            try {
+                const token = localStorage.getItem('api_token');
+                const headers = { 'Content-Type': 'application/json' };
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+
+                const response = await fetch('/api/tab-pool/config', {
+                    method: 'PUT',
+                    headers,
+                    body: JSON.stringify({
+                        allocation_mode: this.allocationMode,
+                        enabled_route_methods: this.enabledRouteMethods,
+                        excluded_urls: this.excludedUrls,
+                        preserve_error_tabs: nextValue
+                    })
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                this.allocationMode = data.allocation_mode || this.allocationMode;
+                this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
+                this.applyExcludedUrlsFromServer(data.excluded_urls || this.excludedUrls);
+                this.preserveErrorTabs = Object.prototype.hasOwnProperty.call(data, 'preserve_error_tabs')
+                    ? !!data.preserve_error_tabs
+                    : nextValue;
+                this.$emit('notify', {
+                    type: 'success',
+                    message: this.preserveErrorTabs ? '错误/超时标签页将保留' : '错误/超时标签页将按原策略清理'
+                });
+            } catch (e) {
+                this.preserveErrorTabs = previous;
+                this.$emit('notify', { type: 'error', message: '保存错误处理设置失败: ' + e.message });
+            } finally {
+                this.preserveErrorTabsUpdating = false;
             }
         },
 
@@ -571,7 +622,7 @@ window.TabPoolTabComponent = {
                             @click="showRouteSettings = !showRouteSettings"
                             data-route-settings-trigger
                             class="w-9 h-9 rounded-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-300 dark:hover:border-blue-600 transition-colors"
-                            title="路由显示设置"
+                            title="标签页池设置"
                         >
                             ⚙
                         </button>
@@ -582,7 +633,7 @@ window.TabPoolTabComponent = {
                         >
                             <div class="flex items-start justify-between gap-3 mb-3">
                                 <div>
-                                    <div class="text-sm font-semibold text-gray-900 dark:text-white">路由显示设置</div>
+                                    <div class="text-sm font-semibold text-gray-900 dark:text-white">标签页池设置</div>
                                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">关闭后前端会隐藏对应路由；URL 路由只会匹配已打开标签页，相同 URL 会自动轮询。</p>
                                 </div>
                                 <button @click="showRouteSettings = false" class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">关闭</button>
@@ -632,6 +683,23 @@ window.TabPoolTabComponent = {
                                         {{ excludedUrlsUpdating ? '保存中...' : '保存排除列表' }}
                                     </button>
                                 </div>
+                            </div>
+                            <div class="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+                                <label class="flex items-start justify-between gap-3 text-sm text-gray-700 dark:text-gray-200">
+                                    <span>
+                                        <span class="block font-semibold text-gray-900 dark:text-white">错误/超时保留标签页</span>
+                                        <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                                            工作流错误、HTTP 异常或卡死超时时，只记录并标记错误，不自动关闭浏览器标签页。
+                                        </span>
+                                    </span>
+                                    <input
+                                        type="checkbox"
+                                        :checked="preserveErrorTabs"
+                                        :disabled="preserveErrorTabsUpdating"
+                                        @change="updatePreserveErrorTabs($event.target.checked)"
+                                        class="mt-1 rounded"
+                                    >
+                                </label>
                             </div>
                         </div>
                     </div>

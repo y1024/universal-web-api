@@ -39,6 +39,7 @@ def _load_tab_pool_config() -> Dict:
         "stuck_timeout": 180,
         "allocation_mode": "first_idle",
         "excluded_urls": [],
+        "preserve_error_tabs": False,
     }
     
     # 从 browser_config.json 加载
@@ -66,6 +67,7 @@ def _load_tab_pool_config() -> Dict:
         "stuck_timeout",
         "allocation_mode",
         "excluded_urls",
+        "preserve_error_tabs",
     }
     return {key: value for key, value in config.items() if key in allowed_keys}
 

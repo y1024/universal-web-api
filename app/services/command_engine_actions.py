@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 logger = get_logger("CMD_ENG")
 
 MAX_COMMAND_WORKFLOW_SSE_BUFFER_CHARS = 262144
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class CommandEngineActionsMixin:
@@ -110,6 +111,95 @@ class CommandEngineActionsMixin:
         if text in {"0", "false", "no", "n", "off"}:
             return False
         return default
+
+    @staticmethod
+    def _resolve_action_file_path(file_path: Any) -> str:
+        raw = str(file_path or "").strip()
+        if not raw:
+            return ""
+        expanded = os.path.expandvars(os.path.expanduser(raw))
+        if os.path.isabs(expanded):
+            return os.path.normpath(expanded)
+        return os.path.normpath(os.path.join(_PROJECT_ROOT, expanded))
+
+    @staticmethod
+    def _load_action_text_file(file_path: Any, encoding: str = "utf-8-sig") -> tuple[str, str]:
+        resolved = CommandEngineActionsMixin._resolve_action_file_path(file_path)
+        if not resolved:
+            raise ValueError("missing_file_path")
+        if not os.path.isfile(resolved):
+            raise ValueError(f"file_not_found: {resolved}")
+        with open(resolved, "r", encoding=encoding or "utf-8-sig") as f:
+            return resolved, f.read()
+
+    @staticmethod
+    def _ensure_command_init_script_registry(owner: Any) -> Dict[str, Dict[str, Any]]:
+        registry = getattr(owner, "_command_init_js_registry", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            setattr(owner, "_command_init_js_registry", registry)
+        return registry
+
+    def _cleanup_run_js_file_action(
+        self,
+        session: 'TabSession',
+        action: Dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        tab = getattr(session, "tab", None)
+        if tab is None:
+            return {
+                "ok": False,
+                "path": "",
+                "removed_init_script": False,
+                "ran_teardown": False,
+                "reason": "missing_tab",
+            }
+
+        resolved_path = self._resolve_action_file_path(action.get("file_path", ""))
+        registry_key = resolved_path.lower() if resolved_path else ""
+        registry = getattr(session, "_command_init_js_registry", None)
+        registry_entry = registry.get(registry_key) if isinstance(registry, dict) and registry_key else None
+        removed_init_script = False
+        errors: List[str] = []
+
+        script_identifier = str((registry_entry or {}).get("identifier", "") or "").strip()
+        if script_identifier:
+            try:
+                tab.run_cdp(
+                    "Page.removeScriptToEvaluateOnNewDocument",
+                    identifier=script_identifier,
+                )
+                removed_init_script = True
+            except Exception as e:
+                errors.append(f"remove_init_script_failed: {e}")
+        if isinstance(registry, dict) and registry_key:
+            registry.pop(registry_key, None)
+
+        teardown_js = str(
+            action.get("teardown_js", "")
+            or action.get("cleanup_js", "")
+            or ""
+        ).strip()
+        teardown_result = None
+        ran_teardown = False
+        if teardown_js:
+            try:
+                teardown_result = self._run_command_js(tab, teardown_js)
+                ran_teardown = True
+            except Exception as e:
+                errors.append(f"teardown_js_failed: {e}")
+
+        return {
+            "ok": not errors,
+            "path": resolved_path,
+            "removed_init_script": removed_init_script,
+            "ran_teardown": ran_teardown,
+            "teardown_result": teardown_result,
+            "reason": str(reason or "").strip(),
+            "errors": errors,
+        }
 
     def _run_command_js(self, tab: Any, code: Any) -> Any:
         result = tab.run_js(code)
@@ -828,6 +918,95 @@ return (() => {
                     logger.warning(f"[CMD] JS 执行失败: {e}")
                     return f"js_failed: {e}"
             return ""
+
+        elif action_type == "run_js_file":
+            file_path = action.get("file_path", "")
+            encoding = str(action.get("encoding", "utf-8-sig") or "utf-8-sig").strip() or "utf-8-sig"
+            try:
+                resolved_path, code = self._load_action_text_file(file_path, encoding=encoding)
+            except Exception as e:
+                logger.warning(f"[CMD] JS 文件读取失败: path={file_path!r}, error={e}")
+                return f"js_file_read_failed: {e}"
+
+            if not code.strip():
+                logger.warning(f"[CMD] JS 文件为空: {resolved_path}")
+                return "js_file_empty"
+
+            inject_on_new_document = self._coerce_action_bool(
+                action.get("inject_on_new_document", True),
+                True,
+            )
+            apply_now = self._coerce_action_bool(action.get("apply_now", True), True)
+            registry = self._ensure_command_init_script_registry(session)
+            registry_key = resolved_path.lower()
+            registry_entry = registry.get(registry_key) if isinstance(registry.get(registry_key), dict) else None
+            script_identifier = ""
+
+            if inject_on_new_document:
+                try:
+                    previous_identifier = str((registry_entry or {}).get("identifier", "") or "").strip()
+                    previous_source = str((registry_entry or {}).get("source", "") or "")
+                    if previous_identifier and previous_source and previous_source != code:
+                        try:
+                            tab.run_cdp(
+                                "Page.removeScriptToEvaluateOnNewDocument",
+                                identifier=previous_identifier,
+                            )
+                        except Exception as remove_error:
+                            logger.debug(f"[CMD] 旧 JS 预注入脚本移除失败（忽略）: {remove_error}")
+                        previous_identifier = ""
+
+                    if not previous_identifier or previous_source != code:
+                        result = tab.run_cdp(
+                            "Page.addScriptToEvaluateOnNewDocument",
+                            source=code,
+                        )
+                        if isinstance(result, dict):
+                            script_identifier = str(
+                                result.get("identifier")
+                                or result.get("scriptId")
+                                or result.get("id")
+                                or ""
+                            ).strip()
+                        elif result not in (None, ""):
+                            script_identifier = str(result).strip()
+                        registry[registry_key] = {
+                            "identifier": script_identifier,
+                            "source": code,
+                            "path": resolved_path,
+                        }
+                    else:
+                        script_identifier = previous_identifier
+                except Exception as e:
+                    logger.warning(f"[CMD] JS 文件预注入失败: path={resolved_path}, error={e}")
+                    return f"js_file_preinject_failed: {e}"
+
+            run_result = None
+            if apply_now:
+                try:
+                    run_result = self._run_command_js(tab, code)
+                except Exception as e:
+                    logger.warning(f"[CMD] JS 文件执行失败: path={resolved_path}, error={e}")
+                    return f"js_file_run_failed: {e}"
+
+            fail_on_falsy = action.get("fail_on_falsy", False)
+            if apply_now and fail_on_falsy and not run_result:
+                logger.info(f"[CMD] JS 文件返回假值，按 fail_on_falsy 记为失败: {run_result!r}")
+                return {"ok": False, "js_result": run_result, "reason": "falsy_result"}
+
+            result_payload = {
+                "ok": True,
+                "path": resolved_path,
+                "applied_now": apply_now,
+                "inject_on_new_document": inject_on_new_document,
+                "script_id": script_identifier,
+                "result": run_result,
+            }
+            logger.debug(
+                f"[CMD] JS 文件已处理: path={resolved_path}, apply_now={apply_now}, "
+                f"inject_on_new_document={inject_on_new_document}, script_id={script_identifier or '-'}"
+            )
+            return result_payload
 
         elif action_type == "wait":
             seconds = float(action.get("seconds", 1))

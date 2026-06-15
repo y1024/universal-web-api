@@ -101,6 +101,7 @@ window.CommandsTabMethods = {
             this.initAutomationAction(next);
             this.initHttpRequestAction(next);
             this.initAppendFileAction(next);
+            this.initRunJsFileAction(next);
             return next;
         },
 
@@ -837,6 +838,7 @@ window.CommandsTabMethods = {
             this.initAutomationAction(action);
             this.initHttpRequestAction(action);
             this.initAppendFileAction(action);
+            this.initRunJsFileAction(action);
             if (action.type === 'execute_workflow' && action.prompt === undefined) {
                 action.prompt = '';
             }
@@ -1000,6 +1002,22 @@ window.CommandsTabMethods = {
             action.encoding = action.encoding || this.appendFileDefaults.encoding;
         },
 
+        initRunJsFileAction(action) {
+            if (action.type !== 'run_js_file') return;
+            const defaults = this.runJsFileDefaults || {};
+            action.file_path = action.file_path || defaults.file_path || 'js/arena-stream-hard-stop.user.js';
+            action.encoding = action.encoding || defaults.encoding || 'utf-8-sig';
+            if (action.inject_on_new_document === undefined) {
+                action.inject_on_new_document = defaults.inject_on_new_document !== false;
+            }
+            if (action.apply_now === undefined) {
+                action.apply_now = defaults.apply_now !== false;
+            }
+            if (action.fail_on_falsy === undefined) {
+                action.fail_on_falsy = defaults.fail_on_falsy === true;
+            }
+        },
+
         isAutomationVarNameValid(value) {
             const text = String(value || '').trim();
             if (!text) return true;
@@ -1046,6 +1064,15 @@ window.CommandsTabMethods = {
         getAppendFileSummary(action) {
             if (!action) return '';
             return (action.file_path || '未配置文件') + (action.append_newline ? ' + 换行' : '');
+        },
+
+        getRunJsFileSummary(action) {
+            if (!action) return '';
+            const path = action.file_path || '未配置文件';
+            const modes = [];
+            if (action.apply_now !== false) modes.push('立即执行');
+            if (action.inject_on_new_document !== false) modes.push('预注入');
+            return path + ' · ' + (modes.length ? modes.join(' + ') : '仅读取');
         },
 
         removeAction(index) {
@@ -1291,6 +1318,16 @@ window.CommandsTabMethods = {
             });
             if (invalidAppendFileAction) {
                 this.$emit('notify', { type: 'error', message: '“追加到文件”动作必须填写文件路径、追加内容和编码。' });
+                return;
+            }
+            const invalidRunJsFileAction = (this.editingCommand.actions || []).find(action => {
+                if (action.type !== 'run_js_file') return false;
+                if (!String(action.file_path || '').trim()) return true;
+                if (!String(action.encoding || '').trim()) return true;
+                return false;
+            });
+            if (invalidRunJsFileAction) {
+                this.$emit('notify', { type: 'error', message: '“执行 JS 文件”动作必须填写文件路径和编码。' });
                 return;
             }
             if (trigger.type === 'network_request_error') {

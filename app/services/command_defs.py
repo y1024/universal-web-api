@@ -27,6 +27,7 @@ ACTION_TYPES = {
     "refresh_page": "刷新页面",
     "new_chat": "新建对话",
     "run_js": "执行 JavaScript",
+    "run_js_file": "执行 JS 文件",
     "wait": "等待",
     "execute_preset": "切换预设",
     "execute_workflow": "执行工作流",

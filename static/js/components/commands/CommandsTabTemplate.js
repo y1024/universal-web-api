@@ -937,6 +937,18 @@ window.CommandsTabTemplate = `
                                    class="w-20 rounded border border-slate-600 bg-slate-700 px-2 py-1.5 text-sm text-white">
                             <input v-if="action.type === 'run_js'" v-model="action.code" type="text" placeholder="JavaScript 代码"
                                    class="flex-1 rounded border border-slate-600 bg-slate-700 px-2 py-1.5 text-sm font-mono text-white">
+                            <div v-if="action.type === 'run_js_file'" class="flex min-w-[320px] flex-[2] flex-wrap items-center gap-2">
+                                <input v-model.trim="action.file_path" type="text" placeholder="例如：js/arena-stream-hard-stop.user.js"
+                                       class="min-w-[260px] flex-1 rounded border border-slate-600 bg-slate-700 px-2 py-1.5 text-sm font-mono text-white">
+                                <label class="flex items-center gap-1.5 rounded border border-slate-700 bg-slate-800/80 px-2 py-1.5 text-xs text-slate-200">
+                                    <input type="checkbox" v-model="action.apply_now" class="rounded">
+                                    立即执行
+                                </label>
+                                <label class="flex items-center gap-1.5 rounded border border-slate-700 bg-slate-800/80 px-2 py-1.5 text-xs text-slate-200">
+                                    <input type="checkbox" v-model="action.inject_on_new_document" class="rounded">
+                                    预注入
+                                </label>
+                            </div>
                             <input v-if="action.type === 'click_element'" v-model.trim="action.selector" type="text" placeholder="CSS / XPath 选择器"
                                    class="flex-1 rounded border border-slate-600 bg-slate-700 px-2 py-1.5 text-sm font-mono text-white">
                             <div v-if="action.type === 'click_coordinates'" class="flex flex-wrap items-center gap-2">
@@ -997,6 +1009,9 @@ window.CommandsTabTemplate = `
                             </span>
                             <span v-if="action.type === 'append_file'" class="flex-1 text-xs font-mono text-slate-400">
                                 {{ getAppendFileSummary(action) }}
+                            </span>
+                            <span v-if="action.type === 'run_js_file'" class="w-full text-xs font-mono text-slate-400 md:w-auto md:flex-1">
+                                {{ getRunJsFileSummary(action) }}
                             </span>
                             <input v-if="action.type === 'navigate'" v-model="action.url" type="text" placeholder="URL"
                                    class="flex-1 rounded border border-slate-600 bg-slate-700 px-2 py-1.5 text-sm text-white">

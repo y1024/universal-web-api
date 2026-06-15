@@ -33,9 +33,9 @@ from app.services.request_manager import (
 from app.services.request_lifecycle import (
     TrackedWorkerExecutionCancelled,
     get_max_request_execute_time_sec,
+    cleanup_worker_thread_after_request,
     mark_request_hard_timeout,
     put_worker_queue_item,
-    retire_bound_tab_after_worker_leak as _shared_retire_bound_tab_after_worker_leak,
     run_tracked_blocking_call,
     wait_worker_queue_item,
 )
@@ -127,10 +127,6 @@ def _put_worker_queue_item(
 
 def _extract_stream_error_message(chunk: Any) -> str:
     return extract_openai_sse_error_message(chunk)
-
-
-def _retire_bound_tab_after_worker_leak(ctx: RequestContext, reason: str) -> None:
-    _shared_retire_bound_tab_after_worker_leak(ctx, reason)
 
 
 def _extract_chunk_media_items(data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2241,11 +2237,15 @@ async def _stream_with_lifecycle(
 
     finally:
         if worker_thread and worker_thread.is_alive():
-            ctx.request_cancel("cleanup")
-            cleanup_timeout = 0.2 if done_emitted else 5.0
-            await asyncio.to_thread(worker_thread.join, timeout=cleanup_timeout)
-            if worker_thread.is_alive():
-                _retire_bound_tab_after_worker_leak(ctx, "worker_cleanup_timeout")
+            await cleanup_worker_thread_after_request(
+                worker_thread,
+                ctx,
+                completed=ctx.status == RequestStatus.COMPLETED,
+                cancel_reason="cleanup",
+                join_timeout=5.0,
+                retire_reason="worker_cleanup_timeout",
+                completed_join_timeout=0.5,
+            )
 
         if chunk_queue is not None:
             try:
@@ -2493,10 +2493,14 @@ async def _complete_tool_calling_with_lifecycle(
                 pass
         worker_thread = worker_state.get("thread")
         if isinstance(worker_thread, threading.Thread) and worker_thread.is_alive():
-            ctx.request_cancel("cleanup")
-            await asyncio.to_thread(worker_thread.join, timeout=5.0)
-            if worker_thread.is_alive():
-                _retire_bound_tab_after_worker_leak(ctx, "worker_cleanup_timeout")
+            await cleanup_worker_thread_after_request(
+                worker_thread,
+                ctx,
+                completed=ctx.status == RequestStatus.COMPLETED,
+                cancel_reason="cleanup",
+                join_timeout=5.0,
+                retire_reason="worker_cleanup_timeout",
+            )
         worker_state["thread"] = None
         worker_state["label"] = None
         request_manager.finish_request(ctx, success=(ctx.status == RequestStatus.COMPLETED))

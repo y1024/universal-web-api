@@ -2998,9 +2998,9 @@
           "audio_capture_activity_silence_seconds": 0.65
         },
         "file_paste": {
-          "enabled": false,
+          "enabled": true,
           "threshold": 50000,
-          "temp_file_type": "txt",
+          "temp_file_type": "pdf",
           "hint_text": "完全专注于文件内容",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
@@ -3907,7 +3907,7 @@
             "action": "WAIT",
             "target": "",
             "optional": false,
-            "value": 0.8
+            "value": 1.2
           },
           {
             "action": "FILL_INPUT",
@@ -4110,7 +4110,7 @@
             "action": "WAIT",
             "target": "",
             "optional": false,
-            "value": 0.8
+            "value": 1.2
           },
           {
             "action": "FILL_INPUT",
@@ -4244,10 +4244,10 @@
           "audio_capture_activity_silence_seconds": 0.65
         },
         "file_paste": {
-          "enabled": false,
-          "threshold": 50000,
-          "temp_file_type": "txt",
-          "hint_text": "完全专注于文件内容",
+          "enabled": true,
+          "threshold": 120000,
+          "temp_file_type": "pdf",
+          "hint_text": "文件内容为上下文，据此回复",
           "reacquire_input_after_upload": false,
           "post_upload_input_selector": "",
           "post_upload_settle": 0,

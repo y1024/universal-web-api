@@ -85,6 +85,7 @@ class TabPoolManager:
         stuck_timeout: float = STUCK_TIMEOUT,
         allocation_mode: str = "first_idle",
         excluded_urls: Optional[List[str]] = None,
+        preserve_error_tabs: bool = False,
     ):
         self.page = browser_page
         self.max_tabs = max_tabs
@@ -94,6 +95,7 @@ class TabPoolManager:
         self.stuck_timeout = max(1.0, float(stuck_timeout))
         self.allocation_mode = self._normalize_allocation_mode(allocation_mode)
         self.excluded_urls = self._normalize_excluded_urls(excluded_urls)
+        self.preserve_error_tabs = self._to_bool(preserve_error_tabs, False)
 
         self._tabs: Dict[str, TabSession] = {}
         self._lock = threading.RLock()
@@ -128,6 +130,7 @@ class TabPoolManager:
         self._orphaned_isolated_contexts: Dict[str, float] = {}
         self._round_robin_cursor: int = 0
         self._route_round_robin_cursor: OrderedDict[str, int] = OrderedDict()
+        self._preserved_error_session_ids = set()
         self._maintenance_executor: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(
             max_workers=self.MAINTENANCE_WORKER_LIMIT,
             thread_name_prefix="tab-maint",
@@ -160,7 +163,7 @@ class TabPoolManager:
 
         logger.debug(
             f"TabPoolManager 初始化 (max={max_tabs}, stuck_timeout={self.stuck_timeout}s, "
-            f"allocation_mode={self.allocation_mode})"
+            f"allocation_mode={self.allocation_mode}, preserve_error_tabs={self.preserve_error_tabs})"
         )
 
     @staticmethod
@@ -199,6 +202,7 @@ class TabPoolManager:
         stuck_timeout: Optional[float] = None,
         allocation_mode: Optional[str] = None,
         excluded_urls: Optional[List[str]] = None,
+        preserve_error_tabs: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """同步更新运行中的标签页池参数。"""
         with self._lock:
@@ -220,6 +224,8 @@ class TabPoolManager:
                 self.allocation_mode = self._normalize_allocation_mode(allocation_mode)
             if excluded_urls is not None:
                 self.excluded_urls = self._normalize_excluded_urls(excluded_urls)
+            if preserve_error_tabs is not None:
+                self.preserve_error_tabs = self._to_bool(preserve_error_tabs, False)
 
             updated = {
                 "max_tabs": self.max_tabs,
@@ -229,6 +235,7 @@ class TabPoolManager:
                 "stuck_timeout": self.stuck_timeout,
                 "allocation_mode": self.allocation_mode,
                 "excluded_urls": list(self.excluded_urls),
+                "preserve_error_tabs": self.preserve_error_tabs,
             }
 
             logger.info(
@@ -236,7 +243,8 @@ class TabPoolManager:
                 f"max_tabs={self.max_tabs}, min_tabs={self.min_tabs}, "
                 f"idle_timeout={self.idle_timeout}, acquire_timeout={self.acquire_timeout}, "
                 f"stuck_timeout={self.stuck_timeout}, allocation_mode={self.allocation_mode}, "
-                f"excluded_urls={len(self.excluded_urls)}"
+                f"excluded_urls={len(self.excluded_urls)}, "
+                f"preserve_error_tabs={self.preserve_error_tabs}"
             )
             return updated
 
@@ -1651,8 +1659,9 @@ class TabPoolManager:
                         detail=f"busy_duration={busy_duration:.0f}s",
                     )
                     snapshot = self._describe_session(session)
+                    action_label = "record stuck session" if self.preserve_error_tabs else "retire session"
                     logger.warning(
-                        f"[{session.id}] stuck for {busy_duration:.0f}s, retire session "
+                        f"[{session.id}] stuck for {busy_duration:.0f}s, {action_label} "
                         f"(task={task_id or '-'}, cancel_submitted={cancel_submitted}, "
                         f"snapshot={snapshot})"
                     )
@@ -1724,9 +1733,19 @@ class TabPoolManager:
             try:
                 if session.is_isolated_context and session.is_healthy(allow_live_check=False):
                     session.clear_transient_disconnect()
+                if session.status != TabStatus.ERROR:
+                    self._preserved_error_session_ids.discard(tab_id)
 
                 # 清理 ERROR 状态的标签页（包括强制释放失败的）
                 if session.status == TabStatus.ERROR:
+                    if self.preserve_error_tabs:
+                        if tab_id not in self._preserved_error_session_ids:
+                            logger.warning(
+                                f"[{tab_id}] 错误状态已记录，按配置保留标签页 "
+                                "(preserve_error_tabs=True)"
+                            )
+                            self._preserved_error_session_ids.add(tab_id)
+                        continue
                     to_remove.append(tab_id)
                 # 清理空闲但不健康的标签页
                 elif session.status == TabStatus.IDLE and not session.is_healthy(allow_live_check=False):
@@ -1779,6 +1798,7 @@ class TabPoolManager:
                     self._active_session_id = None
 
                 self._tabs.pop(tab_id, None)
+                self._preserved_error_session_ids.discard(tab_id)
                 self._on_session_removed(tab_id)
                 self._close_raw_tabs_async(raw_ids_to_remove, reason="unhealthy")
             except Exception as e:
@@ -2800,6 +2820,7 @@ class TabPoolManager:
             stuck_timeout = self.stuck_timeout
             allocation_mode = self.allocation_mode
             excluded_urls = list(self.excluded_urls)
+            preserve_error_tabs = self.preserve_error_tabs
             global_network_enabled = self._global_network_enabled
             known_raw_tabs = len(self._known_tab_ids)
             last_scan = round(time.time() - self._last_scan_time, 1)
@@ -2817,6 +2838,7 @@ class TabPoolManager:
             "stuck_timeout": stuck_timeout,
             "allocation_mode": allocation_mode,
             "excluded_urls": excluded_urls,
+            "preserve_error_tabs": preserve_error_tabs,
             "global_network_enabled": global_network_enabled,
             "known_raw_tabs": known_raw_tabs,
             "last_scan": last_scan,

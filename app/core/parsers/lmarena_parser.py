@@ -146,9 +146,13 @@ class LmarenaParser(ResponseParser):
     响应格式: Vercel AI SDK Data Stream Protocol (行分隔)
     """
 
+    _PROTOCOL_PREFIXES = {"a0", "a2", "ad", "ae", "a3"}
+
     def __init__(self) -> None:
         self._accumulated = ""
         self._seen_image_refs: set[str] = set()
+        self._last_debug_summary: Dict[str, Any] = {}
+        self._last_debug_raw_signature = ""
 
     # ============ 对外接口 ============
 
@@ -169,6 +173,8 @@ class LmarenaParser(ResponseParser):
         if not raw_response or not isinstance(raw_response, str):
             return result
 
+        debug_raw_signature = self._debug_body_signature(raw_response)
+
         # 修复双重 UTF-8 编码（mojibake）
         raw_response = self._fix_mojibake(raw_response)
 
@@ -176,23 +182,39 @@ class LmarenaParser(ResponseParser):
             content_parts: list[str] = []
             images: list[Dict[str, Any]] = []
             done = False
+            line_count = 0
+            prefix_counts: Dict[str, int] = {}
+            unknown_prefix_count = 0
+            non_protocol_line_count = 0
+            parse_errors: list[Dict[str, Any]] = []
 
             for line in raw_response.split("\n"):
                 line = line.strip()
                 if not line:
                     continue
+                line_count += 1
 
                 colon_idx = line.find(":")
                 if colon_idx < 1:
+                    non_protocol_line_count += 1
                     continue
 
                 prefix = line[:colon_idx]
                 payload = line[colon_idx + 1:]
+                if prefix in self._PROTOCOL_PREFIXES:
+                    prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+                else:
+                    unknown_prefix_count += 1
 
                 if prefix == "a0":
                     text = self._parse_text_chunk(payload)
                     if text is not None:
                         content_parts.append(text)
+                    else:
+                        parse_errors.append({
+                            "prefix": prefix,
+                            "payload_preview": payload[:160],
+                        })
 
                 elif prefix == "a2":
                     images.extend(
@@ -228,10 +250,30 @@ class LmarenaParser(ResponseParser):
             if images:
                 result["images"] = images
             result["done"] = done
+            self._last_debug_summary = {
+                "raw_body_len": len(raw_response),
+                "line_count": line_count,
+                "prefix_counts": prefix_counts,
+                "unknown_prefix_count": unknown_prefix_count,
+                "non_protocol_line_count": non_protocol_line_count,
+                "content_candidate_len": len(new_content),
+                "emitted_content_len": len(str(result.get("content") or "")),
+                "accumulated_len": len(self._accumulated),
+                "done": bool(done),
+                "error": str(result.get("error") or ""),
+                "image_count": len(images),
+                "parse_errors": parse_errors[-8:],
+            }
+            self._last_debug_raw_signature = debug_raw_signature
 
         except Exception as e:
             logger.debug(f"[LmarenaParser] 解析异常: {e}")
             result["error"] = str(e)
+            self._last_debug_summary = {
+                "raw_body_len": len(raw_response),
+                "exception": str(e),
+            }
+            self._last_debug_raw_signature = debug_raw_signature
 
         return result
 
@@ -239,8 +281,66 @@ class LmarenaParser(ResponseParser):
         """重置状态"""
         self._accumulated = ""
         self._seen_image_refs.clear()
+        self._last_debug_summary = {}
+        self._last_debug_raw_signature = ""
+
+    def export_debug_data(self, raw_response: str = "") -> Dict[str, Any]:
+        """Return a compact parser-side protocol summary for network_parser_debug."""
+        summary = dict(self._last_debug_summary or {})
+        if raw_response:
+            text = self._normalize_debug_text(raw_response)
+            raw_summary = self._summarize_protocol_lines(text)
+            if self._last_debug_raw_signature == self._debug_body_signature(text):
+                summary.update(raw_summary)
+            else:
+                summary = raw_summary
+        summary.update({
+            "accumulated_len": len(self._accumulated),
+            "seen_image_refs": len(self._seen_image_refs),
+        })
+        return summary
 
     # ============ 内部方法 ============
+
+    @staticmethod
+    def _normalize_debug_text(raw_response: Any) -> str:
+        if isinstance(raw_response, (bytes, bytearray)):
+            return raw_response.decode("utf-8", errors="ignore")
+        return str(raw_response or "")
+
+    @classmethod
+    def _debug_body_signature(cls, raw_response: Any) -> str:
+        text = cls._normalize_debug_text(raw_response)
+        return f"{len(text)}:{text[:80]}:{text[-80:]}"
+
+    @classmethod
+    def _summarize_protocol_lines(cls, raw_response: Any) -> Dict[str, Any]:
+        text = cls._normalize_debug_text(raw_response)
+        prefix_counts: Dict[str, int] = {}
+        line_count = 0
+        unknown_prefix_count = 0
+        non_protocol_line_count = 0
+        for raw_line in text.split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+            line_count += 1
+            colon_idx = line.find(":")
+            if colon_idx < 1:
+                non_protocol_line_count += 1
+                continue
+            prefix = line[:colon_idx]
+            if prefix in cls._PROTOCOL_PREFIXES:
+                prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+            else:
+                unknown_prefix_count += 1
+        return {
+            "raw_body_len": len(text),
+            "line_count": line_count,
+            "prefix_counts": prefix_counts,
+            "unknown_prefix_count": unknown_prefix_count,
+            "non_protocol_line_count": non_protocol_line_count,
+        }
 
     @staticmethod
     def _fix_mojibake(text: str) -> str:

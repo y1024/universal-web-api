@@ -65,6 +65,7 @@ window.CommandsTabComputed = {
                 refresh_page: '页面操作',
                 new_chat: '页面操作',
                 run_js: '页面操作',
+                run_js_file: '页面操作',
                 wait: '页面操作',
                 navigate: '页面操作',
                 click_element: '页面操作',

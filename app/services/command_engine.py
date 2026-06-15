@@ -1101,6 +1101,127 @@ return (function() {
             except Exception:
                 pass
 
+    @staticmethod
+    def _iter_run_js_file_actions(command: Optional[Dict[str, Any]]):
+        for action in list((command or {}).get("actions") or []):
+            if not isinstance(action, dict):
+                continue
+            if str(action.get("type", "")).strip().lower() != "run_js_file":
+                continue
+            yield action
+
+    def _collect_enabled_run_js_file_keys(
+        self,
+        commands: List[Dict[str, Any]],
+        *,
+        preinject_only: bool = False,
+    ) -> set[str]:
+        keys: set[str] = set()
+        for command in commands or []:
+            if not isinstance(command, dict) or not bool(command.get("enabled", True)):
+                continue
+            for action in self._iter_run_js_file_actions(command):
+                if preinject_only and not self._coerce_action_bool(
+                    action.get("inject_on_new_document", True),
+                    True,
+                ):
+                    continue
+                resolved_path = self._resolve_action_file_path(action.get("file_path", ""))
+                if resolved_path:
+                    keys.add(resolved_path.lower())
+        return keys
+
+    def _collect_run_js_file_cleanup_actions(
+        self,
+        previous_commands: List[Dict[str, Any]],
+        next_commands: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        active_keys = self._collect_enabled_run_js_file_keys(next_commands)
+        active_preinject_keys = self._collect_enabled_run_js_file_keys(
+            next_commands,
+            preinject_only=True,
+        )
+        next_by_id: Dict[str, Dict[str, Any]] = {}
+        next_by_name: Dict[str, Dict[str, Any]] = {}
+        for command in next_commands or []:
+            if not isinstance(command, dict):
+                continue
+            command_id = str(command.get("id", "")).strip()
+            command_name = str(command.get("name", "")).strip()
+            if command_id:
+                next_by_id[command_id] = command
+            if command_name:
+                next_by_name[command_name] = command
+
+        cleanup_actions: List[Dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for command in previous_commands or []:
+            if not isinstance(command, dict) or not bool(command.get("enabled", True)):
+                continue
+            command_id = str(command.get("id", "")).strip()
+            command_name = str(command.get("name", "")).strip()
+            next_command = next_by_id.get(command_id) or next_by_name.get(command_name)
+            command_still_enabled = next_command is not None and bool(next_command.get("enabled", True))
+            for action in self._iter_run_js_file_actions(command):
+                resolved_path = self._resolve_action_file_path(action.get("file_path", ""))
+                action_key = resolved_path.lower() if resolved_path else f"{command_id}:{action.get('action_id', '')}"
+                if command_still_enabled:
+                    was_preinjected = self._coerce_action_bool(
+                        action.get("inject_on_new_document", True),
+                        True,
+                    )
+                    if not was_preinjected:
+                        continue
+                    if resolved_path and resolved_path.lower() in active_preinject_keys:
+                        continue
+                elif resolved_path and resolved_path.lower() in active_keys:
+                    continue
+                if action_key in seen_keys:
+                    continue
+                seen_keys.add(action_key)
+                cleanup_actions.append(copy.deepcopy(action))
+        return cleanup_actions
+
+    def _cleanup_disabled_run_js_file_actions(self, actions: List[Dict[str, Any]]) -> None:
+        if not actions:
+            return
+
+        try:
+            browser = self._get_browser()
+            pool = getattr(browser, "_tab_pool", None)
+            if pool is None or not hasattr(pool, "get_sessions_snapshot"):
+                return
+            sessions = list(pool.get_sessions_snapshot() or [])
+        except Exception as e:
+            logger.debug(f"[CMD] run_js_file 清理前获取会话失败（忽略）: {e}")
+            return
+
+        cleaned = 0
+        for session in sessions:
+            for action in actions:
+                try:
+                    result = self._cleanup_run_js_file_action(
+                        session,
+                        action,
+                        reason="command_disabled",
+                    )
+                    if result.get("removed_init_script") or result.get("ran_teardown"):
+                        cleaned += 1
+                    if not result.get("ok", True):
+                        logger.debug(
+                            f"[CMD] run_js_file 清理存在告警: "
+                            f"session={getattr(session, 'id', '')}, path={result.get('path', '')}, "
+                            f"errors={result.get('errors', [])}"
+                        )
+                except Exception as e:
+                    logger.debug(
+                        f"[CMD] run_js_file 清理失败（忽略）: "
+                        f"session={getattr(session, 'id', '')}, error={e}"
+                    )
+
+        if cleaned > 0:
+            logger.info(f"[CMD] 已清理 {cleaned} 个 run_js_file 注入实例")
+
     def _refresh_commands_if_changed(self, force: bool = False):
         with self._commands_lock:
             commands_file = self._get_commands_file()
@@ -1114,9 +1235,13 @@ return (function() {
                 or current_mtime != self._commands_mtime
                 or current_local_mtime != self._commands_local_mtime
             ):
-                self._commands_cache = self._read_commands_file()
+                previous_snapshot = copy.deepcopy(self._commands_cache) if self._commands_loaded else []
+                next_snapshot = self._read_commands_file()
+                cleanup_actions = self._collect_run_js_file_cleanup_actions(previous_snapshot, next_snapshot)
+                self._commands_cache = next_snapshot
                 self._commands_mtime = current_mtime
                 self._commands_loaded = True
+                self._cleanup_disabled_run_js_file_actions(cleanup_actions)
 
     def _save_commands(self, commands: List[Dict]) -> bool:
         commands_file = self._get_commands_file()
@@ -1127,6 +1252,7 @@ return (function() {
         try:
             with self._commands_lock:
                 commands_snapshot = copy.deepcopy(commands)
+                previous_snapshot = copy.deepcopy(self._commands_cache) if self._commands_loaded else []
                 os.makedirs(os.path.dirname(commands_file), exist_ok=True)
                 local_snapshot = self._snapshot_local_command_state()
                 if local_snapshot is None:
@@ -1147,6 +1273,8 @@ return (function() {
                     logger.warning(f"命令配置已保存但更新时间戳失败: {mtime_error}")
                 self._commands_loaded = True
                 self._commands_cache = commands_snapshot
+                cleanup_actions = self._collect_run_js_file_cleanup_actions(previous_snapshot, commands_snapshot)
+                self._cleanup_disabled_run_js_file_actions(cleanup_actions)
                 return True
         except Exception as e:
             logger.error(f"保存命令配置失败: {e}")

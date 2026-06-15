@@ -223,8 +223,7 @@ class WorkflowExecutor(
                 monitor.rebuild_after_external_interruption(reason)
             else:
                 monitor.pre_start()
-                monitor.mark_send_attempt()
-            logger.debug(f"[Executor] 外部中断后已重建网络监听: {reason}")
+            logger.debug(f"[Executor] 外部中断后已确认网络监听: {reason}")
         except Exception as e:
             logger.debug(f"[Executor] 外部中断后重建网络监听失败（忽略）: {e}")
 
@@ -863,11 +862,23 @@ class WorkflowExecutor(
             if self._check_cancelled():
                 logger.info(f"[Executor] step cancelled; suppressing workflow exception [{action}]: {e}")
                 return
-            logger.error(f"步骤执行失败 [{action}]: {e}")
-            if str(e) in {"new_chat_transition_timeout", "send_unconfirmed"}:
+            error_code = str(e)
+            logger.error(f"步骤执行失败 [{action}]: {error_code}")
+            if error_code in {"new_chat_transition_timeout", "send_unconfirmed"}:
                 raise
             if not optional:
-                yield self.formatter.pack_error(f"执行失败: {str(e)}")
+                file_paste_messages = {
+                    "file_paste_hint_unconfirmed": (
+                        "临时文件已上传，但提示语没有成功写入输入框，已中止发送以避免空消息或重复附件"
+                    ),
+                    "file_paste_upload_unconfirmed": (
+                        "临时文件上传状态没有确认，已中止发送以避免重复附件"
+                    ),
+                }
+                yield self.formatter.pack_error(
+                    file_paste_messages.get(error_code, f"执行失败: {error_code}"),
+                    code=error_code if error_code in file_paste_messages else "workflow_failed",
+                )
                 raise
         
         except Exception as e:
