@@ -42,6 +42,7 @@ logs/
 config/app_stats.json
 config/marketplace_cache.json
 config/request_history.json
+config/sites.local.json
 config/*.tmp
 
 # 系统文件

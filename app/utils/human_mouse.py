@@ -45,6 +45,7 @@ def _dispatch_mouse_move(tab, x: int, y: int, buttons: int = 0) -> bool:
     try:
         tab.run_cdp(
             'Input.dispatchMouseEvent',
+            _timeout=0,
             type='mouseMoved',
             x=int(x),
             y=int(y),
@@ -344,6 +345,7 @@ def human_scroll(
         try:
             tab.run_cdp(
                 'Input.dispatchMouseEvent',
+                _timeout=0,
                 type='mouseWheel',
                 x=int(mouse_x),
                 y=int(mouse_y),
@@ -419,6 +421,7 @@ def human_scroll_path(
             try:
                 tab.run_cdp(
                     'Input.dispatchMouseEvent',
+                    _timeout=0,
                     type='mouseWheel',
                     x=cur_x,
                     y=cur_y,
@@ -446,6 +449,7 @@ def human_scroll_path(
         try:
             tab.run_cdp(
                 'Input.dispatchMouseEvent',
+                _timeout=0,
                 type='mouseWheel',
                 x=x1,
                 y=y1,
@@ -514,6 +518,7 @@ def cdp_precise_click(
         # 2. mousePressed（force=0.5 → pressure=0.5）
         tab.run_cdp(
             'Input.dispatchMouseEvent',
+            _timeout=0,
             type='mousePressed',
             x=x,
             y=y,
@@ -559,6 +564,7 @@ def cdp_precise_click(
         
         tab.run_cdp(
             'Input.dispatchMouseEvent',
+            _timeout=0,
             type='mouseReleased',
             x=release_x,
             y=release_y,
@@ -581,6 +587,7 @@ def _release_mouse(tab, x: int, y: int):
     try:
         tab.run_cdp(
             'Input.dispatchMouseEvent',
+            _timeout=0,
             type='mouseReleased',
             x=int(x),
             y=int(y),
