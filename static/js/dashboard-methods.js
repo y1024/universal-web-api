@@ -313,6 +313,9 @@
         // ========== API 调用 ==========
 
         openTokenDialog() {
+            if (this.showTokenDialog) {
+                return
+            }
             this.tempToken = getStoredDashboardToken()
             this.showTokenDialog = true
         },

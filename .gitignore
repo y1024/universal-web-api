@@ -41,6 +41,7 @@ logs/
 # 运行时统计（持久化请求计数等）
 config/app_stats.json
 config/marketplace_cache.json
+config/model_name_overrides.local.json
 config/request_history.json
 config/sites.local.json
 config/*.tmp

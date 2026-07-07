@@ -2048,7 +2048,10 @@ class TextInputHandler:
         return normalize_temp_file_type(configured)
 
     def _get_file_paste_error_message(self, *, text_length: int, threshold: int) -> str:
-        configured = str(self._file_paste_config.get("hint_text") or "").strip()
+        configured = self._file_paste_config.get("error_hint_text")
+        if configured is None:
+            configured = self._file_paste_config.get("hint_text")
+        configured = str(configured or "").strip()
         if configured:
             return configured
         return f"输入文本长度 {text_length} 字符超过限制 {threshold} 字符，已中止发送"
@@ -2231,7 +2234,12 @@ class TextInputHandler:
 
             hint_ele = self._reacquire_input_after_upload(fallback_ele=ele)
 
-            hint_text = self._file_paste_config.get("hint_text", "完全专注于文件内容")
+            temp_type = self._get_file_paste_temp_file_type()
+            hint_key = f"{temp_type}_hint_text"
+            hint_text = self._file_paste_config.get(hint_key)
+            if hint_text is None:
+                hint_text = self._file_paste_config.get("hint_text", "完全专注于文件内容")
+
             if hint_text:
                 logger.debug(
                     f"[FILE_PASTE] 进入补文本阶段: reacquire={self._should_reacquire_input_after_upload()}, "

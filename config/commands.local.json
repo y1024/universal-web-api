@@ -15,6 +15,12 @@
     {
       "id": "cmd_cf_pagecheck_arena_verify",
       "name": "自动过cf盾",
+      "enabled": true,
+      "group_name": "arena"
+    },
+    {
+      "id": "cmd_cf_pagecheck_nopecha_wait",
+      "name": "NopeCHA人机验证等待",
       "enabled": false,
       "group_name": "arena"
     },
@@ -141,6 +147,12 @@
     {
       "id": "cmd_arena_context_model_lab",
       "name": "ARENA_CONTEXT_MODEL_LAB",
+      "enabled": true,
+      "group_name": "arena"
+    },
+    {
+      "id": "cmd_arena_auto_battle",
+      "name": "ARENA自动盲测与身份翻牌",
       "enabled": true,
       "group_name": "arena"
     }

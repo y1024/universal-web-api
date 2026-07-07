@@ -16,6 +16,9 @@ window.FilePastePanel = {
                 threshold: 50000,
                 temp_file_type: 'txt',
                 hint_text: '完全专注于文件内容',
+                txt_hint_text: '完全专注于文件内容',
+                pdf_hint_text: '完全专注于文件内容',
+                error_hint_text: '输入文本长度超过限制，已中止发送',
                 reacquire_input_after_upload: false,
                 post_upload_input_selector: '',
                 post_upload_settle: 0.0,
@@ -158,7 +161,16 @@ window.FilePastePanel = {
         },
 
         updateHintText(value) {
-            this.getMutableFilePaste().hint_text = value;
+            const fp = this.getMutableFilePaste();
+            const type = this.resolvedFilePaste.temp_file_type;
+            if (type === 'txt') {
+                fp.txt_hint_text = value;
+            } else if (type === 'pdf') {
+                fp.pdf_hint_text = value;
+            } else if (type === 'error') {
+                fp.error_hint_text = value;
+            }
+            fp.hint_text = value;
         },
 
         updateNumberField(field, value, fallback) {
@@ -264,7 +276,7 @@ window.FilePastePanel = {
                                 {{ resolvedFilePaste.temp_file_type === 'error' ? '错误信息' : '引导文本' }}
                             </label>
                             <input type="text"
-                                   :value="resolvedFilePaste.hint_text"
+                                   :value="resolvedFilePaste.temp_file_type === 'txt' ? resolvedFilePaste.txt_hint_text : (resolvedFilePaste.temp_file_type === 'pdf' ? resolvedFilePaste.pdf_hint_text : resolvedFilePaste.error_hint_text)"
                                    @input="updateHintText($event.target.value)"
                                    :placeholder="resolvedFilePaste.temp_file_type === 'error' ? '超过阈值时返回给客户端的错误信息' : '粘贴文件后追加的文字，留空则不追加'"
                                    class="w-full border dark:border-gray-600 px-3 py-2 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-400 focus:border-transparent">

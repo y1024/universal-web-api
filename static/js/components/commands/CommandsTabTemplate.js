@@ -843,6 +843,14 @@ window.CommandsTabTemplate = `
                                     <input type="checkbox" v-model="editingCommand.trigger.check_while_busy_workflow" class="rounded">
                                     工作流忙碌时仍参与页面检查
                                 </label>
+                                <label v-if="editingCommand.trigger.type === 'page_check'" class="flex items-center gap-2 text-sm dark:text-gray-300 pt-5 md:pt-6">
+                                    <input type="checkbox" v-model="editingCommand.trigger.reset_latch_on_failure" class="rounded">
+                                    执行失败时重置锁存
+                                </label>
+                                <label v-if="editingCommand.trigger.type === 'page_check'" class="flex items-center gap-2 text-sm dark:text-gray-300 pt-5 md:pt-6">
+                                    <input type="checkbox" v-model="editingCommand.trigger.once_per_request" class="rounded">
+                                    限制单次请求内仅触发一次
+                                </label>
                             </div>
                             <div class="mt-3">
                                 <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">工作流中断提示（可选）</label>

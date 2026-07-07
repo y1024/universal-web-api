@@ -65,6 +65,7 @@ class RequestContext:
     # v2.0 新增：关联的标签页 ID
     tab_id: Optional[str] = None
     monitor: Dict[str, Any] = field(default_factory=dict)
+    started_at_monotonic: Optional[float] = field(default=None, repr=False)
     
     def should_stop(self) -> bool:
         with self._lock:
@@ -100,6 +101,7 @@ class RequestContext:
     def mark_running(self, tab_id: str = None):
         with self._lock:
             self.started_at = time.time()
+            self.started_at_monotonic = time.monotonic()
             self.finished_at = None
             self.tab_id = tab_id
             if self._cancel_flag:
@@ -108,6 +110,11 @@ class RequestContext:
                     self.finished_at = self.started_at
             else:
                 self.status = RequestStatus.RUNNING
+
+    def reset_timeout(self):
+        with self._lock:
+            self.started_at_monotonic = time.monotonic()
+            logger.debug(f"[{self.request_id}] 重置请求绝对超时计时")
     
     def mark_completed(self):
         with self._lock:

@@ -432,14 +432,18 @@ class CommandEngineActionsMixin:
         previous_command_id = getattr(session, "_current_command_id", None)
         previous_command_chain = getattr(session, "_current_command_chain", None)
         previous_command_context = getattr(session, "_current_command_context", None)
+        previous_command_name = getattr(session, "current_command_name", None)
         session._current_command_priority = self._get_command_priority(command)
         session._current_command_id = command.get("id")
+        session.current_command_name = cmd_name
         current_chain = list(chain or [])
         command_id = str(command.get("id", "") or "").strip()
         if command_id:
             current_chain.append(command_id)
         session._current_command_chain = current_chain
         session._current_command_context = copy.deepcopy(interrupt_context) if interrupt_context else None
+        previous_current_command = getattr(session, "_current_command", None)
+        session._current_command = copy.deepcopy(command)
 
         mode_label = "高级模式" if mode == "advanced" else "简易模式"
         logger.debug(f"[CMD] ▶ 执行: {cmd_name} (模式={mode_label}, 标签页={session.id})")
@@ -474,6 +478,8 @@ class CommandEngineActionsMixin:
             session._current_command_id = previous_command_id
             session._current_command_chain = previous_command_chain
             session._current_command_context = previous_command_context
+            session._current_command = previous_current_command
+            session.current_command_name = previous_command_name
             self._resume_tab_global_network(session, reason=f"command:{command.get('id', '')}")
 
     def _execute_simple(self, command: Dict, session: 'TabSession') -> Dict[str, Any]:
@@ -645,15 +651,27 @@ return (() => {
         timeout_sec = max(0.5, self._coerce_float(action.get("timeout_sec", 6), 6.0))
         random_radius = max(0, self._coerce_int(action.get("random_radius", 4), 4))
         deadline = time.time() + timeout_sec
+        
+        max_attempts = action.get("max_attempts")
+        if max_attempts is not None:
+            try:
+                max_attempts = max(1, int(max_attempts))
+            except Exception:
+                max_attempts = None
+
         last_probe: Any = None
         last_error = ""
+        attempt_count = 0
 
         while time.time() < deadline:
+            attempt_count += 1
             try:
                 probe = session.tab.run_js(self._captcha_click_point_script())
             except Exception as e:
                 last_error = f"captcha_probe_failed:{e}"
                 logger.warning(f"[CMD] 人机验证目标探测失败，继续重试: {e}")
+                if max_attempts is not None and attempt_count >= max_attempts:
+                    break
                 time.sleep(0.25)
                 continue
 
@@ -667,6 +685,8 @@ return (() => {
                     logger.warning(
                         f"[CMD] 人机验证坐标解析失败，继续重试: probe={str(probe)[:160]}"
                     )
+                    if max_attempts is not None and attempt_count >= max_attempts:
+                        break
                     time.sleep(0.25)
                     continue
 
@@ -710,6 +730,8 @@ return (() => {
                 except Exception as e:
                     last_error = f"captcha_click_failed:{e}"
                     logger.warning(f"[CMD] 人机验证 CDP 点击失败，继续重试: {e}")
+                    if max_attempts is not None and attempt_count >= max_attempts:
+                        break
                     time.sleep(0.25)
                     continue
 
@@ -718,6 +740,8 @@ return (() => {
                     logger.warning(
                         f"[CMD] 人机验证 CDP 点击未确认，继续重试: x={click_x}, y={click_y}"
                     )
+                    if max_attempts is not None and attempt_count >= max_attempts:
+                        break
                     time.sleep(0.25)
                     continue
 
@@ -733,6 +757,8 @@ return (() => {
                     "hint": probe.get("hint", ""),
                 }
 
+            if max_attempts is not None and attempt_count >= max_attempts:
+                break
             time.sleep(0.25)
 
         logger.warning(f"[CMD] 未找到可点击的人机验证目标: last={str(last_probe)[:160]}")
@@ -2023,6 +2049,7 @@ return (() => {
 
     def _build_template_context(self, session: 'TabSession') -> Dict[str, Any]:
         current_context = getattr(session, "_current_command_context", None) or {}
+        current_command = getattr(session, "_current_command", None) or {}
         latest_event = copy.deepcopy(current_context.get("network_event") or {})
         latest_result_event = copy.deepcopy(current_context.get("command_result_event") or {})
         domain = self._get_session_domain(session)
@@ -2048,6 +2075,7 @@ return (() => {
             "command_result_mode": str(latest_result_event.get("mode", "") or ""),
             "command_result_informative": str(bool(latest_result_event.get("informative", False))).lower(),
             "command_result_time": str(int(latest_result_event.get("timestamp", 0) or 0)),
+            "command_ui": copy.deepcopy(current_command.get("advanced_ui") or {}),
         }
         context.update({
             str(key): str(value)
@@ -2587,7 +2615,22 @@ return (() => {
 
         if lang == "javascript":
             try:
-                result = session.tab.run_js(script)
+                ui_payload = copy.deepcopy(command.get("advanced_ui") or {})
+                import re
+                if re.search(r'\breturn\b', script):
+                    wrapped_script = (
+                        "return (function(command_ui) {\n"
+                        "const ui = command_ui || {};\n"
+                        + script +
+                        "\n}).call(this, arguments[0] || {});"
+                    )
+                else:
+                    wrapped_script = (
+                        "const command_ui = arguments[0] || {};\n"
+                        "const ui = command_ui.values || command_ui;\n"
+                        + script
+                    )
+                result = session.tab.run_js(wrapped_script, ui_payload)
                 logger.info(f"[CMD] JS 脚本执行完成: {str(result)[:200]}")
                 return {"mode": "advanced", "result": result, "steps": []}
             except Exception as e:
@@ -2598,8 +2641,51 @@ return (() => {
             import json as json_module
             from app.services.request_manager import request_manager
 
+            initial_request_ids = []
+            initial_task_id = str(getattr(session, "current_task_id", "") or "").strip()
+            initial_task_status = str(getattr(getattr(session, "status", None), "value", "") or "").strip().lower()
+            try:
+                for attr_name in ("_command_request_id", "_bound_request_id"):
+                    request_id = str(getattr(session, attr_name, "") or "").strip()
+                    if request_id and request_id not in initial_request_ids:
+                        initial_request_ids.append(request_id)
+                task_id = str(getattr(session, "current_task_id", "") or "").strip()
+                if task_id.startswith("req-") and task_id not in initial_request_ids:
+                    initial_request_ids.append(task_id)
+            except Exception:
+                pass
+
+            _last_reset_time = 0.0
+
+            def _reset_timeout() -> None:
+                nonlocal _last_reset_time
+                now = time.monotonic()
+                if now - _last_reset_time < 0.5:
+                    return
+                _last_reset_time = now
+
+                request_ids = list(initial_request_ids)
+                try:
+                    for attr_name in ("_command_request_id", "_bound_request_id"):
+                        request_id = str(getattr(session, attr_name, "") or "").strip()
+                        if request_id and request_id not in request_ids:
+                            request_ids.append(request_id)
+                except Exception:
+                    pass
+                try:
+                    task_id = str(getattr(session, "current_task_id", "") or "").strip()
+                    if task_id.startswith("req-") and task_id not in request_ids:
+                        request_ids.append(task_id)
+                except Exception:
+                    pass
+                for req_id in request_ids:
+                    ctx = request_manager.get_request(req_id)
+                    if ctx is not None and hasattr(ctx, "reset_timeout"):
+                        ctx.reset_timeout()
+
             def _check_cancelled() -> bool:
-                request_ids = []
+                _reset_timeout()
+                request_ids = list(initial_request_ids)
                 try:
                     for attr_name in ("_command_request_id", "_bound_request_id"):
                         request_id = str(getattr(session, attr_name, "") or "").strip()
@@ -2618,6 +2704,15 @@ return (() => {
                         ctx = request_manager.get_request(request_id)
                         if ctx is not None and ctx.should_stop():
                             return True
+                except Exception:
+                    pass
+                try:
+                    current_task_id = str(getattr(session, "current_task_id", "") or "").strip()
+                    current_task_status = str(getattr(getattr(session, "status", None), "value", "") or "").strip().lower()
+                    if initial_task_id and current_task_id != initial_task_id:
+                        return True
+                    if initial_task_id and current_task_status != initial_task_status and current_task_status in {"idle", "error", "closed"}:
+                        return True
                 except Exception:
                     pass
                 try:
@@ -2640,22 +2735,24 @@ return (() => {
                 "logger": logger,
                 "time": time,
                 "json": json_module,
+                "command_ui": copy.deepcopy(command.get("advanced_ui") or {}),
                 "check_cancelled": _check_cancelled,
                 "raise_if_cancelled": _raise_if_cancelled,
+                "reset_timeout": _reset_timeout,
                 "result": "",
             }
             try:
                 if self._command_env_flag("CMD_ALLOW_UNSAFE_PYTHON_COMMANDS", False):
                     logger.warning("[CMD] Python 脚本正在以非沙箱模式执行，请仅用于完全可信配置")
-                    exec(script, {"__builtins__": __builtins__}, context)
+                    globals_dict = {"__builtins__": __builtins__}
                 else:
                     allowed_imports = self._get_python_sandbox_allowed_imports()
                     self._validate_python_script_safety(script, allowed_imports)
-                    exec(
-                        script,
-                        {"__builtins__": self._build_python_safe_builtins(allowed_imports)},
-                        context,
-                    )
+                    globals_dict = {"__builtins__": self._build_python_safe_builtins(allowed_imports)}
+
+                globals_dict.update(context)
+                exec(script, globals_dict)
+                context.update(globals_dict)
                 logger.info("[CMD] Python 脚本执行完成")
                 return {"mode": "advanced", "result": context.get("result", ""), "steps": []}
             except Exception as e:
@@ -2683,7 +2780,10 @@ return (() => {
 
     def get_trigger_states(self) -> Dict[str, Any]:
         with self._lock:
-            return {
-                f"{cmd_id}:{tab_id}": copy.deepcopy(state)
-                for (cmd_id, tab_id), state in self._trigger_states.items()
-            }
+            result = {}
+            for (cmd_id, tab_id), state in self._trigger_states.items():
+                copied = copy.deepcopy(state)
+                if "triggered_requests" in copied and isinstance(copied["triggered_requests"], set):
+                    copied["triggered_requests"] = list(copied["triggered_requests"])
+                result[f"{cmd_id}:{tab_id}"] = copied
+            return result

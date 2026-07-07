@@ -283,6 +283,23 @@ window.CommandsTabComputed = {
         resolvedPresetDomain() {
             return this.getBoundDomain(this.editingCommand);
         },
+        advancedUiConfig() {
+            return this.editingCommand?.advanced_ui || {};
+        },
+        advancedUiFields() {
+            const fields = this.advancedUiConfig.fields;
+            return Array.isArray(fields) ? fields : [];
+        },
+        hasAdvancedUiForm() {
+            return String(this.advancedUiConfig.kind || '').trim().toLowerCase() === 'form'
+                && this.advancedUiFields.length > 0;
+        },
+        advancedUiTitle() {
+            return String(this.advancedUiConfig.title || '').trim() || '高级命令配置';
+        },
+        advancedUiDescription() {
+            return String(this.advancedUiConfig.description || '').trim();
+        },
         scriptPlaceholder() {
             if (!this.editingCommand) return '';
             if (this.editingCommand.script_lang === 'javascript') {

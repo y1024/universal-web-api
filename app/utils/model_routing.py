@@ -30,6 +30,10 @@ def _normalize_model_id(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _clean_model_id(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def _build_model_id_candidates(route_domain: str) -> List[str]:
     """
     Build user-facing model ids for a routed site.
@@ -81,46 +85,102 @@ def _resolve_route_domain(tab: Dict[str, Any]) -> str:
     ).strip().lower()
 
 
-def collect_route_domain_models(tabs: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def _default_model_id_for_tab(tab: Dict[str, Any]) -> str:
+    return (
+        _clean_model_id(tab.get("route_domain"))
+        or _clean_model_id(get_preferred_route_domain(tab.get("current_domain") or ""))
+        or _clean_model_id(tab.get("current_domain"))
+    )
+
+
+def _is_model_name_overridden(tab: Dict[str, Any]) -> bool:
+    return bool(_clean_model_id(tab.get("model_name_override_source")))
+
+
+def _get_exposed_model_id(tab: Dict[str, Any]) -> str:
+    return _clean_model_id(tab.get("exposed_model_name")) or _default_model_id_for_tab(tab)
+
+
+def collect_route_domain_models(tabs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Build a deduplicated model list from active tabs.
 
-    Exact route-domain ids are always exported. Friendly aliases such as
-    "deepseek" are exported only when they map to a single routed site.
+    The exported model id is the tab's exposed model name. Tabs without a
+    custom name keep the historical route-domain id and aliases.
     """
-    exact_route_domains = set()
+    model_map: Dict[str, Dict[str, Any]] = {}
     alias_map: Dict[str, str] = {}
     ambiguous_aliases = set()
 
+    def _ensure_model(model_id: str, route_domain: str = "", *, allow_prefix: bool = True) -> None:
+        normalized_model = _normalize_model_id(model_id)
+        if not normalized_model:
+            return
+        if normalized_model not in model_map:
+            model_map[normalized_model] = {
+                "id": _clean_model_id(model_id),
+                "display_name": _clean_model_id(model_id),
+                "model_name": _clean_model_id(model_id),
+                "route_type": "model_name",
+                "route_domains": set(),
+                "allow_prefix": bool(allow_prefix),
+            }
+        if route_domain:
+            model_map[normalized_model]["route_domains"].add(route_domain)
+        if not allow_prefix:
+            model_map[normalized_model]["allow_prefix"] = False
+
     for tab in tabs or []:
         route_domain = _resolve_route_domain(tab)
-        if not route_domain:
+        exposed_model_id = _get_exposed_model_id(tab)
+        if not exposed_model_id:
             continue
 
-        exact_route_domains.add(route_domain)
+        overridden = _is_model_name_overridden(tab)
+        _ensure_model(exposed_model_id, route_domain, allow_prefix=not overridden)
 
+        if overridden or not route_domain:
+            continue
+
+        exposed_key = _normalize_model_id(exposed_model_id)
         for alias_id in _build_model_id_candidates(route_domain):
-            if alias_id == route_domain:
+            alias_key = _normalize_model_id(alias_id)
+            if not alias_key or alias_key == exposed_key:
                 continue
-            existing = alias_map.get(alias_id)
-            if existing and existing != route_domain:
-                ambiguous_aliases.add(alias_id)
+            existing = alias_map.get(alias_key)
+            if existing and existing != exposed_key:
+                ambiguous_aliases.add(alias_key)
                 continue
-            alias_map[alias_id] = route_domain
+            alias_map[alias_key] = exposed_key
 
-    result: List[Dict[str, str]] = []
-    for route_domain in sorted(exact_route_domains):
-        result.append({
-            "id": route_domain,
-            "route_domain": route_domain,
-        })
-
-    for alias_id in sorted(alias_map):
-        if alias_id in ambiguous_aliases or alias_id in exact_route_domains:
+    for alias_key in sorted(alias_map):
+        if alias_key in ambiguous_aliases or alias_key in model_map:
             continue
+        target_key = alias_map[alias_key]
+        target = model_map.get(target_key)
+        if not target:
+            continue
+        model_map[alias_key] = {
+            "id": alias_key,
+            "display_name": alias_key,
+            "model_name": target["model_name"],
+            "route_type": "model_name",
+            "route_domains": set(target.get("route_domains") or set()),
+            "allow_prefix": True,
+        }
+
+    result: List[Dict[str, Any]] = []
+    for model_key in sorted(model_map):
+        item = model_map[model_key]
+        route_domains = sorted(item.get("route_domains") or [])
         result.append({
-            "id": alias_id,
-            "route_domain": alias_map[alias_id],
+            "id": item["id"],
+            "display_name": item.get("display_name") or item["id"],
+            "model_name": item.get("model_name") or item["id"],
+            "route_type": item.get("route_type") or "model_name",
+            "route_domain": route_domains[0] if len(route_domains) == 1 else "",
+            "route_domains": route_domains,
+            "allow_prefix": bool(item.get("allow_prefix", True)),
         })
 
     return result
@@ -137,6 +197,8 @@ def inspect_model_route(model: Any, tabs: List[Dict[str, Any]]) -> Dict[str, Any
     info: Dict[str, Any] = {
         "normalized_model": normalized_model,
         "route_domain": "",
+        "route_type": "",
+        "model_name": "",
         "matched_id": "",
         "match_type": "none",
         "available_model_ids": available_model_ids,
@@ -147,16 +209,20 @@ def inspect_model_route(model: Any, tabs: List[Dict[str, Any]]) -> Dict[str, Any
         return info
 
     for item in models:
-        if normalized_model == item["id"]:
-            info["route_domain"] = item["route_domain"]
-            info["matched_id"] = item["id"]
+        if normalized_model == _normalize_model_id(item["id"]):
+            info["route_domain"] = str(item.get("route_domain") or "")
+            info["route_type"] = str(item.get("route_type") or "model_name")
+            info["model_name"] = str(item.get("model_name") or item.get("id") or "")
+            info["matched_id"] = str(item.get("id") or "")
             info["match_type"] = "exact"
             return info
 
     for item in models:
-        if _matches_model_alias(normalized_model, item["id"]):
-            info["route_domain"] = item["route_domain"]
-            info["matched_id"] = item["id"]
+        if item.get("allow_prefix") and _matches_model_alias(normalized_model, _normalize_model_id(item["id"])):
+            info["route_domain"] = str(item.get("route_domain") or "")
+            info["route_type"] = str(item.get("route_type") or "model_name")
+            info["model_name"] = str(item.get("model_name") or item.get("id") or "")
+            info["matched_id"] = str(item.get("id") or "")
             info["match_type"] = "prefix"
             return info
 

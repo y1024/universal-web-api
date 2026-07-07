@@ -86,6 +86,7 @@ class TabPoolManager:
         allocation_mode: str = "first_idle",
         excluded_urls: Optional[List[str]] = None,
         preserve_error_tabs: bool = False,
+        model_name_overrides: Optional[Dict[str, Any]] = None,
     ):
         self.page = browser_page
         self.max_tabs = max_tabs
@@ -96,6 +97,7 @@ class TabPoolManager:
         self.allocation_mode = self._normalize_allocation_mode(allocation_mode)
         self.excluded_urls = self._normalize_excluded_urls(excluded_urls)
         self.preserve_error_tabs = self._to_bool(preserve_error_tabs, False)
+        self.model_name_overrides = self._normalize_model_name_overrides(model_name_overrides)
 
         self._tabs: Dict[str, TabSession] = {}
         self._lock = threading.RLock()
@@ -182,6 +184,71 @@ class TabPoolManager:
             normalized.append(normalized_text)
         return normalized
 
+    @staticmethod
+    def _normalize_model_name(value: Any) -> str:
+        return str(value or "").strip()
+
+    @classmethod
+    def _normalize_model_name_overrides(cls, value: Any) -> Dict[str, Dict[str, str]]:
+        payload = value if isinstance(value, dict) else {}
+        normalized = {"sites": {}, "urls": {}}
+
+        sites = payload.get("sites") if isinstance(payload, dict) else {}
+        if isinstance(sites, dict):
+            for key, model_name in sites.items():
+                route_key = normalize_route_domain(key)
+                display_name = cls._normalize_model_name(model_name)
+                if route_key and display_name:
+                    normalized["sites"][route_key] = display_name
+
+        urls = payload.get("urls") if isinstance(payload, dict) else {}
+        if isinstance(urls, dict):
+            for key, model_name in urls.items():
+                url_key = normalize_exact_tab_url(str(key or "").strip())
+                display_name = cls._normalize_model_name(model_name)
+                if url_key and display_name:
+                    normalized["urls"][url_key] = display_name
+
+        return normalized
+
+    @staticmethod
+    def _default_model_name_for_info(info: Dict[str, Any]) -> str:
+        route_domain = str(info.get("route_domain") or "").strip()
+        current_domain = str(info.get("current_domain") or "").strip()
+        tab_id = str(info.get("id") or "").strip()
+        return route_domain or current_domain or tab_id or "web-browser"
+
+    def _apply_exposed_model_name(self, info: Dict[str, Any]) -> None:
+        default_name = self._default_model_name_for_info(info)
+        override_source = ""
+        override_name = self._normalize_model_name(info.get("model_name_override"))
+
+        if override_name:
+            override_source = "tab"
+        else:
+            overrides = self._normalize_model_name_overrides(
+                getattr(self, "model_name_overrides", None)
+            )
+            current_url = str(info.get("url") or "").strip()
+            normalized_url = normalize_exact_tab_url(current_url)
+            if normalized_url:
+                override_name = overrides["urls"].get(normalized_url, "")
+                if override_name:
+                    override_source = "url"
+
+            if not override_name:
+                route_domain = normalize_route_domain(
+                    info.get("route_domain") or info.get("current_domain") or ""
+                )
+                if route_domain:
+                    override_name = overrides["sites"].get(route_domain, "")
+                    if override_name:
+                        override_source = "site"
+
+        info["default_model_name"] = default_name
+        info["exposed_model_name"] = override_name or default_name
+        info["model_name_override_source"] = override_source
+
     def is_url_excluded(self, url: str) -> bool:
         current_url = str(url or "").strip()
         if not current_url:
@@ -222,6 +289,7 @@ class TabPoolManager:
         allocation_mode: Optional[str] = None,
         excluded_urls: Optional[List[str]] = None,
         preserve_error_tabs: Optional[bool] = None,
+        model_name_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """同步更新运行中的标签页池参数。"""
         with self._lock:
@@ -245,6 +313,8 @@ class TabPoolManager:
                 self.excluded_urls = self._normalize_excluded_urls(excluded_urls)
             if preserve_error_tabs is not None:
                 self.preserve_error_tabs = self._to_bool(preserve_error_tabs, False)
+            if model_name_overrides is not None:
+                self.model_name_overrides = self._normalize_model_name_overrides(model_name_overrides)
 
             updated = {
                 "max_tabs": self.max_tabs,
@@ -255,6 +325,10 @@ class TabPoolManager:
                 "allocation_mode": self.allocation_mode,
                 "excluded_urls": list(self.excluded_urls),
                 "preserve_error_tabs": self.preserve_error_tabs,
+                "model_name_overrides": {
+                    "sites": dict(getattr(self, "model_name_overrides", {}).get("sites", {})),
+                    "urls": dict(getattr(self, "model_name_overrides", {}).get("urls", {})),
+                },
             }
 
             logger.info(
@@ -263,7 +337,10 @@ class TabPoolManager:
                 f"idle_timeout={self.idle_timeout}, acquire_timeout={self.acquire_timeout}, "
                 f"stuck_timeout={self.stuck_timeout}, allocation_mode={self.allocation_mode}, "
                 f"excluded_urls={len(self.excluded_urls)}, "
-                f"preserve_error_tabs={self.preserve_error_tabs}"
+                f"preserve_error_tabs={self.preserve_error_tabs}, "
+                f"model_name_overrides="
+                f"{len(updated['model_name_overrides']['sites'])}/"
+                f"{len(updated['model_name_overrides']['urls'])}"
             )
             return updated
 
@@ -788,6 +865,7 @@ class TabPoolManager:
             url_route_token = str(info.get("url_route_token") or "").strip()
             info["exact_url_route_prefix"] = f"/tab-url/{url_route_token}" if url_route_token else ""
             info["route_prefix"] = info["domain_route_prefix"] or info["tab_route_prefix"]
+            self._apply_exposed_model_name(info)
 
             return {
                 "ok": True,
@@ -839,6 +917,7 @@ class TabPoolManager:
             url_route_token = str(info.get("url_route_token") or "").strip()
             info["exact_url_route_prefix"] = f"/tab-url/{url_route_token}" if url_route_token else ""
             info["route_prefix"] = info["domain_route_prefix"] or info["tab_route_prefix"]
+            self._apply_exposed_model_name(info)
 
             return {
                 "ok": True,
@@ -2757,7 +2836,8 @@ class TabPoolManager:
                 return {"ok": False, "error": "tab_not_found", "tab_index": persistent_index}
 
             before_snapshot = self._describe_session(session)
-            task_id = session.current_task_id or ""
+            task_id = str(session.current_task_id or "").strip()
+            command_request_id = str(getattr(session, "_command_request_id", "") or "").strip()
             was_busy = session.status == TabStatus.BUSY
             use_force_release = bool(was_busy or clear_page)
             release_state = session._begin_release_state(
@@ -2778,10 +2858,16 @@ class TabPoolManager:
         cancelled = False
         cancel_error = ""
 
-        if task_id:
+        request_ids_to_cancel = []
+        for request_id in (task_id, command_request_id):
+            if request_id and request_id not in request_ids_to_cancel:
+                request_ids_to_cancel.append(request_id)
+
+        if request_ids_to_cancel:
             try:
                 from app.services.request_manager import request_manager
-                cancelled = bool(request_manager.cancel_request(task_id, reason))
+                for request_id in request_ids_to_cancel:
+                    cancelled = bool(request_manager.cancel_request(request_id, reason)) or cancelled
             except Exception as e:
                 cancel_error = str(e)
                 logger.debug(f"[{session.id}] 取消任务失败（忽略）: {e}")
@@ -2853,6 +2939,7 @@ class TabPoolManager:
             info["preset_domain_route_prefix"] = f"/url/{preset_route_domain}" if preset_route_domain else ""
             info["exact_url_route_prefix"] = exact_url_route_prefix
             info["route_prefix"] = domain_route_prefix or tab_route_prefix
+            self._apply_exposed_model_name(info)
             result.append(info)
 
         # 按编号排序
@@ -2906,6 +2993,41 @@ class TabPoolManager:
                 return None
 
             return session.preset_name
+
+    # ================= 暴露模型名管理 =================
+
+    def set_tab_model_name(self, persistent_index: int, model_name: Optional[str]) -> Dict[str, Any]:
+        """为指定标签页设置临时暴露模型名。空值表示恢复到持久化/默认规则。"""
+        normalized_name = self._normalize_model_name(model_name)
+        with self._lock:
+            session_id = self._persistent_to_session_id.get(persistent_index)
+            if not session_id:
+                return {"ok": False, "error": "tab_not_found", "tab_index": persistent_index}
+
+            session = self._tabs.get(session_id)
+            if not session:
+                return {"ok": False, "error": "tab_not_found", "tab_index": persistent_index}
+
+            session.model_name_override = normalized_name or None
+            info = session.get_info(use_cached_url=True)
+            tab_route_prefix = f"/tab/{session.persistent_index}"
+            route_domain = str(info.get("route_domain") or "").strip()
+            domain_route_prefix = f"/url/{route_domain}" if route_domain else ""
+            preset_route_domain = str(info.get("current_domain") or route_domain).strip()
+            url_route_token = str(info.get("url_route_token") or "").strip()
+            info["tab_route_prefix"] = tab_route_prefix
+            info["domain_route_prefix"] = domain_route_prefix
+            info["preset_route_domain"] = preset_route_domain
+            info["preset_domain_route_prefix"] = f"/url/{preset_route_domain}" if preset_route_domain else ""
+            info["exact_url_route_prefix"] = f"/tab-url/{url_route_token}" if url_route_token else ""
+            info["route_prefix"] = domain_route_prefix or tab_route_prefix
+            self._apply_exposed_model_name(info)
+
+            return {
+                "ok": True,
+                "tab_index": persistent_index,
+                "tab": info,
+            }
 
     # ================= 状态查询 =================
 

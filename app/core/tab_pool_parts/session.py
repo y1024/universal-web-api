@@ -29,6 +29,7 @@ class TabSession:
     tab: Any
     status: TabStatus = TabStatus.IDLE
     current_task_id: Optional[str] = None
+    current_command_name: Optional[str] = None
     current_domain: Optional[str] = None
     last_known_url: Optional[str] = None
     created_at: float = field(default_factory=time.time)
@@ -37,6 +38,7 @@ class TabSession:
     error_count: int = 0
     persistent_index: int = 0  # 🆕 持久化编号（重启前不变）
     preset_name: Optional[str] = None  # 🆕 当前显式指定的预设名称（None = 跟随站点默认预设）
+    model_name_override: Optional[str] = None  # 当前标签页临时暴露模型名（关闭标签页后失效）
     browser_context_id: Optional[str] = None
     is_isolated_context: bool = False
     transient_disconnect_until: float = 0.0
@@ -217,6 +219,7 @@ class TabSession:
                 self.status = TabStatus.IDLE
 
             self.current_task_id = None
+            self.current_command_name = None
             self._clear_health_cache_unlocked()
             setattr(self, "_bound_request_id", None)
             setattr(self, "_command_request_id", None)
@@ -520,10 +523,15 @@ class TabSession:
             status = self.status
             last_used_at = self.last_used_at
             current_task_id = self.current_task_id
+            command_request_id = str(getattr(self, "_command_request_id", "") or "").strip()
+            current_command_id = str(getattr(self, "_current_command_id", "") or "").strip()
+            current_command_name = str(self.current_command_name or "").strip()
+            current_command = getattr(self, "_current_command", None)
             current_domain_snapshot = str(self.current_domain or "").strip()
             cached_url = str(self.last_known_url or "").strip()
             request_count = self.request_count
             preset_name = self.preset_name
+            model_name_override = self.model_name_override
             is_isolated_context = self.is_isolated_context
             browser_context_id = self.browser_context_id
             last_conversation_activity_at = self.last_conversation_activity_at
@@ -545,11 +553,17 @@ class TabSession:
 
         url_route_token = encode_tab_url_route_token(current_url)
 
+        if not current_command_name and isinstance(current_command, dict):
+            current_command_name = str(current_command.get("name") or "").strip()
+
         return {
             "id": self.id,
             "persistent_index": self.persistent_index,
             "status": status.value,
             "current_task": current_task_id,
+            "command_task": command_request_id,
+            "current_command_id": current_command_id,
+            "current_command": current_command_name,
             "current_domain": current_domain,
             "route_domain": get_preferred_route_domain(current_domain),
             "domain_url": self._build_domain_url(current_url, current_domain),
@@ -558,6 +572,7 @@ class TabSession:
             "request_count": request_count,
             "busy_duration": busy_duration,
             "preset_name": preset_name,  # 🆕
+            "model_name_override": model_name_override,
             "is_isolated_context": is_isolated_context,
             "browser_context_id": browser_context_id,
             "last_conversation_at": last_conversation_activity_at or None,

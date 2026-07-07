@@ -236,6 +236,8 @@ TAB_SELECTOR_OPTIONS = {"first_idle", "round_robin", "random"}
 _route_round_robin_cursor: Dict[str, int] = {}
 _route_round_robin_lock = threading.Lock()
 _browser_config_lock = threading.RLock()
+_model_name_overrides_lock = threading.RLock()
+MODEL_NAME_OVERRIDES_PATH = Path("config/model_name_overrides.local.json")
 
 
 async def _cleanup_route_worker_thread(
@@ -578,6 +580,95 @@ def _normalize_excluded_urls(value: Any) -> List[str]:
     return normalized
 
 
+def _normalize_model_name(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_model_name_key(value: Any) -> str:
+    return _normalize_model_name(value).lower()
+
+
+def _normalize_model_name_overrides(value: Any) -> Dict[str, Dict[str, str]]:
+    payload = value if isinstance(value, dict) else {}
+    normalized: Dict[str, Dict[str, str]] = {"sites": {}, "urls": {}}
+
+    sites = payload.get("sites") if isinstance(payload, dict) else {}
+    if isinstance(sites, dict):
+        for key, model_name in sites.items():
+            route_key = normalize_route_domain(key)
+            display_name = _normalize_model_name(model_name)
+            if route_key and display_name:
+                normalized["sites"][route_key] = display_name
+
+    urls = payload.get("urls") if isinstance(payload, dict) else {}
+    if isinstance(urls, dict):
+        for key, model_name in urls.items():
+            url_key = normalize_exact_tab_url(str(key or "").strip())
+            display_name = _normalize_model_name(model_name)
+            if url_key and display_name:
+                normalized["urls"][url_key] = display_name
+
+    return normalized
+
+
+def _get_legacy_model_name_overrides_from_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, str]]:
+    payload = config if isinstance(config, dict) else _read_browser_config()
+    tab_pool_config = payload.get("tab_pool") if isinstance(payload, dict) else {}
+    if not isinstance(tab_pool_config, dict):
+        tab_pool_config = {}
+    return _normalize_model_name_overrides(tab_pool_config.get("model_name_overrides"))
+
+
+def _read_model_name_overrides_unlocked() -> Dict[str, Dict[str, str]]:
+    if MODEL_NAME_OVERRIDES_PATH.exists():
+        try:
+            with open(MODEL_NAME_OVERRIDES_PATH, "r", encoding="utf-8-sig") as f:
+                return _normalize_model_name_overrides(json.load(f))
+        except Exception as e:
+            logger.warning(f"读取模型显示名称本地配置失败: {e}")
+            return {"sites": {}, "urls": {}}
+
+    return _get_legacy_model_name_overrides_from_config()
+
+
+def _read_model_name_overrides() -> Dict[str, Dict[str, str]]:
+    with _model_name_overrides_lock:
+        return _read_model_name_overrides_unlocked()
+
+
+def _write_model_name_overrides_unlocked(overrides: Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+    normalized = _normalize_model_name_overrides(overrides)
+    atomic_write_json(MODEL_NAME_OVERRIDES_PATH, normalized)
+    return normalized
+
+
+def _get_tab_pool_model_name_overrides(tab_pool: Any, config: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, str]]:
+    try:
+        overrides = getattr(tab_pool, "model_name_overrides", None)
+        if overrides is not None:
+            return _normalize_model_name_overrides(overrides)
+    except Exception:
+        pass
+    return _read_model_name_overrides()
+
+
+def _sync_tab_pool_model_name_overrides(overrides: Dict[str, Dict[str, str]]) -> bool:
+    try:
+        from app.core.config import BrowserConstants
+        if hasattr(BrowserConstants, "reload"):
+            BrowserConstants.reload()
+    except Exception as reload_error:
+        logger.warning(f"热重载浏览器常量失败: {reload_error}")
+
+    try:
+        browser = get_browser(auto_connect=False)
+        browser.tab_pool.apply_runtime_config(model_name_overrides=overrides)
+        return True
+    except Exception as sync_error:
+        logger.warning(f"同步模型显示名称配置失败: {sync_error}")
+        return False
+
+
 def _coerce_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -693,6 +784,19 @@ def _get_tabs_by_url_route_token(browser, url_token: str) -> List[Dict[str, Any]
     return matches
 
 
+def _get_tabs_by_exposed_model_name(browser, model_name: str) -> List[Dict[str, Any]]:
+    target = _normalize_model_name_key(model_name)
+    if not target:
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    for item in browser.tab_pool.get_tabs_with_index():
+        exposed_name = _normalize_model_name_key(item.get("exposed_model_name"))
+        if exposed_name and exposed_name == target:
+            matches.append(item)
+    return matches
+
+
 def _list_candidate_tabs(browser, route_domain: str = "") -> List[Dict[str, Any]]:
     tabs = browser.tab_pool.get_tabs_with_index()
     target = normalize_route_domain(route_domain)
@@ -751,12 +855,14 @@ def _resolve_target_tab(
     route_domain: str = "",
     exact_url: str = "",
     url_token: str = "",
+    model_name: str = "",
     tab_index: Optional[int] = None,
     selector: str = "first_idle",
 ) -> Dict[str, Any]:
     target_route = normalize_route_domain(route_domain)
     target_exact_url = normalize_exact_tab_url(exact_url)
     target_url_token = str(url_token or "").strip().lower()
+    target_model_name = _normalize_model_name_key(model_name)
 
     if tab_index is not None:
         tab_info = _get_tab_info_by_index(browser, int(tab_index))
@@ -783,6 +889,13 @@ def _resolve_target_tab(
                 status_code=400,
                 detail="指定标签页与 URL 路由不匹配",
             )
+        if target_model_name:
+            actual_model_name = _normalize_model_name_key(tab_info.get("exposed_model_name"))
+            if actual_model_name != target_model_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail="指定标签页与模型显示名称不匹配",
+                )
         return tab_info
 
     if target_exact_url:
@@ -796,6 +909,16 @@ def _resolve_target_tab(
         if not matches:
             raise HTTPException(status_code=404, detail="URL 路由没有匹配的已打开标签页")
         return _select_round_robin_tab(matches, f"url_token::{target_url_token}")
+
+    if target_model_name:
+        matches = _get_tabs_by_exposed_model_name(browser, target_model_name)
+        if not matches:
+            raise HTTPException(status_code=404, detail="模型显示名称没有匹配的已打开标签页")
+        idle_matches = [
+            item for item in matches
+            if str(item.get("status") or "").strip().lower() == "idle"
+        ]
+        return _select_round_robin_tab(idle_matches or matches, f"model::{target_model_name}")
 
     candidates = _list_candidate_tabs(browser, target_route)
     if not candidates:
@@ -824,12 +947,14 @@ def _build_tab_resolution_headers(
     *,
     route_domain: str = "",
     exact_url: str = "",
+    model_name: str = "",
     selector: str = "",
     preset_name: str = "",
 ) -> Dict[str, str]:
     headers: Dict[str, str] = {}
     requested_route_domain = str(route_domain or "").strip()
     requested_exact_url = str(exact_url or "").strip()
+    requested_model_name = _normalize_model_name(model_name)
 
     if requested_route_domain:
         headers["X-Requested-Route-Domain"] = (
@@ -838,6 +963,9 @@ def _build_tab_resolution_headers(
 
     if requested_exact_url:
         headers["X-Requested-Exact-Url"] = normalize_exact_tab_url(requested_exact_url) or requested_exact_url
+
+    if requested_model_name:
+        headers["X-Requested-Model-Name"] = requested_model_name
 
     if selector:
         headers["X-Tab-Selection-Mode"] = selector
@@ -866,6 +994,10 @@ def _build_tab_resolution_headers(
     current_domain = str(tab_info.get("current_domain") or tab_info.get("route_domain") or route_domain or "").strip()
     if current_domain:
         headers["X-Resolved-Route-Domain"] = current_domain
+
+    exposed_model_name = _normalize_model_name(tab_info.get("exposed_model_name"))
+    if exposed_model_name:
+        headers["X-Resolved-Model-Name"] = exposed_model_name
 
     return _encode_response_headers(headers)
 
@@ -1069,6 +1201,13 @@ class TabPoolConfigRequest(BaseModel):
     preserve_error_tabs: Optional[bool] = Field(default=None)
 
 
+class TabModelNameRequest(BaseModel):
+    """标签页暴露模型名更新请求。"""
+    model_name: Optional[str] = Field(default=None, max_length=200)
+    persist_scope: Optional[str] = Field(default=None)
+    reset: Optional[bool] = Field(default=False)
+
+
 # ================= 标签页池 API =================
 
 @router.get("/api/tab-pool/tabs")
@@ -1143,6 +1282,89 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "excluded_urls": [],
             "preserve_error_tabs": False,
         }
+
+
+@router.put("/api/tab-pool/tabs/{tab_index}/model-name")
+async def update_tab_model_name(
+    tab_index: int,
+    body: TabModelNameRequest,
+    authenticated: bool = Depends(verify_auth),
+):
+    """更新标签页暴露给前端模型列表的名称。"""
+    if tab_index < 1:
+        raise HTTPException(status_code=400, detail="标签页编号必须大于 0")
+
+    model_name = _normalize_model_name(body.model_name)
+    persist_scope = str(body.persist_scope or "tab").strip().lower()
+    reset = bool(body.reset)
+    if persist_scope in {"", "temporary"}:
+        persist_scope = "tab"
+    if persist_scope not in {"tab", "site", "url"}:
+        raise HTTPException(status_code=400, detail="invalid_persist_scope")
+    if not reset and not model_name:
+        raise HTTPException(status_code=400, detail="模型显示名称不能为空")
+
+    browser = get_browser(auto_connect=False)
+    tab_info = _get_tab_info_by_index(browser, tab_index)
+    if tab_info is None:
+        raise HTTPException(status_code=404, detail=f"标签页 #{tab_index} 不存在")
+
+    route_key = normalize_route_domain(
+        tab_info.get("route_domain") or tab_info.get("current_domain") or ""
+    )
+    url_key = normalize_exact_tab_url(str(tab_info.get("url") or "").strip())
+    pool_synced = False
+    saved_scope = ""
+    removed_scopes: List[str] = []
+
+    if reset:
+        try:
+            browser.tab_pool.set_tab_model_name(tab_index, None)
+        except Exception as e:
+            logger.warning(f"清空标签页临时模型显示名称失败: {e}")
+
+        with _model_name_overrides_lock:
+            overrides = _read_model_name_overrides_unlocked()
+            if route_key and route_key in overrides["sites"]:
+                overrides["sites"].pop(route_key, None)
+                removed_scopes.append("site")
+            if url_key and url_key in overrides["urls"]:
+                overrides["urls"].pop(url_key, None)
+                removed_scopes.append("url")
+            overrides = _write_model_name_overrides_unlocked(overrides)
+
+        pool_synced = _sync_tab_pool_model_name_overrides(overrides)
+    elif persist_scope == "tab":
+        result = browser.tab_pool.set_tab_model_name(tab_index, model_name)
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=result.get("error") or "tab_not_found")
+    else:
+        if persist_scope == "site" and not route_key:
+            raise HTTPException(status_code=400, detail="当前标签页无法解析站点域名")
+        if persist_scope == "url" and not url_key:
+            raise HTTPException(status_code=400, detail="当前标签页无法解析网页 URL")
+
+        with _model_name_overrides_lock:
+            overrides = _read_model_name_overrides_unlocked()
+            if persist_scope == "site":
+                overrides["sites"][route_key] = model_name
+            else:
+                overrides["urls"][url_key] = model_name
+            overrides = _write_model_name_overrides_unlocked(overrides)
+
+        pool_synced = _sync_tab_pool_model_name_overrides(overrides)
+        browser.tab_pool.set_tab_model_name(tab_index, None)
+        saved_scope = persist_scope
+
+    refreshed_tab = _get_tab_info_by_index(browser, tab_index)
+    return {
+        "success": True,
+        "tab_index": tab_index,
+        "tab": refreshed_tab,
+        "saved_scope": saved_scope,
+        "removed_scopes": removed_scopes,
+        "pool_synced": pool_synced,
+    }
 
 
 @router.put("/api/tab-pool/config")
@@ -1738,6 +1960,62 @@ async def chat_with_route_domain(
             ctx,
             route_domain=route_key,
             allocation_mode=normalized_selector,
+            resolved_headers=resolved_headers,
+        )
+
+
+async def chat_with_exposed_model_name(
+    model_name: str,
+    request: Request,
+    body: ChatRequest,
+    authenticated: bool = True,
+):
+    """使用暴露模型名匹配同名标签页，并在同名集合中轮询。"""
+    model_label = _normalize_model_name(model_name)
+    if not model_label:
+        raise HTTPException(status_code=400, detail="模型显示名称不能为空")
+
+    browser = get_browser(auto_connect=False)
+    tab_info = _resolve_target_tab(
+        browser,
+        model_name=model_label,
+        selector="round_robin",
+    )
+    resolved_tab_index = int(tab_info.get("persistent_index") or 0)
+    if resolved_tab_index < 1:
+        raise HTTPException(status_code=500, detail="resolved_tab_index_invalid")
+
+    resolved_headers = _build_tab_resolution_headers(
+        tab_info,
+        model_name=model_label,
+        selector="model_name_round_robin",
+    )
+
+    ctx = request_manager.create_request()
+    try:
+        raw_input_len = sum(len(str(msg.get("content") or "")) for msg in body.messages if isinstance(msg, dict))
+        logger.info(f"[DIAG] 接收到的原始请求 messages 总字符长度: {raw_input_len} 字符, 消息数: {len(body.messages)}")
+    except Exception as e:
+        logger.debug(f"[DIAG] 估算原始请求长度失败: {e}")
+
+    request_manager.record_request_input(
+        ctx,
+        body.model_dump(),
+        endpoint=f"/model-name/{model_label}/v1/chat/completions",
+        route_domain=str(tab_info.get("current_domain") or tab_info.get("route_domain") or ""),
+        tab_index=resolved_tab_index,
+        preset_name=body.preset_name,
+    )
+    with logger.context(ctx.request_id):
+        logger.info(
+            f"开始 (模型显示名称 {model_label} -> 标签页 #{resolved_tab_index}, "
+            f"preset={body.preset_name or '<follow-tab/default>'})"
+        )
+        return await _chat_with_resolved_tab(
+            request,
+            body,
+            ctx,
+            tab_index=resolved_tab_index,
             resolved_headers=resolved_headers,
         )
 

@@ -40,7 +40,21 @@ window.TabPoolTabComponent = {
             fetchRequestSeq: 0,
             fetchAbortController: null,
             visibilityChangeHandler: null,
-            tabsResponseSignature: ''
+            tabsResponseSignature: '',
+            modelNameModal: {
+                visible: false,
+                saving: false,
+                showSaveOptions: false,
+                tab: null,
+                draft: ''
+            },
+            modelNameTooltip: {
+                visible: false,
+                text: '',
+                left: 0,
+                top: 0
+            },
+            modelNameTooltipText: '修改该标签页的模型显示名称后，前端选中这个模型时，只会在该标签页或同名模型的标签页中轮询，不会调度到其他模型标签页。'
         };
     },
     computed: {
@@ -66,6 +80,12 @@ window.TabPoolTabComponent = {
         },
         routeMethodSet() {
             return new Set(this.enabledRouteMethods || []);
+        },
+        modelNameTooltipStyle() {
+            return {
+                left: this.modelNameTooltip.left + 'px',
+                top: this.modelNameTooltip.top + 'px'
+            };
         }
     },
     watch: {
@@ -90,6 +110,35 @@ window.TabPoolTabComponent = {
                 return;
             }
             this.showRouteSettings = false;
+        },
+
+        positionModelNameTooltip(event) {
+            if (!event) return;
+            const tooltipWidth = 360;
+            const tooltipHeight = 92;
+            const margin = 12;
+            const viewportWidth = window.innerWidth || document.documentElement.clientWidth || tooltipWidth;
+            const viewportHeight = window.innerHeight || document.documentElement.clientHeight || tooltipHeight;
+            let left = Number(event.clientX || 0) + 14;
+            let top = Number(event.clientY || 0) + 14;
+            if (left + tooltipWidth > viewportWidth - margin) {
+                left = Number(event.clientX || 0) - tooltipWidth - 14;
+            }
+            if (top + tooltipHeight > viewportHeight - margin) {
+                top = Number(event.clientY || 0) - tooltipHeight - 14;
+            }
+            this.modelNameTooltip.left = Math.max(margin, Math.min(left, viewportWidth - tooltipWidth - margin));
+            this.modelNameTooltip.top = Math.max(margin, Math.min(top, viewportHeight - tooltipHeight - margin));
+        },
+
+        showModelNameTooltip(event, text = null) {
+            this.modelNameTooltip.text = text || this.modelNameTooltipText;
+            this.modelNameTooltip.visible = true;
+            this.positionModelNameTooltip(event);
+        },
+
+        hideModelNameTooltip() {
+            this.modelNameTooltip.visible = false;
         },
 
         makeTabsResponseSignature(data) {
@@ -478,6 +527,94 @@ window.TabPoolTabComponent = {
         getExactUrlRoutePrefix(tab) {
             return tab.exact_url_route_prefix || '';
         },
+
+        getExposedModelName(tab) {
+            return (tab && (tab.exposed_model_name || tab.default_model_name || tab.route_domain || tab.current_domain || tab.id)) || 'web-browser';
+        },
+
+        getModelNameSourceText(tab) {
+            const source = String(tab && tab.model_name_override_source || '').trim();
+            if (source === 'tab') return '临时';
+            if (source === 'site') return '站点保存';
+            if (source === 'url') return 'URL 保存';
+            return '默认';
+        },
+
+        truncateModelName(value, maxLen = 26) {
+            const text = String(value || '').trim();
+            if (!text) return 'web-browser';
+            return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
+        },
+
+        openModelNameModal(tab) {
+            this.hideModelNameTooltip();
+            this.modelNameModal.visible = true;
+            this.modelNameModal.saving = false;
+            this.modelNameModal.showSaveOptions = false;
+            this.modelNameModal.tab = tab;
+            this.modelNameModal.draft = this.getExposedModelName(tab);
+        },
+
+        closeModelNameModal(force = false) {
+            if (this.modelNameModal.saving && !force) return;
+            this.modelNameModal.visible = false;
+            this.modelNameModal.showSaveOptions = false;
+            this.modelNameModal.tab = null;
+            this.modelNameModal.draft = '';
+        },
+
+        openModelNameSaveOptions() {
+            const name = String(this.modelNameModal.draft || '').trim();
+            if (!name) {
+                this.$emit('notify', { type: 'error', message: '模型显示名称不能为空' });
+                return;
+            }
+            this.modelNameModal.showSaveOptions = true;
+        },
+
+        async submitModelName(scope = 'tab', reset = false) {
+            this.hideModelNameTooltip();
+            const tab = this.modelNameModal.tab;
+            const tabIndex = tab && tab.persistent_index;
+            if (!tabIndex) return;
+
+            const modelName = String(this.modelNameModal.draft || '').trim();
+            if (!reset && !modelName) {
+                this.$emit('notify', { type: 'error', message: '模型显示名称不能为空' });
+                return;
+            }
+
+            this.modelNameModal.saving = true;
+            try {
+                const token = window.getDashboardAuthToken ? window.getDashboardAuthToken() : '';
+                const headers = { 'Content-Type': 'application/json' };
+                if (token) headers['Authorization'] = 'Bearer ' + token;
+
+                const response = await fetch('/api/tab-pool/tabs/' + tabIndex + '/model-name', {
+                    method: 'PUT',
+                    headers,
+                    body: JSON.stringify({
+                        model_name: reset ? null : modelName,
+                        persist_scope: scope,
+                        reset
+                    })
+                });
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+
+                const scopeText = reset
+                    ? '模型显示名称已恢复默认'
+                    : (scope === 'site'
+                        ? '模型显示名称已按站点保存'
+                        : (scope === 'url' ? '模型显示名称已按网页 URL 保存' : '模型显示名称已临时应用'));
+                this.$emit('notify', { type: 'success', message: scopeText });
+                this.closeModelNameModal(true);
+                await this.fetchTabs({ force: true });
+            } catch (e) {
+                this.$emit('notify', { type: 'error', message: '保存模型显示名称失败: ' + e.message });
+            } finally {
+                this.modelNameModal.saving = false;
+            }
+        },
         
         truncateUrl(url, maxLen = 50) {
             if (!url) return '(空)';
@@ -541,8 +678,11 @@ window.TabPoolTabComponent = {
 
         async terminateTask(tab) {
             const tabIndex = tab.persistent_index;
-            const task = tab.current_task || '(无 task_id)';
-            if (!confirm(`确定终止标签页 #${tabIndex} 的当前任务吗？\n当前任务: ${task}`)) return;
+            const task = tab.current_task || tab.command_task || '(无 task_id)';
+            const command = tab.current_command
+                ? `\n当前命令: ${tab.current_command}${tab.current_command_id ? ` (${tab.current_command_id})` : ''}`
+                : (tab.current_command_id ? `\n当前命令: ${tab.current_command_id}` : '');
+            if (!confirm(`确定终止标签页 #${tabIndex} 的当前任务吗？\n当前任务: ${task}${command}`)) return;
 
             try {
                 const token = window.getDashboardAuthToken ? window.getDashboardAuthToken() : '';
@@ -884,13 +1024,31 @@ window.TabPoolTabComponent = {
                         </div>
 
                         <!-- 右侧统计 -->
-                        <div class="text-right text-xs text-gray-500 dark:text-gray-400 ml-4">
+                        <div class="flex flex-col items-end text-right text-xs text-gray-500 dark:text-gray-400 ml-4 flex-shrink-0">
                             <div>请求数: {{ tab.request_count }}</div>
+                            <button
+                                    type="button"
+                                    @click="openModelNameModal(tab)"
+                                    @mouseenter="showModelNameTooltip($event)"
+                                    @mousemove="positionModelNameTooltip($event)"
+                                    @mouseleave="hideModelNameTooltip"
+                                    @focus="showModelNameTooltip($event)"
+                                    @blur="hideModelNameTooltip"
+                                    class="mt-2 ml-auto inline-flex min-w-[5.5rem] max-w-[10rem] flex-col items-end self-end rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1 text-right text-gray-700 dark:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700/60 transition-colors">
+                                <span class="block text-[10px] leading-tight text-gray-400 dark:text-gray-500">模型名</span>
+                                <span class="block max-w-full truncate font-medium">{{ truncateModelName(getExposedModelName(tab)) }}</span>
+                            </button>
+                            <div class="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                                {{ getModelNameSourceText(tab) }}
+                            </div>
                             <div v-if="tab.busy_duration" class="text-yellow-600 dark:text-yellow-400">
                                 已忙碌: {{ tab.busy_duration }}s
                             </div>
                             <div v-if="tab.current_task" class="text-blue-600 dark:text-blue-400 truncate max-w-32">
                                 任务: {{ tab.current_task }}
+                            </div>
+                            <div v-if="tab.command_task || tab.current_command || tab.current_command_id" class="text-purple-600 dark:text-purple-400 truncate max-w-40" :title="tab.current_command || tab.current_command_id || tab.command_task">
+                                命令: {{ tab.current_command || tab.current_command_id || tab.command_task }}
                             </div>
                             <button v-if="tab.url"
                                     @click="toggleTabExcluded(tab)"
@@ -898,12 +1056,138 @@ window.TabPoolTabComponent = {
                                     class="mt-2 px-2 py-1 rounded border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 disabled:opacity-50 text-xs">
                                 {{ tab.route_excluded ? '解除域名排除' : '排除域名路由' }}
                             </button>
-                            <button v-if="tab.status === 'busy' || tab.current_task"
+                            <button v-if="tab.status === 'busy' || tab.current_task || tab.command_task || tab.current_command"
                                     @click="terminateTask(tab)"
                                     class="mt-2 px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700 text-xs">
                                 终止并解锁
                             </button>
                         </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div
+                v-if="modelNameTooltip.visible"
+                :style="modelNameTooltipStyle"
+                class="fixed z-[70] w-[360px] max-w-[calc(100vw-24px)] pointer-events-none rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-xs leading-relaxed text-gray-700 dark:text-gray-200 shadow-xl text-left"
+            >
+                {{ modelNameTooltip.text }}
+            </div>
+
+            <div
+                v-if="modelNameModal.visible"
+                class="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 px-4 py-6"
+            >
+                <div class="w-full max-w-md rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-2xl">
+                    <div class="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-700 px-5 py-4">
+                        <div>
+                            <div class="text-base font-semibold text-gray-900 dark:text-white">修改模型显示名称</div>
+                            <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                标签页 #{{ modelNameModal.tab && modelNameModal.tab.persistent_index }}
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            @click="closeModelNameModal()"
+                            :disabled="modelNameModal.saving"
+                            class="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
+                        >
+                            关闭
+                        </button>
+                    </div>
+                    <div class="space-y-4 px-5 py-4">
+                        <div>
+                            <label class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">当前暴露的模型名称</label>
+                            <input
+                                v-model="modelNameModal.draft"
+                                type="text"
+                                maxlength="200"
+                                class="w-full rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-3 py-2 text-sm text-gray-800 dark:text-gray-100 focus:border-transparent focus:ring-2 focus:ring-blue-400"
+                                placeholder="例如 lmarena-creative"
+                                @keydown.enter.prevent="submitModelName('tab')"
+                            >
+                        </div>
+                        <div class="rounded-md bg-blue-50 dark:bg-blue-900/25 px-3 py-2 text-xs leading-relaxed text-blue-700 dark:text-blue-200">
+                            临时应用只绑定当前标签页；关闭或销毁该标签页后，需要重新命名。
+                        </div>
+                    </div>
+                    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 dark:border-gray-700 px-5 py-4">
+                        <button
+                            type="button"
+                            @click="submitModelName('tab', true)"
+                            :disabled="modelNameModal.saving"
+                            class="rounded border border-gray-200 dark:border-gray-700 px-3 py-1.5 text-xs text-gray-600 dark:text-gray-300 hover:text-red-600 dark:hover:text-red-300 disabled:opacity-50"
+                        >
+                            恢复默认
+                        </button>
+                        <div class="flex flex-wrap items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                @click="openModelNameSaveOptions"
+                                :disabled="modelNameModal.saving"
+                                class="rounded border border-blue-200 dark:border-blue-800 px-3 py-1.5 text-xs text-blue-700 dark:text-blue-200 hover:bg-blue-50 dark:hover:bg-blue-900/30 disabled:opacity-50"
+                            >
+                                保存...
+                            </button>
+                            <button
+                                type="button"
+                                @click="submitModelName('tab')"
+                                :disabled="modelNameModal.saving"
+                                class="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
+                            >
+                                {{ modelNameModal.saving ? '应用中...' : '临时应用' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div
+                v-if="modelNameModal.visible && modelNameModal.showSaveOptions"
+                class="fixed inset-0 z-[65] flex items-center justify-center bg-black/35 px-4 py-6"
+            >
+                <div class="w-full max-w-lg rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-2xl">
+                    <div class="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-700 px-5 py-4">
+                        <div>
+                            <div class="text-base font-semibold text-gray-900 dark:text-white">保存模型显示名称</div>
+                            <div class="mt-1 max-w-sm truncate text-xs text-gray-500 dark:text-gray-400">
+                                {{ modelNameModal.draft }}
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            @click="modelNameModal.showSaveOptions = false"
+                            :disabled="modelNameModal.saving"
+                            class="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
+                        >
+                            返回
+                        </button>
+                    </div>
+                    <div class="space-y-3 px-5 py-4">
+                        <button
+                            type="button"
+                            @click="submitModelName('site')"
+                            @mouseenter="showModelNameTooltip($event, '按站点保存后，该站点之后打开的标签页都会默认暴露为这个模型名称；更精确的 URL 保存或临时命名会优先生效。')"
+                            @mousemove="positionModelNameTooltip($event)"
+                            @mouseleave="hideModelNameTooltip"
+                            :disabled="modelNameModal.saving"
+                            class="w-full rounded-md border border-gray-200 dark:border-gray-700 px-3 py-3 text-left hover:border-blue-300 dark:hover:border-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-50"
+                        >
+                            <span class="block text-sm font-semibold text-gray-900 dark:text-white">按站点保存</span>
+                            <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">之后同一站点的标签页会默认使用这个模型名。</span>
+                        </button>
+                        <button
+                            type="button"
+                            @click="submitModelName('url')"
+                            @mouseenter="showModelNameTooltip($event, '按网页 URL 保存后，只有当前完整 URL 再次打开时会持久使用这个模型名称，适合 arena.ai 的单个会话页面。')"
+                            @mousemove="positionModelNameTooltip($event)"
+                            @mouseleave="hideModelNameTooltip"
+                            :disabled="modelNameModal.saving"
+                            class="w-full rounded-md border border-gray-200 dark:border-gray-700 px-3 py-3 text-left hover:border-blue-300 dark:hover:border-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-50"
+                        >
+                            <span class="block text-sm font-semibold text-gray-900 dark:text-white">按网页 URL 保存</span>
+                            <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">仅当前完整网页地址会持久使用这个模型名。</span>
+                        </button>
                     </div>
                 </div>
             </div>

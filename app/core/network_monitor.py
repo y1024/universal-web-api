@@ -1319,12 +1319,24 @@ class NetworkMonitor:
 
             content_preview = str(parse_result.get("content", "") or "")[:800]
 
+            context_data = {
+                "domain": getattr(self.tab, "current_domain", None),
+                "preset_name": getattr(self.tab, "current_preset_name", None),
+                "task_id": getattr(self.tab, "current_task_id", None),
+                "tab_id": getattr(self.tab, "id", None),
+                "stream_mode": self._stream_config.get("mode"),
+                "listen_pattern": self._listen_pattern,
+                "current_command": getattr(self.tab, "current_command_name", None),
+            }
+            context_data = {k: v for k, v in context_data.items() if v is not None}
+
             payload = {
                 "captured_at": int(time.time()),
                 "parser": parser_id,
                 "capture_session": self._debug_capture_session_key,
                 "capture_index": self._debug_capture_counter,
                 "capture_stage": capture_stage,
+                "context": context_data,
                 "event": {
                     "url": sanitize_sensitive_data(str(event.get("url", "") or "")),
                     "method": str(event.get("method", "") or ""),

@@ -82,6 +82,60 @@ class CommandEngineStorageMixin:
     def _normalize_group_name(self, group_name: Any) -> str:
         return str(group_name or "").strip()
 
+    @staticmethod
+    def _normalize_advanced_ui(ui: Any) -> Dict[str, Any]:
+        if not isinstance(ui, dict):
+            return {}
+
+        kind = str(ui.get("kind") or "none").strip().lower()
+        if kind not in {"none", "form"}:
+            kind = "none"
+
+        title = str(ui.get("title") or "").strip()
+        description = str(ui.get("description") or "").strip()
+
+        fields = ui.get("fields")
+        if not isinstance(fields, list):
+            fields = []
+        normalized_fields = []
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            field_type = str(field.get("type") or "text").strip().lower()
+            if field_type not in {
+                "text",
+                "textarea",
+                "number",
+                "boolean",
+                "select",
+                "json",
+                "password",
+            }:
+                continue
+            normalized_fields.append({
+                "key": str(field.get("key") or "").strip(),
+                "label": str(field.get("label") or "").strip(),
+                "type": field_type,
+                "default": field.get("default"),
+                "help": str(field.get("help") or "").strip(),
+                "placeholder": str(field.get("placeholder") or "").strip(),
+                "required": bool(field.get("required", False)),
+                "options": field.get("options") if isinstance(field.get("options"), list) else [],
+                "rows": int(field.get("rows") or 0) if str(field.get("rows") or "").strip().isdigit() else field.get("rows"),
+            })
+
+        values = ui.get("values")
+        if not isinstance(values, dict):
+            values = {}
+
+        return {
+            "kind": kind,
+            "title": title,
+            "description": description,
+            "fields": normalized_fields,
+            "values": values,
+        }
+
     def _ensure_unique_command_name(
         self,
         raw_name: Any,
@@ -141,6 +195,7 @@ class CommandEngineStorageMixin:
             commands = self._load_commands()
             command["name"] = self._ensure_unique_command_name(command.get("name"), commands)
             command["group_name"] = self._normalize_group_name(command.get("group_name"))
+            command["advanced_ui"] = self._normalize_advanced_ui(command.get("advanced_ui"))
             commands.append(command)
             self._save_commands(commands)
 
@@ -162,6 +217,8 @@ class CommandEngineStorageMixin:
                         )
                     if "group_name" in updates:
                         updates["group_name"] = self._normalize_group_name(updates.get("group_name"))
+                    if "advanced_ui" in updates:
+                        updates["advanced_ui"] = self._normalize_advanced_ui(updates.get("advanced_ui"))
                     cmd.update(updates)
                     commands[i] = cmd
                     self._save_commands(commands)

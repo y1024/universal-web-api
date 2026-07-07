@@ -95,6 +95,7 @@ def get_default_command() -> Dict[str, Any]:
         "group_name": "",
         "script": "",
         "script_lang": "javascript",
+        "advanced_ui": {},
         "last_triggered": None,
         "trigger_count": 0,
     }

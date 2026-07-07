@@ -1453,6 +1453,26 @@ class BrowserWorkflowMixin:
         prompt_text = self._build_prompt_from_messages(messages)
         prompt_text = self._apply_prompt_padding(prompt_text, prompt_padding_config)
 
+        # 预先检查字数超限且为 ERROR 策略的情况，实现毫秒级拒绝
+        if file_paste_config.get("enabled", False):
+            from app.utils.file_paste import DEFAULT_TEMP_FILE_TYPE
+            threshold = file_paste_config.get("threshold", 50000)
+            if len(prompt_text) > threshold:
+                temp_file_type = str(
+                    file_paste_config.get("temp_file_type", DEFAULT_TEMP_FILE_TYPE)
+                ).strip().lower().lstrip(".")
+                if temp_file_type == "error":
+                    error_msg = file_paste_config.get("error_hint_text") or file_paste_config.get("hint_text")
+                    error_msg = str(error_msg or "").strip()
+                    if not error_msg:
+                        error_msg = f"输入文本长度 {len(prompt_text)} 字符超过限制 {threshold} 字符，已中止发送"
+                    yield self.formatter.pack_error(
+                        error_msg,
+                        code="file_paste_length_error"
+                    )
+                    yield self.formatter.pack_finish()
+                    return
+
         context = {
             "prompt": prompt_text,
             "images": user_images

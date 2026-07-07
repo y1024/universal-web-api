@@ -77,7 +77,10 @@ def mark_request_hard_timeout(
 
     if max_seconds <= 0:
         return False
-    elapsed = time.monotonic() - float(started_at or time.monotonic())
+    ctx_started_at = getattr(ctx, "started_at_monotonic", None)
+    if ctx_started_at is None:
+        ctx_started_at = float(started_at or time.monotonic())
+    elapsed = time.monotonic() - ctx_started_at
     if elapsed < max_seconds:
         return False
 

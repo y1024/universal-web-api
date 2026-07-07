@@ -2492,7 +2492,30 @@ class ConfigEngine:
         if "hint_text" in config:
             val = str(config["hint_text"]).strip()
             # 限制长度，避免过长的引导文本
-            result["hint_text"] = val[:500] if val else ""
+            hint_val = val[:500] if val else ""
+            result["hint_text"] = hint_val
+            
+            # 智能向后兼容：结合老配置的策略类型，防止新字段被无关的旧数据污染
+            old_temp_type = config.get("temp_file_type", "txt")
+            
+            if "txt_hint_text" not in config:
+                result["txt_hint_text"] = hint_val if old_temp_type == "txt" else "完全专注于文件内容"
+            if "pdf_hint_text" not in config:
+                result["pdf_hint_text"] = hint_val if old_temp_type == "pdf" else "完全专注于文件内容"
+            if "error_hint_text" not in config:
+                result["error_hint_text"] = hint_val if old_temp_type == "error" else "输入文本长度超过限制，已中止发送"
+
+        if "txt_hint_text" in config:
+            val = str(config["txt_hint_text"]).strip()
+            result["txt_hint_text"] = val[:500] if val else ""
+
+        if "pdf_hint_text" in config:
+            val = str(config["pdf_hint_text"]).strip()
+            result["pdf_hint_text"] = val[:500] if val else ""
+
+        if "error_hint_text" in config:
+            val = str(config["error_hint_text"]).strip()
+            result["error_hint_text"] = val[:500] if val else ""
 
         if "reacquire_input_after_upload" in config:
             result["reacquire_input_after_upload"] = _coerce_bool(config.get("reacquire_input_after_upload"), False)

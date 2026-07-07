@@ -1882,6 +1882,26 @@ async def chat_completions(
         }
         route_domain = ""
 
+    if route_info.get("route_type") == "model_name" and route_info.get("model_name"):
+        model_name = str(route_info.get("model_name") or "")
+        logger.info(
+            "模型显示名称路由命中: "
+            f"model={body.model!r}, normalized={route_info.get('normalized_model')!r}, "
+            f"matched_id={route_info.get('matched_id')!r}, match_type={route_info.get('match_type')}, "
+            f"model_name={model_name}, available={route_info.get('available_model_ids')}"
+        )
+        from app.api import tab_routes as tab_routes_api
+
+        route_body = tab_routes_api.ChatRequest(**body.model_dump())
+        if bool(getattr(body, "_response_format_applied", False)):
+            setattr(route_body, "_response_format_applied", True)
+        return await tab_routes_api.chat_with_exposed_model_name(
+            model_name=model_name,
+            request=request,
+            body=route_body,
+            authenticated=authenticated,
+        )
+
     if route_domain:
         logger.info(
             "模型路由命中: "
@@ -2574,44 +2594,40 @@ def _pack_error_done(message: str, code: str = "error") -> str:
 
 
 def _collect_model_entries() -> List[Dict[str, Any]]:
-    entries = [
-        {
-            "id": "claude-web-browser",
-            "object": "model",
-            "type": "model",
-            "created": MODEL_LIST_CREATED,
-            "owned_by": "universal-web-api",
-            "display_name": "Claude Code Web Browser Gateway",
-        },
-        {
-            "id": "web-browser",
-            "object": "model",
-            "type": "model",
-            "created": MODEL_LIST_CREATED,
-            "owned_by": "universal-web-api",
-            "display_name": "web-browser",
-        }
-    ]
+    entries: List[Dict[str, Any]] = []
+    seen_model_ids = set()
+
+    def _append_entry(model_id: Any, owned_by: Any = "universal-web-api", display_name: Any = "") -> None:
+        clean_id = str(model_id or "").strip()
+        normalized_id = clean_id.lower()
+        if not clean_id or normalized_id in seen_model_ids:
+            return
+        seen_model_ids.add(normalized_id)
+        entries.append(
+            {
+                "id": clean_id,
+                "object": "model",
+                "type": "model",
+                "created": MODEL_LIST_CREATED,
+                "owned_by": str(owned_by or "universal-web-api"),
+                "display_name": str(display_name or clean_id),
+            }
+        )
 
     try:
         browser = get_browser(auto_connect=False)
         tabs = browser.tab_pool.get_tabs_with_index()
         for item in collect_route_domain_models(tabs):
-            model_id = str(item.get("id") or "").strip()
-            if not model_id:
-                continue
-            entries.append(
-                {
-                    "id": model_id,
-                    "object": "model",
-                    "type": "model",
-                    "created": MODEL_LIST_CREATED,
-                    "owned_by": str(item.get("route_domain") or "universal-web-api"),
-                    "display_name": model_id,
-                }
+            _append_entry(
+                item.get("id"),
+                owned_by=item.get("route_domain") or "universal-web-api",
+                display_name=item.get("display_name") or item.get("id"),
             )
     except Exception as e:
         logger.debug(f"构建模型列表失败（已忽略）: {e}")
+
+    if not entries:
+        _append_entry("web-browser")
 
     return entries
 

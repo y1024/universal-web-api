@@ -29,6 +29,20 @@ def _looks_like_transient_local_debug_error(error: Any) -> bool:
     return False
 
 
+def _load_model_name_overrides_config() -> Optional[Dict[str, Any]]:
+    config_path = "config/model_name_overrides.local.json"
+    if not os.path.exists(config_path):
+        return None
+
+    try:
+        with open(config_path, "r", encoding="utf-8-sig") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else None
+    except Exception as e:
+        logger.debug(f"加载模型显示名称本地配置失败: {e}")
+        return None
+
+
 def _load_tab_pool_config() -> Dict:
     """从配置文件和环境变量加载标签页池配置"""
     config = {
@@ -40,6 +54,7 @@ def _load_tab_pool_config() -> Dict:
         "allocation_mode": "first_idle",
         "excluded_urls": [],
         "preserve_error_tabs": False,
+        "model_name_overrides": {"sites": {}, "urls": {}},
     }
     
     # 从 browser_config.json 加载
@@ -52,6 +67,10 @@ def _load_tab_pool_config() -> Dict:
                 config.update(pool_config)
     except Exception as e:
         logger.debug(f"加载 tab_pool 配置失败: {e}")
+
+    local_model_name_overrides = _load_model_name_overrides_config()
+    if local_model_name_overrides is not None:
+        config["model_name_overrides"] = local_model_name_overrides
     
     # 环境变量覆盖
     if os.getenv("MAX_TABS"):
@@ -68,6 +87,7 @@ def _load_tab_pool_config() -> Dict:
         "allocation_mode",
         "excluded_urls",
         "preserve_error_tabs",
+        "model_name_overrides",
     }
     return {key: value for key, value in config.items() if key in allowed_keys}
 

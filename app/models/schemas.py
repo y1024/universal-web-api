@@ -205,6 +205,9 @@ class FilePasteConfig(TypedDict, total=False):
     threshold: int      # 字符数阈值，超过此值时使用文件粘贴，默认 50000
     temp_file_type: Literal["txt", "pdf", "error"]  # 临时文件类型/超长处理策略，默认 txt
     hint_text: str      # 上传后引导文本；error 类型时作为自定义错误信息
+    txt_hint_text: str  # TXT 临时文件引导文本
+    pdf_hint_text: str  # PDF 临时文件引导文本
+    error_hint_text: str  # ERROR 类型错误信息
     reacquire_input_after_upload: bool  # 上传完成后是否重新定位输入框
     post_upload_input_selector: str     # 上传后专用输入框选择器
     post_upload_settle: float           # 上传完成后额外稳定等待
@@ -222,6 +225,9 @@ def get_default_file_paste_config() -> 'FilePasteConfig':
         "threshold": 50000,
         "temp_file_type": "txt",
         "hint_text": "完全专注于文件内容",
+        "txt_hint_text": "完全专注于文件内容",
+        "pdf_hint_text": "完全专注于文件内容",
+        "error_hint_text": "输入文本长度超过限制，已中止发送",
         "reacquire_input_after_upload": False,
         "post_upload_input_selector": "",
         "post_upload_settle": 0.0,
@@ -1122,6 +1128,12 @@ def validate_site_config(config: Dict[str, Any]) -> bool:
             if temp_file_type not in {"txt", "pdf", "error"}:
                 return False
         if "hint_text" in file_paste and not isinstance(file_paste["hint_text"], str):
+            return False
+        if "txt_hint_text" in file_paste and not isinstance(file_paste["txt_hint_text"], str):
+            return False
+        if "pdf_hint_text" in file_paste and not isinstance(file_paste["pdf_hint_text"], str):
+            return False
+        if "error_hint_text" in file_paste and not isinstance(file_paste["error_hint_text"], str):
             return False
         if "reacquire_input_after_upload" in file_paste and not isinstance(file_paste["reacquire_input_after_upload"], bool):
             return False

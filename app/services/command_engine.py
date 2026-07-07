@@ -1054,6 +1054,7 @@ return (function() {
                     commands = [entry for entry in data if isinstance(entry, dict)]
                     for entry in commands:
                         self._normalize_command_logging(entry)
+                        entry["advanced_ui"] = self._normalize_advanced_ui(entry.get("advanced_ui"))
                 else:
                     logger.warning(f"命令配置文件格式无效: {commands_file}")
             except json.JSONDecodeError as e:
@@ -1449,6 +1450,60 @@ return (function() {
         return str(group_name or "").strip()
 
     @staticmethod
+    def _normalize_advanced_ui(ui: Any) -> Dict[str, Any]:
+        if not isinstance(ui, dict):
+            return {}
+
+        kind = str(ui.get("kind") or "none").strip().lower()
+        if kind not in {"none", "form"}:
+            kind = "none"
+
+        title = str(ui.get("title") or "").strip()
+        description = str(ui.get("description") or "").strip()
+
+        fields = ui.get("fields")
+        if not isinstance(fields, list):
+            fields = []
+        normalized_fields: List[Dict[str, Any]] = []
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            field_type = str(field.get("type") or "text").strip().lower()
+            if field_type not in {"text", "textarea", "number", "boolean", "select", "password"}:
+                continue
+            options = field.get("options")
+            if not isinstance(options, list):
+                options = []
+            rows = field.get("rows")
+            try:
+                rows = int(rows)
+            except Exception:
+                rows = rows
+            normalized_fields.append({
+                "key": str(field.get("key") or "").strip(),
+                "label": str(field.get("label") or "").strip(),
+                "type": field_type,
+                "default": field.get("default"),
+                "help": str(field.get("help") or "").strip(),
+                "placeholder": str(field.get("placeholder") or "").strip(),
+                "required": bool(field.get("required", False)),
+                "options": options,
+                "rows": rows,
+            })
+
+        values = ui.get("values")
+        if not isinstance(values, dict):
+            values = {}
+
+        return {
+            "kind": kind,
+            "title": title,
+            "description": description,
+            "fields": normalized_fields,
+            "values": values,
+        }
+
+    @staticmethod
     def _coerce_bool_flag(value: Any, default: bool = True) -> bool:
         if value is None:
             return default
@@ -1635,6 +1690,7 @@ return (function() {
             commands = self._load_commands()
             command["name"] = self._ensure_unique_command_name(command.get("name"), commands)
             command["group_name"] = self._normalize_group_name(command.get("group_name"))
+            command["advanced_ui"] = self._normalize_advanced_ui(command.get("advanced_ui"))
             self._normalize_command_logging(command)
             commands.append(command)
             if not self._save_commands(commands):
@@ -1659,6 +1715,8 @@ return (function() {
                         )
                     if "group_name" in updates:
                         updates["group_name"] = self._normalize_group_name(updates.get("group_name"))
+                    if "advanced_ui" in updates:
+                        updates["advanced_ui"] = self._normalize_advanced_ui(updates.get("advanced_ui"))
                     cmd.update(updates)
                     self._normalize_command_logging(cmd)
                     commands[i] = cmd
@@ -2590,7 +2648,28 @@ return (function() {
             stable_for_sec = max(0.0, self._coerce_float(trigger.get("stable_for_sec", 0), 0.0))
             now_ts = time.time()
 
+            once_per_request = bool(trigger.get("once_per_request", False))
+            current_request_id = ""
+            if once_per_request:
+                try:
+                    for attr_name in ("_command_request_id", "_bound_request_id"):
+                        req_id = str(getattr(session, attr_name, "") or "").strip()
+                        if req_id:
+                            current_request_id = req_id
+                            break
+                    if not current_request_id:
+                        task_id = str(getattr(session, "current_task_id", "") or "").strip()
+                        if task_id.startswith("req-"):
+                            current_request_id = task_id
+                except Exception:
+                    pass
+
             with self._lock:
+                if once_per_request and current_request_id:
+                    triggered_reqs = state.setdefault("triggered_requests", set())
+                    if current_request_id in triggered_reqs:
+                        return False
+
                 prev_key = str(state.get("page_key", ""))
                 prev_hit = bool(state.get("page_hit", False)) if prev_key == normalized_text else False
                 prev_stable = bool(state.get("page_stable", False)) if prev_key == normalized_text else False
@@ -2609,6 +2688,11 @@ return (function() {
 
                 if fire_mode == "level":
                     if stable_hit and (cooldown_sec <= 0 or (now_ts - last_fire_at) >= cooldown_sec):
+                        if once_per_request and current_request_id:
+                            triggered_reqs = state.setdefault("triggered_requests", set())
+                            if current_request_id in triggered_reqs:
+                                return False
+                            triggered_reqs.add(current_request_id)
                         state["page_last_fire_at"] = now_ts
                         logger.info(
                             f"[CMD] 触发命令: {command.get('name')} "
@@ -2619,6 +2703,11 @@ return (function() {
                         return True
                 else:
                     if stable_hit and not prev_stable:
+                        if once_per_request and current_request_id:
+                            triggered_reqs = state.setdefault("triggered_requests", set())
+                            if current_request_id in triggered_reqs:
+                                return False
+                            triggered_reqs.add(current_request_id)
                         state["page_last_fire_at"] = now_ts
                         logger.info(
                             f"[CMD] 触发命令: {command.get('name')} "
@@ -2933,6 +3022,10 @@ return (function() {
         trigger = command.get("trigger", {}) or {}
         if str(trigger.get("type", "")).strip().lower() != "page_check":
             return
+        if not trigger.get("reset_latch_on_failure", True):
+            # Only block latch reset if the command actually started executing (not blocked by session acquire timeout or scheduling failures)
+            if reason not in {"acquire_timeout", "workflow_schedule_failed"}:
+                return
 
         key = (command.get("id"), getattr(session, "id", ""))
         if not key[0] or not key[1]:
@@ -2947,6 +3040,23 @@ return (function() {
             state["page_hit"] = False
             state["page_stable"] = False
             state["page_hit_since"] = 0.0
+
+            if bool(trigger.get("once_per_request", False)):
+                current_request_id = ""
+                try:
+                    for attr_name in ("_command_request_id", "_bound_request_id"):
+                        req_id = str(getattr(session, attr_name, "") or "").strip()
+                        if req_id:
+                            current_request_id = req_id
+                            break
+                    if not current_request_id:
+                        task_id = str(getattr(session, "current_task_id", "") or "").strip()
+                        if task_id.startswith("req-"):
+                            current_request_id = task_id
+                except Exception:
+                    pass
+                if current_request_id and "triggered_requests" in state:
+                    state["triggered_requests"].discard(current_request_id)
 
         if reason:
             logger.debug(

@@ -283,6 +283,7 @@ class CommandCreateRequest(BaseModel):
     group_name: str = Field(default="")
     script: str = Field(default="")
     script_lang: str = Field(default="javascript")
+    advanced_ui: dict = Field(default_factory=dict)
 
 
 class CommandUpdateRequest(BaseModel):
@@ -297,6 +298,7 @@ class CommandUpdateRequest(BaseModel):
     group_name: Optional[str] = None
     script: Optional[str] = None
     script_lang: Optional[str] = None
+    advanced_ui: Optional[dict] = None
 
 
 class CommandReorderRequest(BaseModel):

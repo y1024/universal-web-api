@@ -127,6 +127,7 @@ window.CommandsTabMethods = {
 
         normalizeCommand(command) {
             const normalized = JSON.parse(JSON.stringify(command || {}));
+            normalized.advanced_ui = this.normalizeAdvancedUi(normalized.advanced_ui);
             normalized.trigger = normalized.trigger || {
                 type: 'request_count',
                 value: 10,
@@ -178,6 +179,119 @@ window.CommandsTabMethods = {
             return normalized;
         },
 
+        normalizeAdvancedUi(ui) {
+            const next = { ...(ui || {}) };
+            const kind = String(next.kind || '').trim().toLowerCase();
+            next.kind = kind === 'form' ? 'form' : 'none';
+            next.title = String(next.title || '').trim();
+            next.description = String(next.description || '').trim();
+            next.fields = Array.isArray(next.fields)
+                ? next.fields
+                    .filter(field => field && typeof field === 'object')
+                    .map(field => this.normalizeAdvancedUiField(field))
+                    .filter(field => !!field.key)
+                : [];
+            const values = next.values && typeof next.values === 'object' && !Array.isArray(next.values)
+                ? { ...next.values }
+                : {};
+            for (const field of next.fields) {
+                if (!field || !field.key) continue;
+                if (!Object.prototype.hasOwnProperty.call(values, field.key)) {
+                    values[field.key] = this.getAdvancedUiFieldDefaultValue(field);
+                }
+            }
+            next.values = values;
+            return next;
+        },
+
+        normalizeAdvancedUiField(field) {
+            const kind = String(field?.type || 'text').trim().toLowerCase();
+            const type = ['text', 'textarea', 'number', 'boolean', 'select', 'password'].includes(kind)
+                ? kind
+                : 'text';
+            const options = Array.isArray(field?.options) ? field.options.filter(option => option !== undefined && option !== null).map(option => {
+                if (option && typeof option === 'object') {
+                    return {
+                        label: String(option.label || option.value || '').trim(),
+                        value: option.value !== undefined ? option.value : option.label,
+                    };
+                }
+                const value = String(option ?? '').trim();
+                return { label: value, value };
+            }).filter(option => option.label || option.value !== '') : [];
+            return {
+                key: String(field?.key || '').trim(),
+                label: String(field?.label || '').trim(),
+                type,
+                help: String(field?.help || '').trim(),
+                placeholder: String(field?.placeholder || '').trim(),
+                default: field?.default,
+                required: !!field?.required,
+                rows: Number.isFinite(Number(field?.rows)) ? Number(field.rows) : 3,
+                options
+            };
+        },
+
+        getAdvancedUiFieldDefaultValue(field) {
+            if (!field) return '';
+            if (field.default !== undefined) {
+                if (field.type === 'number') {
+                    const numericDefault = Number(field.default);
+                    return Number.isFinite(numericDefault) ? numericDefault : '';
+                }
+                if (field.type === 'boolean') {
+                    return !!field.default;
+                }
+                return field.default;
+            }
+            if (field.type === 'boolean') {
+                return false;
+            }
+            return '';
+        },
+
+        getAdvancedUiFieldValue(field) {
+            if (!field || !this.editingCommand) return '';
+            const values = this.editingCommand.advanced_ui?.values || {};
+            if (Object.prototype.hasOwnProperty.call(values, field.key)) {
+                return values[field.key];
+            }
+            if (field.default !== undefined) {
+                return field.default;
+            }
+            if (field.type === 'boolean') {
+                return false;
+            }
+            if (field.type === 'number') {
+                return '';
+            }
+            return '';
+        },
+
+        setAdvancedUiFieldValue(field, value) {
+            if (!this.editingCommand || !field || !field.key) return;
+            const nextValues = { ...(this.editingCommand.advanced_ui?.values || {}) };
+            nextValues[field.key] = field.type === 'number' && value !== '' && value !== null && value !== undefined
+                ? Number(value)
+                : value;
+            this.editingCommand.advanced_ui = {
+                ...(this.editingCommand.advanced_ui || {}),
+                values: nextValues
+            };
+        },
+
+        getAdvancedUiDefaultText() {
+            return '此高级命令无UI';
+        },
+
+        getAdvancedUiModeLabel() {
+            return this.advancedEditorMode === 'code' ? '查看UI' : '查看代码';
+        },
+
+        toggleAdvancedEditorMode() {
+            this.advancedEditorMode = this.advancedEditorMode === 'code' ? 'ui' : 'code';
+        },
+
         ensureTriggerDefaults(trigger) {
             const next = { ...(trigger || {}) };
             if (next.command_id === undefined) next.command_id = '';
@@ -206,6 +320,16 @@ window.CommandsTabMethods = {
             if (!next.interrupt_policy) next.interrupt_policy = 'auto';
             if (next.interrupt_message === undefined || next.interrupt_message === null) next.interrupt_message = '';
             if (next.probe_js === undefined || next.probe_js === null) next.probe_js = '';
+            if (next.reset_latch_on_failure === undefined || next.reset_latch_on_failure === null) {
+                next.reset_latch_on_failure = true;
+            } else {
+                next.reset_latch_on_failure = !!next.reset_latch_on_failure;
+            }
+            if (next.once_per_request === undefined || next.once_per_request === null) {
+                next.once_per_request = false;
+            } else {
+                next.once_per_request = !!next.once_per_request;
+            }
             const priority = Number(next.priority);
             next.priority = Number.isInteger(priority) ? priority : 2;
             if (!next.url_pattern && next.type === 'network_request_error') {
@@ -793,10 +917,18 @@ window.CommandsTabMethods = {
                 actions: [{ type: 'clear_cookies' }, { type: 'refresh_page' }],
                 group_name: '',
                 script: '',
-                script_lang: 'javascript'
+                script_lang: 'javascript',
+                advanced_ui: {
+                    kind: 'none',
+                    title: '',
+                    description: '',
+                    fields: [],
+                    values: {}
+                }
             });
             this.isNew = true;
             this.showEditor = true;
+            this.advancedEditorMode = 'ui';
             this.triggerTypePickerOpen = false;
             this.triggerTypeTooltipType = '';
             this.resetSourceCommandPicker();
@@ -812,6 +944,7 @@ window.CommandsTabMethods = {
             }
             this.isNew = false;
             this.showEditor = true;
+            this.advancedEditorMode = 'ui';
             this.triggerTypePickerOpen = false;
             this.triggerTypeTooltipType = '';
             this.resetSourceCommandPicker();
@@ -1114,16 +1247,12 @@ window.CommandsTabMethods = {
             }
             if (trigger.type === 'command_check' || trigger.type === 'command_result_match') {
                 const sourceId = String(trigger.command_id || '').trim();
-                if (!sourceId) {
-                    this.$emit('notify', { type: 'error', message: trigger.type === 'command_check' ? '请先选择“检查命令”。' : '请先选择“来源命令”。' });
-                    return;
-                }
                 if (this.editingCommand.id && sourceId === this.editingCommand.id) {
                     this.$emit('notify', { type: 'error', message: trigger.type === 'command_check' ? '检查命令不能是当前命令自己。' : '来源命令不能是当前命令自己。' });
                     return;
                 }
                 const expected = String(trigger.expected_value || '').trim();
-                if (!expected) {
+                if (sourceId && !expected) {
                     this.$emit('notify', { type: 'error', message: '请填写“结果值”。' });
                     return;
                 }
@@ -1342,6 +1471,7 @@ window.CommandsTabMethods = {
             this.editingCommand.group_name = String(this.editingCommand.group_name || '').trim();
             this.editingCommand.actions = (this.editingCommand.actions || [])
                 .map((action, index) => this.normalizeAction(action, index));
+            this.editingCommand.advanced_ui = this.normalizeAdvancedUi(this.editingCommand.advanced_ui);
             try {
                 if (this.isNew) {
                     await this.apiRequest('/api/commands', {

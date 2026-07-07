@@ -45,6 +45,7 @@ window.CommandsTabComponent = {
 
             // 高级模式编辑器高度
             scriptEditorHeight: '300px',
+            advancedEditorMode: 'ui',
 
             // 代理切换默认配置
             proxyDefaults: {
@@ -147,6 +148,19 @@ window.CommandsTabComponent = {
     computed: window.CommandsTabComputed,
 
     methods: window.CommandsTabMethods,
+
+    watch: {
+        'editingCommand.mode'(nextMode, prevMode) {
+            if (nextMode === 'advanced' && prevMode !== 'advanced') {
+                this.advancedEditorMode = 'ui';
+            }
+        },
+        showEditor(nextValue) {
+            if (!nextValue) {
+                this.advancedEditorMode = 'ui';
+            }
+        }
+    },
 
     mounted() {
         this.fetchMeta();
