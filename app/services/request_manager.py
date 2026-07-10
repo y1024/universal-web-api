@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from collections import OrderedDict
 
-from app.core.config import get_logger, _request_context
+from app.core.config import BrowserConstants, get_logger, _request_context
 from app.services.sse_utils import iter_sse_payloads
 from app.utils.site_url import get_canonical_route_domain
 
@@ -37,6 +37,39 @@ def _get_positive_int_env(name: str, default: int) -> int:
     except Exception:
         return default
     return value if value > 0 else default
+
+
+def _browser_bool(key: str, default: bool = True) -> bool:
+    value = BrowserConstants.get(key)
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
+def _browser_int(
+    key: str,
+    default: int,
+    *,
+    min_value: int = 0,
+    max_value: Optional[int] = None,
+) -> int:
+    try:
+        value = int(BrowserConstants.get(key))
+    except Exception:
+        value = int(default)
+    value = max(int(min_value), value)
+    if max_value is not None:
+        value = min(int(max_value), value)
+    return value
 
 
 class RequestStatus(Enum):
@@ -66,6 +99,7 @@ class RequestContext:
     tab_id: Optional[str] = None
     monitor: Dict[str, Any] = field(default_factory=dict)
     started_at_monotonic: Optional[float] = field(default=None, repr=False)
+    last_activity_at: Optional[float] = field(default=None, repr=False)
     
     def should_stop(self) -> bool:
         with self._lock:
@@ -102,6 +136,7 @@ class RequestContext:
         with self._lock:
             self.started_at = time.time()
             self.started_at_monotonic = time.monotonic()
+            self.last_activity_at = self.started_at
             self.finished_at = None
             self.tab_id = tab_id
             if self._cancel_flag:
@@ -114,6 +149,7 @@ class RequestContext:
     def reset_timeout(self):
         with self._lock:
             self.started_at_monotonic = time.monotonic()
+            self.last_activity_at = time.time()
             logger.debug(f"[{self.request_id}] 重置请求绝对超时计时")
     
     def mark_completed(self):
@@ -187,6 +223,7 @@ class RequestContext:
             finished_at = self.finished_at
             tab_id = self.tab_id
             cancel_reason = self.cancel_reason
+            last_activity_at = self.last_activity_at
         duration_end = finished_at or current_time
         duration_start = started_at or created_at
         return {
@@ -197,6 +234,7 @@ class RequestContext:
             "finished_at": finished_at,
             "tab_id": tab_id,
             "cancel_reason": cancel_reason,
+            "last_activity_at": last_activity_at,
             "duration": max(0.0, duration_end - duration_start),
             "is_terminal": status in (
                 RequestStatus.COMPLETED,
@@ -307,8 +345,42 @@ class RequestManager:
             except Exception as e:
                 logger.debug(f"清理遗留临时文件失败: {path}, {e}")
 
+    def _request_monitor_max_records(self) -> int:
+        return _browser_int("REQUEST_MONITOR_MAX_RECORDS", 200, min_value=0, max_value=2000)
+
+    def _request_monitor_enabled(self) -> bool:
+        return _browser_bool("REQUEST_MONITOR_ENABLED", True) and self._request_monitor_max_records() > 0
+
+    def _request_monitor_detail_enabled(self) -> bool:
+        return _browser_bool("REQUEST_MONITOR_DETAIL_ENABLED", True)
+
+    def _request_monitor_save_to_file(self) -> bool:
+        return _browser_bool("REQUEST_MONITOR_SAVE_TO_FILE", True)
+
+    def _request_monitor_capture_chars(self) -> int:
+        return _browser_int(
+            "REQUEST_MONITOR_MAX_CAPTURED_RESPONSE_CHARS",
+            MAX_CAPTURED_RESPONSE_CHARS,
+            min_value=0,
+            max_value=200000,
+        )
+
+    def _trim_monitor_history_unlocked(self) -> None:
+        max_records = self._request_monitor_max_records()
+        if max_records <= 0:
+            if self._monitor_history:
+                self._monitor_history = []
+                self._history_revision_cache = None
+            return
+        if len(self._monitor_history) > max_records:
+            self._monitor_history = self._sort_history_records(self._monitor_history)[-max_records:]
+            self._history_revision_cache = None
+
     def _load_history(self):
         try:
+            if not self._request_monitor_enabled():
+                self._monitor_history = []
+                return
             if not os.path.exists(self._history_file):
                 return
             with open(self._history_file, "r", encoding="utf-8") as f:
@@ -316,12 +388,13 @@ class RequestManager:
             records = data.get("records", data if isinstance(data, list) else [])
             if isinstance(records, list):
                 raw_records = [item for item in records if isinstance(item, dict)]
+                max_records = self._request_monitor_max_records()
                 if self._history_records_are_ordered(raw_records):
-                    raw_records = raw_records[-200:]
+                    raw_records = raw_records[-max_records:]
                 normalized_records = [
                     self._normalize_history_record(item) for item in raw_records
                 ]
-                self._monitor_history = self._sort_history_records(normalized_records)[-200:]
+                self._monitor_history = self._sort_history_records(normalized_records)[-max_records:]
                 
                 # 如果没有持久化的 token 统计，从已有的 200 条历史请求中求和做初次填充
                 if self.total_input_tokens == 0 and self.total_output_tokens == 0:
@@ -334,16 +407,20 @@ class RequestManager:
             self._monitor_history = []
 
     def _save_history(self):
+        if not self._request_monitor_enabled() or not self._request_monitor_save_to_file():
+            return
         tmp_path = self._history_file + ".tmp"
         try:
             with self._history_save_lock:
                 os.makedirs(os.path.dirname(self._history_file), exist_ok=True)
                 with self._history_lock:
-                    records = list(self._monitor_history[-200:])
+                    max_records = self._request_monitor_max_records()
+                    self._trim_monitor_history_unlocked()
+                    records = list(self._monitor_history[-max_records:]) if max_records > 0 else []
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(
                         {
-                            "max_records": 200,
+                            "max_records": max_records,
                             "saved_at": time.time(),
                             "records": records,
                         },
@@ -481,7 +558,15 @@ class RequestManager:
             normalized["target_domain"] = canonical_route_domain
 
         status_value = str(normalized.get("status") or "").strip()
-        has_meaningful_response = bool(response_text.strip()) or media_count > 0
+        token_estimate_for_success = normalized.get("token_estimate")
+        if not isinstance(token_estimate_for_success, dict):
+            token_estimate_for_success = {}
+        has_meaningful_response = (
+            bool(response_text.strip())
+            or media_count > 0
+            or bool(normalized.get("has_response_text"))
+            or cls._coerce_token_count(token_estimate_for_success.get("response")) > 0
+        )
         stop_sequence_completed = (
             status_value == RequestStatus.COMPLETED.value
             and (
@@ -1170,10 +1255,12 @@ class RequestManager:
         else:
             raw_prompt_for_tokens = str(messages or "")
         prompt_tokens = self._estimate_tokens(raw_prompt_for_tokens)
+        detail_enabled = self._request_monitor_detail_enabled()
+        prompt_capture_limit = min(20000, self._request_monitor_capture_chars())
 
         with ctx._lock:
             monitor_route_domain = self._canonical_monitor_domain(route_domain)
-            ctx.monitor.update({
+            monitor_update = {
                 "endpoint": endpoint,
                 "route_domain": monitor_route_domain,
                 "target_domain": monitor_route_domain,
@@ -1183,10 +1270,15 @@ class RequestManager:
                 "request_type": request_type,
                 "is_stream": is_stream,
                 "is_multimodal": self._has_multimodal_payload(messages),
-                "prompt": prompt_text,
                 "prompt_tokens": prompt_tokens,
-                "payload": self._sanitize_for_storage(payload_dict),
-            })
+            }
+            if detail_enabled and prompt_capture_limit > 0:
+                monitor_update["prompt"] = self._sanitize_text_for_storage(
+                    prompt_text,
+                    max_chars=prompt_capture_limit,
+                )
+                monitor_update["payload"] = self._sanitize_for_storage(payload_dict)
+            ctx.monitor.update(monitor_update)
 
     def update_request_metadata(self, request_id: str, **metadata: Any) -> bool:
         request_key = str(request_id or "").strip()
@@ -1212,6 +1304,68 @@ class RequestManager:
                 ctx.monitor[key] = self._sanitize_for_storage(value)
         return True
 
+    def capture_external_response(
+        self,
+        request_id: str,
+        response_text: Any,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Attach externally observed response text to a tracked request.
+
+        Command-loop helpers can finish independently from page/network listeners.
+        This lets a late network bridge update the same monitor row and refresh the
+        history record when it has already been written.
+        """
+        request_key = str(request_id or "").strip()
+        if not request_key:
+            return False
+
+        with self._requests_lock:
+            ctx = self._requests.get(request_key)
+
+        if not ctx:
+            return False
+
+        text = str(response_text or "")
+        if not text.strip() and not metadata:
+            return False
+
+        capture_limit = self._request_monitor_capture_chars()
+        terminal = False
+        with ctx._lock:
+            if text:
+                stored_text = self._sanitize_text_for_storage(
+                    text,
+                    max_chars=capture_limit if capture_limit > 0 else MAX_CAPTURED_RESPONSE_CHARS,
+                )
+                existing_text = str(ctx.monitor.get("response_text") or "").strip()
+                if existing_text and "CLAUDE-HIT" in existing_text and stored_text:
+                    stored_text = self._sanitize_text_for_storage(
+                        f"{existing_text}\n\n{stored_text}",
+                        max_chars=capture_limit if capture_limit > 0 else MAX_CAPTURED_RESPONSE_CHARS,
+                    )
+                ctx.monitor["response_text"] = stored_text
+                ctx.monitor["has_response_text"] = True
+                ctx.monitor["response_tokens"] = self._estimate_tokens(stored_text)
+            if metadata:
+                for key, value in metadata.items():
+                    if value is None:
+                        continue
+                    ctx.monitor[str(key)] = self._sanitize_for_storage(value)
+            terminal = ctx.status in (
+                RequestStatus.COMPLETED,
+                RequestStatus.CANCELLED,
+                RequestStatus.FAILED,
+            )
+
+        if terminal:
+            try:
+                self._append_monitor_history(ctx)
+            except Exception as e:
+                logger.debug(f"刷新外部响应请求监控历史失败: {e}")
+        return True
+
     def capture_response_chunk(self, ctx: RequestContext, chunk: Any) -> None:
         if ctx is None or not isinstance(chunk, str):
             return
@@ -1230,6 +1384,8 @@ class RequestManager:
         if ctx is None or not payloads:
             return
 
+        capture_limit = self._request_monitor_capture_chars()
+        detail_enabled = self._request_monitor_detail_enabled()
         with ctx._lock:
             for payload in payloads:
                 error = payload.get("error") if isinstance(payload, dict) else None
@@ -1238,19 +1394,24 @@ class RequestManager:
                 media_items = self._extract_media_items(payload)
 
                 if text:
-                    parts = ctx.monitor.setdefault("response_parts", [])
-                    if isinstance(parts, list):
-                        current_len = ctx.monitor.get("response_parts_chars")
-                        if not isinstance(current_len, int):
-                            current_len = sum(len(str(item)) for item in parts)
-                        current_len = max(0, current_len)
-                        remaining = max(0, MAX_CAPTURED_RESPONSE_CHARS - current_len)
-                        if remaining > 0:
-                            captured = text[:remaining]
-                            parts.append(captured)
-                            ctx.monitor["response_parts_chars"] = current_len + len(captured)
-                        else:
-                            ctx.monitor["response_parts_chars"] = current_len
+                    ctx.monitor["has_response_text"] = True
+                    ctx.monitor["response_tokens"] = self._coerce_token_count(
+                        ctx.monitor.get("response_tokens")
+                    ) + self._estimate_tokens(text)
+                    if detail_enabled and capture_limit > 0:
+                        parts = ctx.monitor.setdefault("response_parts", [])
+                        if isinstance(parts, list):
+                            current_len = ctx.monitor.get("response_parts_chars")
+                            if not isinstance(current_len, int):
+                                current_len = sum(len(str(item)) for item in parts)
+                            current_len = max(0, current_len)
+                            remaining = max(0, capture_limit - current_len)
+                            if remaining > 0:
+                                captured = text[:remaining]
+                                parts.append(captured)
+                                ctx.monitor["response_parts_chars"] = current_len + len(captured)
+                            else:
+                                ctx.monitor["response_parts_chars"] = current_len
                 if media_items:
                     existing = ctx.monitor.setdefault("media_items", [])
                     if isinstance(existing, list):
@@ -1279,7 +1440,9 @@ class RequestManager:
 
         text = self._extract_response_text(payload)
         media_items = self._extract_media_items(payload)
-        sanitized_payload = self._sanitize_for_storage(payload)
+        detail_enabled = self._request_monitor_detail_enabled()
+        capture_limit = self._request_monitor_capture_chars()
+        sanitized_payload = self._sanitize_for_storage(payload) if detail_enabled else {}
         payload_error = self._extract_error_payload(payload)
         payload_error_code = str(payload_error.get("code") or self._extract_error_code(payload)).strip()
 
@@ -1288,12 +1451,15 @@ class RequestManager:
 
         with ctx._lock:
             if text:
-                ctx.monitor["response_text"] = self._sanitize_text_for_storage(text, max_chars=30000)
+                ctx.monitor["has_response_text"] = True
+            if text and detail_enabled and capture_limit > 0:
+                ctx.monitor["response_text"] = self._sanitize_text_for_storage(text, max_chars=capture_limit)
             if media_items:
                 ctx.monitor["media_items"] = self._sanitize_for_storage(media_items)
                 ctx.monitor["has_response_media"] = True
                 ctx.monitor["is_multimodal"] = True
-            ctx.monitor["response_payload"] = sanitized_payload
+            if detail_enabled:
+                ctx.monitor["response_payload"] = sanitized_payload
             ctx.monitor["response_tokens"] = response_tokens
             if payload_error:
                 error_message = str(payload_error.get("message") or "")
@@ -1346,11 +1512,30 @@ class RequestManager:
             "media_items",
         ):
             monitor.pop(key, None)
+        if not response_text:
+            monitor.pop("response_text", None)
 
     def _append_monitor_history(self, ctx: RequestContext) -> None:
         tail_payloads = self._flush_sse_payloads_for_context(ctx)
         if tail_payloads:
             self._capture_response_payloads(ctx, tail_payloads)
+
+        if not self._request_monitor_enabled():
+            with self._history_lock:
+                if self._monitor_history:
+                    self._monitor_history = []
+                    self._history_revision_cache = None
+            with ctx._lock:
+                ctx.monitor["_history_recorded"] = True
+                for key in (
+                    "payload",
+                    "response_payload",
+                    "response_parts",
+                    "response_parts_chars",
+                    "media_items",
+                ):
+                    ctx.monitor.pop(key, None)
+            return
 
         with ctx._lock:
             already_recorded = bool(ctx.monitor.get("_history_recorded"))
@@ -1372,8 +1557,18 @@ class RequestManager:
             response_parts = monitor.get("response_parts")
             if isinstance(response_parts, list):
                 response_text = "".join(str(item) for item in response_parts)
-        response_text = self._sanitize_text_for_storage(response_text, max_chars=30000)
-        prompt_text = self._sanitize_text_for_storage(monitor.get("prompt", ""), max_chars=20000)
+        detail_enabled = self._request_monitor_detail_enabled()
+        capture_limit = self._request_monitor_capture_chars()
+        response_capture_limit = capture_limit if capture_limit > 0 else 0
+        prompt_capture_limit = min(20000, response_capture_limit) if response_capture_limit > 0 else 0
+        response_text = self._sanitize_text_for_storage(
+            response_text,
+            max_chars=response_capture_limit or 1,
+        ) if detail_enabled and response_capture_limit > 0 else ""
+        prompt_text = self._sanitize_text_for_storage(
+            monitor.get("prompt", ""),
+            max_chars=prompt_capture_limit or 1,
+        ) if detail_enabled and prompt_capture_limit > 0 else ""
 
         prompt_tokens = monitor.get("prompt_tokens")
         if prompt_tokens is None:
@@ -1387,7 +1582,12 @@ class RequestManager:
         else:
             response_tokens = self._coerce_token_count(response_tokens)
         media_items = monitor.get("media_items") if isinstance(monitor.get("media_items"), list) else []
-        has_meaningful_response = bool(response_text.strip()) or len(media_items) > 0
+        has_meaningful_response = (
+            bool(response_text.strip())
+            or len(media_items) > 0
+            or bool(monitor.get("has_response_text"))
+            or response_tokens > 0
+        )
 
         status = snapshot["status"]
         status_value = status.value if isinstance(status, RequestStatus) else str(status)
@@ -1444,9 +1644,10 @@ class RequestManager:
             "request_type": str(monitor.get("request_type") or ""),
             "is_stream": bool(monitor.get("is_stream")),
             "is_multimodal": bool(monitor.get("is_multimodal") or monitor.get("has_response_media")),
+            "has_response_text": bool(monitor.get("has_response_text")) or response_tokens > 0,
             "prompt": prompt_text,
             "response": response_text,
-            "summary": response_text[:180],
+            "summary": response_text[:180] or ("已完成（响应详情未保存）" if has_meaningful_response else ""),
             "error_code": error_code,
             "error_message": error_message,
             "error_stack": error_stack,
@@ -1480,6 +1681,7 @@ class RequestManager:
             else:
                 self._append_sorted_history_record_unlocked(self._monitor_history, record)
                 self._history_revision_cache = None
+            self._trim_monitor_history_unlocked()
 
         if not already_recorded:
             prompt_delta = prompt_tokens
@@ -1677,12 +1879,23 @@ class RequestManager:
         include_detail: bool = False,
         if_revision: Optional[str] = None,
     ) -> Dict[str, Any]:
+        max_records = self._request_monitor_max_records()
+        if not self._request_monitor_enabled():
+            return {
+                "records": [],
+                "count": 0,
+                "max_records": max_records,
+                "revision": "0::0",
+                "not_modified": False,
+                "enabled": False,
+            }
         try:
-            count = max(1, min(200, int(limit or 200)))
+            count = max(1, min(max_records, int(limit or max_records or 1)))
         except Exception:
-            count = 200
+            count = max(1, max_records)
         requested_revision = str(if_revision or "").strip()
         with self._history_lock:
+            self._trim_monitor_history_unlocked()
             history_refs_all = [
                 item
                 for item in self._monitor_history[-count:]
@@ -1701,9 +1914,10 @@ class RequestManager:
                 return {
                     "records": [],
                     "count": 0,
-                    "max_records": 200,
+                    "max_records": max_records,
                     "revision": revision,
                     "not_modified": True,
+                    "enabled": True,
                 }
             history = (
                 [copy.deepcopy(item) for item in history_refs]
@@ -1719,9 +1933,10 @@ class RequestManager:
         return {
             "records": records,
             "count": len(records),
-            "max_records": 200,
+            "max_records": max_records,
             "revision": revision,
             "not_modified": False,
+            "enabled": True,
         }
 
     def get_request_history(self, limit: int = 200) -> List[Dict[str, Any]]:
@@ -1729,7 +1944,7 @@ class RequestManager:
 
     def get_request_history_record(self, request_id: str) -> Optional[Dict[str, Any]]:
         request_key = str(request_id or "").strip()
-        if not request_key:
+        if not request_key or not self._request_monitor_enabled():
             return None
 
         with self._history_lock:
@@ -1804,9 +2019,10 @@ class RequestManager:
             # 超时的 RUNNING 请求视为僵尸，强制标记失败
             elif status == RequestStatus.RUNNING:
                 started = snapshot["started_at"] or snapshot["created_at"]
-                if now - started > self.ZOMBIE_TTL:
+                active_at = snapshot.get("last_activity_at") or started
+                if now - active_at > self.ZOMBIE_TTL:
                     logger.warning(
-                        f"[{req_id}] 僵尸请求 (运行 {now - started:.0f}s)，强制清理"
+                        f"[{req_id}] 僵尸请求 (无活动 {now - active_at:.0f}s, 运行 {now - started:.0f}s)，强制清理"
                     )
                     ctx.mark_failed("zombie_timeout")
                     to_delete.append(req_id)

@@ -191,8 +191,9 @@ class _GlobalNetworkInterceptionManager:
     LISTENER_STOP_TIMEOUT_SEC = 2.0
     LISTENER_CLEAR_INTERVAL_SEC = 60.0
     LISTENER_CLEAR_EVENT_INTERVAL = 200
-    ARENA_REVEAL_POLL_INTERVAL_SEC = 1.0
-    ARENA_REVEAL_POLL_TIMEOUT_SEC = 600.0
+    ARENA_REVEAL_POLL_INTERVAL_SEC = 3.0
+    ARENA_REVEAL_POLL_TIMEOUT_SEC = 120.0
+    RESULT_BRIDGE_MAX_ACTIVE_PER_SESSION = 2
 
     def __init__(
         self,
@@ -211,6 +212,8 @@ class _GlobalNetworkInterceptionManager:
         self._lock = threading.RLock()
         self._stop_join_timeout = max(2.0, self._wait_timeout + self._retry_delay + 0.2)
         self._result_event_handler = self._create_result_event_handler()
+        self._result_bridge_lock = threading.RLock()
+        self._result_bridge_active_by_session: Dict[str, int] = {}
         self._arena_reveal_pollers: Dict[str, threading.Thread] = {}
         self._arena_reveal_lock = threading.RLock()
         self._arena_reveal_logged_signatures = set()
@@ -442,15 +445,44 @@ class _GlobalNetworkInterceptionManager:
     @staticmethod
     def _is_result_bridge_candidate(event: Dict[str, Any]) -> bool:
         url = str((event or {}).get("url") or "").strip().lower()
+        if not url:
+            return False
+        if not any(host in url for host in ("lmarena.ai", "arena.ai", "lmsys.org")):
+            return False
         return any(
             token in url
             for token in (
-                "lmarena.ai",
-                "arena.ai",
-                "lmsys.org",
+                "/nextjs-api/stream/",
                 "nextjs-api/stream",
+                "create-evaluation",
+                "post-to-evaluation",
+                "stream/create",
+                "stream/post",
             )
         )
+
+    def _claim_result_bridge_slot(self, session_id: str) -> bool:
+        key = str(session_id or "unknown")
+        with self._result_bridge_lock:
+            active = int(self._result_bridge_active_by_session.get(key, 0) or 0)
+            if active >= self.RESULT_BRIDGE_MAX_ACTIVE_PER_SESSION:
+                logger.debug_throttled(
+                    f"global_net.result_bridge_busy.{key}",
+                    f"[GlobalNet] Arena 结果桥接忙，跳过候选响应: {key}, active={active}",
+                    interval_sec=10.0,
+                )
+                return False
+            self._result_bridge_active_by_session[key] = active + 1
+            return True
+
+    def _release_result_bridge_slot(self, session_id: str) -> None:
+        key = str(session_id or "unknown")
+        with self._result_bridge_lock:
+            active = int(self._result_bridge_active_by_session.get(key, 0) or 0)
+            if active <= 1:
+                self._result_bridge_active_by_session.pop(key, None)
+            else:
+                self._result_bridge_active_by_session[key] = active - 1
 
     @staticmethod
     def _is_reveal_snapshot_candidate(event: Dict[str, Any]) -> bool:
@@ -519,13 +551,21 @@ class _GlobalNetworkInterceptionManager:
         if not self._is_result_bridge_candidate(event):
             return
 
-        thread = threading.Thread(
-            target=self._dispatch_result_bridge,
-            args=(session, response, dict(event or {}), stop_event),
-            daemon=True,
-            name=f"global-net-arena-{getattr(session, 'id', 'unknown')}",
-        )
-        thread.start()
+        session_id = str(getattr(session, "id", "") or "unknown")
+        if not self._claim_result_bridge_slot(session_id):
+            return
+
+        try:
+            thread = threading.Thread(
+                target=self._dispatch_result_bridge,
+                args=(session, response, dict(event or {}), stop_event),
+                daemon=True,
+                name=f"global-net-arena-{session_id}",
+            )
+            thread.start()
+        except Exception as e:
+            self._release_result_bridge_slot(session_id)
+            logger.debug(f"[GlobalNet] Arena 结果桥接线程启动失败（忽略）: {e}")
 
     def _start_arena_reveal_poll(
         self,
@@ -629,6 +669,7 @@ class _GlobalNetworkInterceptionManager:
         event: Dict[str, Any],
         stop_event: threading.Event,
     ) -> None:
+        session_id = str(getattr(session, "id", "") or "unknown")
         try:
             raw_body, raw_body_source = self._read_response_body(response, stop_event)
             if not raw_body:
@@ -644,10 +685,13 @@ class _GlobalNetworkInterceptionManager:
                     "parse_result": {"done": True},
                     "parser_id": "lmarena_global",
                     "session_id": getattr(session, "id", ""),
+                    "session": session,
                 }
             )
         except Exception as e:
             logger.debug(f"[GlobalNet] Arena 结果事件桥接失败（忽略）: {e}")
+        finally:
+            self._release_result_bridge_slot(session_id)
 
     def _forget_worker_if_current(self, worker: _GlobalNetworkWorker) -> None:
         with self._lock:

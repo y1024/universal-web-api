@@ -1684,8 +1684,79 @@ window.CommandsTabTemplate = `
                         </div> <!-- Close action floating panel -->
                     </div>
 
-                    <!-- 高级模式：脚本编辑器 -->
+                    <!-- 高级模式：UI 表单 + 脚本编辑器 -->
                     <div v-if="editingCommand.mode === 'advanced'" class="space-y-4">
+                        <div class="flex flex-wrap items-center justify-between gap-4">
+                            <div class="flex items-center gap-2 text-sm font-bold tracking-widest text-slate-700 uppercase dark:text-slate-200">
+                                <span class="h-2 w-2 rounded-full bg-violet-500 shadow-[0_0_8px_rgba(139,92,246,0.8)]"></span>
+                                高级配置
+                            </div>
+                            <button v-if="hasAdvancedUiForm"
+                                    @click="toggleAdvancedEditorMode"
+                                    type="button"
+                                    class="rounded-lg border border-violet-200 bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700 transition hover:bg-violet-100 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-200 dark:hover:bg-violet-900/50">
+                                {{ getAdvancedUiModeLabel() }}
+                            </button>
+                        </div>
+
+                        <div v-if="hasAdvancedUiForm && advancedEditorMode === 'ui'"
+                             class="rounded-2xl border border-violet-200/70 bg-violet-50/30 p-5 shadow-sm dark:border-violet-700/40 dark:bg-violet-950/20">
+                            <div class="mb-4">
+                                <h4 class="text-sm font-bold text-slate-800 dark:text-slate-100">{{ advancedUiTitle }}</h4>
+                                <p v-if="advancedUiDescription" class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                                    {{ advancedUiDescription }}
+                                </p>
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                                <div v-for="field in advancedUiFields"
+                                     :key="'advanced-ui-' + field.key"
+                                     :class="field.type === 'textarea' ? 'md:col-span-2' : ''">
+                                    <label class="mb-1.5 block text-xs font-semibold text-slate-500 dark:text-slate-400">
+                                        {{ field.label || field.key }}
+                                        <span v-if="field.required" class="text-rose-500">*</span>
+                                    </label>
+
+                                    <textarea v-if="field.type === 'textarea'"
+                                              :value="getAdvancedUiFieldValue(field)"
+                                              @input="setAdvancedUiFieldValue(field, $event.target.value)"
+                                              :rows="Math.max(2, field.rows || 3)"
+                                              :placeholder="field.placeholder"
+                                              class="w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 transition focus:border-violet-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-100 dark:focus:border-violet-400"></textarea>
+
+                                    <label v-else-if="field.type === 'boolean'"
+                                           class="flex min-h-[42px] items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-200">
+                                        <input type="checkbox"
+                                               :checked="!!getAdvancedUiFieldValue(field)"
+                                               @change="setAdvancedUiFieldValue(field, $event.target.checked)"
+                                               class="rounded border-slate-300 text-violet-600 focus:ring-violet-500">
+                                        <span>{{ field.placeholder || '启用' }}</span>
+                                    </label>
+
+                                    <select v-else-if="field.type === 'select'"
+                                            :value="getAdvancedUiFieldValue(field)"
+                                            @change="setAdvancedUiFieldValue(field, $event.target.value)"
+                                            class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 transition focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-100">
+                                        <option v-for="option in field.options" :key="field.key + '-' + option.value" :value="option.value">
+                                            {{ option.label }}
+                                        </option>
+                                    </select>
+
+                                    <input v-else
+                                           :type="field.type === 'number' ? 'number' : (field.type === 'password' ? 'password' : 'text')"
+                                           :value="getAdvancedUiFieldValue(field)"
+                                           @input="setAdvancedUiFieldValue(field, $event.target.value)"
+                                           :placeholder="field.placeholder"
+                                           class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 transition focus:border-violet-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/20 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-100 dark:focus:border-violet-400">
+
+                                    <p v-if="field.help" class="mt-1.5 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                                        {{ field.help }}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div v-if="!hasAdvancedUiForm || advancedEditorMode === 'code'" class="space-y-4">
                         <div class="flex flex-wrap items-center justify-between gap-4">
                             <div class="flex items-center gap-2 text-sm font-bold tracking-widest text-slate-700 uppercase dark:text-slate-200">
                                 <span class="h-2 w-2 rounded-full bg-violet-500 shadow-[0_0_8px_rgba(139,92,246,0.8)]"></span>
@@ -1718,6 +1789,7 @@ window.CommandsTabTemplate = `
                                   class="w-full px-3 py-2 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900 dark:text-green-400 text-sm font-mono resize-y focus:ring-2 focus:ring-purple-400"
                                   spellcheck="false">
                         </textarea>
+                        </div>
                     </div>
 
                 </div> <!-- Closing body space-y-7 wrapper -->

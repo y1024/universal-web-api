@@ -164,6 +164,121 @@ const BROWSER_CONSTANTS_SCHEMA = {
                 desc: '开启后，日志列表会优先显示润色后的主要 DEBUG 文案；原始日志不会丢失，鼠标悬停日志正文仍可查看原文。',
                 type: 'switch',
                 default: false
+            },
+            LOG_CONSOLE_ENABLED: {
+                label: '输出到控制台',
+                desc: '关闭后不再把运行日志写到启动窗口，可减少高频日志格式化和终端输出开销。',
+                type: 'switch',
+                default: true
+            },
+            LOG_FILE_ENABLED: {
+                label: '写入日志文件',
+                desc: '关闭后不再写 logs/app.log，适合长期运行且不需要留存详细日志的场景。',
+                type: 'switch',
+                default: true
+            },
+            LOG_WEB_COLLECTOR_ENABLED: {
+                label: '控制面板日志收集',
+                desc: '关闭后日志页不再收集内存日志，可减少内存占用和前端轮询负担。',
+                type: 'switch',
+                default: true
+            },
+            LOG_WEB_MAX_RECORDS: {
+                label: '日志页最多保留',
+                unit: '条',
+                desc: '控制面板内存日志保留数量。设为 0 等同关闭日志页收集。',
+                type: 'number',
+                min: 0,
+                max: 10000,
+                step: 50,
+                default: 500
+            }
+        }
+    },
+    lowResource: {
+        label: '资源占用',
+        icon: '🌱',
+        collapsed: true,
+        items: {
+            REQUEST_MONITOR_ENABLED: {
+                label: '启用请求监控',
+                desc: '关闭后不再新增请求历史记录，也会清空运行中的内存历史；已有历史文件不会被删除。',
+                type: 'switch',
+                default: true
+            },
+            REQUEST_MONITOR_MAX_RECORDS: {
+                label: '请求历史最多保留',
+                unit: '条',
+                desc: '保留越少，占用内存越低。设为 0 等同关闭请求监控。',
+                type: 'number',
+                min: 0,
+                max: 2000,
+                step: 10,
+                default: 200
+            },
+            REQUEST_MONITOR_DETAIL_ENABLED: {
+                label: '保存请求详情',
+                desc: '关闭后只保留耗时、状态、域名、Token 估算等摘要，不保存完整 Prompt 和响应正文。',
+                type: 'switch',
+                default: true
+            },
+            REQUEST_MONITOR_SAVE_TO_FILE: {
+                label: '请求历史落盘',
+                desc: '关闭后请求历史只存在内存里，减少磁盘写入；已有 config/request_history.json 不会被删除。',
+                type: 'switch',
+                default: true
+            },
+            REQUEST_MONITOR_MAX_CAPTURED_RESPONSE_CHARS: {
+                label: '详情最大正文',
+                unit: '字符',
+                desc: '每条请求最多保存多少响应正文和请求上下文。设为 0 可只保留摘要。',
+                type: 'number',
+                min: 0,
+                max: 200000,
+                step: 1000,
+                default: 30000
+            },
+            DASHBOARD_LOG_POLL_INTERVAL_MS: {
+                label: '日志页轮询间隔',
+                unit: '毫秒',
+                desc: '控制面板刷新日志的频率。设为 0 关闭自动轮询。',
+                type: 'number',
+                min: 0,
+                step: 500,
+                default: 1000
+            },
+            DASHBOARD_LOG_BACKGROUND_POLL_INTERVAL_MS: {
+                label: '后台日志轮询间隔',
+                unit: '毫秒',
+                desc: '当前不在日志页时的日志轮询节流间隔。设为 0 时使用前台间隔。',
+                type: 'number',
+                min: 0,
+                step: 500,
+                default: 5000
+            },
+            DASHBOARD_REQUEST_HISTORY_POLL_INTERVAL_MS: {
+                label: '请求监控刷新间隔',
+                unit: '毫秒',
+                desc: '请求监控页自动刷新频率。设为 0 关闭自动刷新。',
+                type: 'number',
+                min: 0,
+                step: 500,
+                default: 3000
+            },
+            DASHBOARD_SYSTEM_STATS_ENABLED: {
+                label: '系统占用统计',
+                desc: '关闭后控制面板不再定时查询 CPU、内存和磁盘占用，能减少 psutil 与目录扫描开销。',
+                type: 'switch',
+                default: true
+            },
+            DASHBOARD_SYSTEM_STATS_POLL_INTERVAL_MS: {
+                label: '系统统计刷新间隔',
+                unit: '毫秒',
+                desc: 'CPU、内存、磁盘统计刷新频率。设为 0 关闭自动刷新。',
+                type: 'number',
+                min: 0,
+                step: 500,
+                default: 3000
             }
         }
     },

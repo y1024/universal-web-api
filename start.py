@@ -73,10 +73,11 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 def _load_env_file(path: Path) -> None:
     if not path.exists():
-        _log("[WARN] 未找到 .env 文件，使用默认配置")
+        if path.name == ".env":
+            _log("[WARN] 未找到 .env 文件，使用默认配置")
         return
 
-    _log("[INFO] 读取 .env 配置文件...")
+    _log(f"[INFO] 读取 {path.name} 配置文件...")
     for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -496,6 +497,68 @@ def _debug_port_ready(port: int) -> bool:
         return False
 
 
+def _focus_browser_window_for_port(port: int) -> bool:
+    """Best-effort Windows foreground restore for an already-running browser."""
+    if not sys.platform.startswith("win"):
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+        import psutil
+    except Exception as e:
+        _log(f"[DEBUG] 跳过浏览器唤起：{e}")
+        return False
+
+    target_arg = f"--remote-debugging-port={int(port)}"
+    target_pid = 0
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            if target_arg in cmdline:
+                target_pid = int(proc.info["pid"])
+                break
+        except Exception:
+            continue
+
+    if not target_pid:
+        return False
+
+    user32 = ctypes.windll.user32
+    SW_RESTORE = 9
+    hwnd_box = {"value": 0}
+    enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    @enum_proc
+    def _enum_windows(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value != target_pid:
+            return True
+
+        title_len = user32.GetWindowTextLengthW(hwnd)
+        if title_len > 0:
+            hwnd_box["value"] = int(hwnd)
+            if user32.IsWindowVisible(hwnd):
+                return False
+        elif hwnd_box["value"] == 0:
+            hwnd_box["value"] = int(hwnd)
+        return True
+
+    try:
+        user32.EnumWindows(_enum_windows, 0)
+        hwnd = int(hwnd_box["value"] or 0)
+        if not hwnd:
+            return False
+        user32.ShowWindowAsync(hwnd, SW_RESTORE)
+        time.sleep(0.15)
+        user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception as e:
+        _log(f"[DEBUG] 唤起浏览器窗口失败: {e}")
+        return False
+
+
 def _windows_browser_candidates() -> list[str]:
     local_app_data = os.getenv("LOCALAPPDATA", "")
     program_files = os.getenv("ProgramFiles", r"C:\Program Files")
@@ -574,6 +637,8 @@ def _launch_browser_if_needed() -> None:
     if _debug_port_ready(browser_port):
         _log("[WARN] Debug 端口已被占用，将复用现有浏览器实例")
         _log("[WARN] 如果后台标签页变慢，请关闭浏览器后重新运行启动脚本")
+        if _focus_browser_window_for_port(browser_port):
+            _log("[INFO] 已唤起现有浏览器窗口")
         _log(f"[OK] Debug 端口就绪: {browser_port}")
         _log()
         return
@@ -620,6 +685,8 @@ def _launch_browser_if_needed() -> None:
     for _ in range(15):
         if _debug_port_ready(browser_port):
             _log(f"[OK] 浏览器启动成功 - 端口 {browser_port}")
+            if _focus_browser_window_for_port(browser_port):
+                _log("[INFO] 已唤起新启动的浏览器窗口")
             _log()
             return
         time.sleep(1.0)

@@ -3790,6 +3790,7 @@ class TerminateTabRequest(BaseModel):
     """终止标签页当前任务请求"""
     reason: str = Field(default="manual_terminate_from_tab_pool", max_length=120)
     clear_page: bool = Field(default=True)
+    scope: str = Field(default="task", max_length=20)
 
 
 @router.put("/api/tab-pool/tabs/{tab_index}/preset")
@@ -3835,6 +3836,7 @@ async def terminate_tab_task(
             tab_index,
             reason=(body.reason or "manual_terminate_from_tab_pool"),
             clear_page=bool(body.clear_page),
+            scope=(body.scope or "task"),
         )
         if not result.get("ok"):
             if result.get("error") == "tab_not_found":

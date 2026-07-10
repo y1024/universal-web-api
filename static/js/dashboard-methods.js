@@ -31,6 +31,7 @@
     window.DashboardMethods = {
         async initializeDashboard() {
             await this.loadConfig(true)
+            await this.loadBrowserConstants().catch(() => {})
 
             this.startLogPolling()
             await this.loadHealthStatus({ silent: true, timeoutMs: 2500 }).catch(() => false)
@@ -45,6 +46,16 @@
 
         startLogPolling() {
             this.ensureLogPollingVisibilityHandler()
+            const interval = this.getDashboardPollInterval('DASHBOARD_LOG_POLL_INTERVAL_MS', 1000)
+            if (
+                interval <= 0
+                || !this.getBrowserConstantBool('LOG_WEB_COLLECTOR_ENABLED', true)
+                || this.getBrowserConstantNumber('LOG_WEB_MAX_RECORDS', 500) <= 0
+            ) {
+                this.stopLogPollingTimer()
+                this.logs = []
+                return
+            }
             if (this.logPollingTimer || this.isDocumentHidden()) {
                 return
             }
@@ -52,7 +63,7 @@
             this.pollLogs()
             this.logPollingTimer = setInterval(() => {
                 this.pollLogs({ background: this.activeTab !== 'logs' })
-            }, 1000)
+            }, interval)
         },
 
         stopLogPolling() {
@@ -152,6 +163,16 @@
 
         startRequestHistoryPolling() {
             this.ensureRequestHistoryVisibilityHandler()
+            const interval = this.getDashboardPollInterval('DASHBOARD_REQUEST_HISTORY_POLL_INTERVAL_MS', 3000)
+            if (!this.isRequestMonitorEnabled() || interval <= 0) {
+                this.stopRequestHistoryPollingTimer()
+                if (!this.isRequestMonitorEnabled()) {
+                    this.requestHistory = []
+                    this.requestHistoryRevision = ''
+                    this.requestHistoryError = ''
+                }
+                return
+            }
             if (this.requestHistoryTimer || this.isDocumentHidden()) {
                 return
             }
@@ -159,7 +180,7 @@
                 if (this.activeTab === 'monitor' && document.visibilityState !== 'hidden') {
                     this.fetchRequestHistory({ silent: true, ifChanged: true }).catch(() => {})
                 }
-            }, 3000)
+            }, interval)
         },
 
         stopRequestHistoryPolling() {
@@ -197,7 +218,7 @@
                     return
                 }
                 this.startRequestHistoryPolling()
-                if (this.activeTab === 'monitor') {
+                if (this.activeTab === 'monitor' && this.isRequestMonitorEnabled()) {
                     this.fetchRequestHistory({ silent: true, ifChanged: true }).catch(() => {})
                 }
             }
@@ -208,8 +229,116 @@
             return typeof document !== 'undefined' && document.visibilityState === 'hidden'
         },
 
+        getBrowserConstantDefault(key, fallback = null) {
+            const targetKey = String(key || '')
+            for (const group of Object.values(BROWSER_CONSTANTS_SCHEMA || {})) {
+                const items = group && group.items ? group.items : {}
+                if (Object.prototype.hasOwnProperty.call(items, targetKey)) {
+                    const field = items[targetKey] || {}
+                    return Object.prototype.hasOwnProperty.call(field, 'default') ? field.default : fallback
+                }
+            }
+            return fallback
+        },
+
+        getBrowserConstantValue(key, fallback = null) {
+            const targetKey = String(key || '')
+            const constants = this.browserConstants && typeof this.browserConstants === 'object' ? this.browserConstants : {}
+            if (Object.prototype.hasOwnProperty.call(constants, targetKey)) {
+                return constants[targetKey]
+            }
+            return this.getBrowserConstantDefault(targetKey, fallback)
+        },
+
+        getBrowserConstantNumber(key, fallback = 0, { min = null, max = null } = {}) {
+            const value = Number(this.getBrowserConstantValue(key, fallback))
+            if (!Number.isFinite(value)) {
+                return fallback
+            }
+            let normalized = value
+            if (Number.isFinite(min)) {
+                normalized = Math.max(min, normalized)
+            }
+            if (Number.isFinite(max)) {
+                normalized = Math.min(max, normalized)
+            }
+            return normalized
+        },
+
+        getBrowserConstantBool(key, fallback = true) {
+            const value = this.getBrowserConstantValue(key, fallback)
+            if (typeof value === 'boolean') {
+                return value
+            }
+            if (typeof value === 'number') {
+                return value !== 0
+            }
+            if (typeof value === 'string') {
+                const normalized = value.trim().toLowerCase()
+                if (['0', 'false', 'no', 'off'].includes(normalized)) {
+                    return false
+                }
+                if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+                    return true
+                }
+            }
+            return Boolean(fallback)
+        },
+
+        getDashboardPollInterval(key, fallback) {
+            const value = this.getBrowserConstantNumber(key, fallback, { min: 0 })
+            return Number.isFinite(value) ? Math.floor(value) : fallback
+        },
+
+        isRequestMonitorEnabled() {
+            return this.getBrowserConstantBool('REQUEST_MONITOR_ENABLED', true)
+                && this.getBrowserConstantNumber('REQUEST_MONITOR_MAX_RECORDS', 200, { min: 0 }) > 0
+        },
+
+        isSystemStatsPollingEnabled() {
+            return this.getBrowserConstantBool('DASHBOARD_SYSTEM_STATS_ENABLED', true)
+                && this.getDashboardPollInterval('DASHBOARD_SYSTEM_STATS_POLL_INTERVAL_MS', 3000) > 0
+        },
+
+        applyDashboardRuntimeSettings() {
+            this.stopLogPollingTimer()
+            this.stopRequestHistoryPollingTimer()
+            this.stopSystemStatsPollingTimer()
+
+            if (
+                !this.getBrowserConstantBool('LOG_WEB_COLLECTOR_ENABLED', true)
+                || this.getBrowserConstantNumber('LOG_WEB_MAX_RECORDS', 500, { min: 0 }) <= 0
+                || this.getDashboardPollInterval('DASHBOARD_LOG_POLL_INTERVAL_MS', 1000) <= 0
+            ) {
+                this.logs = []
+                this.lastLogSeq = 0
+                this.lastLogTimestamp = 0
+                this.logPollPending = false
+            }
+
+            if (!this.isRequestMonitorEnabled()) {
+                this.requestHistory = []
+                this.requestHistoryRevision = ''
+                this.requestHistoryError = ''
+                this.requestHistoryPendingRefresh = null
+            }
+
+            this.startLogPolling()
+            this.startRequestHistoryPolling()
+            this.startSystemStatsPolling()
+
+            if (this.activeTab === 'monitor' && this.isRequestMonitorEnabled()) {
+                this.fetchRequestHistory({ silent: true, ifChanged: false, force: true }).catch(() => {})
+            }
+        },
+
         startSystemStatsPolling() {
             this.ensureSystemStatsVisibilityHandler()
+            const interval = this.getDashboardPollInterval('DASHBOARD_SYSTEM_STATS_POLL_INTERVAL_MS', 3000)
+            if (!this.getBrowserConstantBool('DASHBOARD_SYSTEM_STATS_ENABLED', true) || interval <= 0) {
+                this.stopSystemStatsPollingTimer()
+                return
+            }
             if (this.systemStatsTimer || this.isDocumentHidden()) {
                 return
             }
@@ -218,7 +347,7 @@
 
             this.systemStatsTimer = setInterval(() => {
                 this.fetchSystemStats({ timeoutMs: 2500 }).catch(() => {})
-            }, 3000)
+            }, interval)
         },
 
         stopSystemStatsPollingTimer() {
@@ -717,13 +846,25 @@
 
         async pollLogs(options = {}) {
             if (this.pauseLogs || document.visibilityState === 'hidden') return;
+            if (
+                !this.getBrowserConstantBool('LOG_WEB_COLLECTOR_ENABLED', true)
+                || this.getBrowserConstantNumber('LOG_WEB_MAX_RECORDS', 500, { min: 0 }) <= 0
+            ) {
+                this.logs = [];
+                this.lastLogSeq = 0;
+                this.lastLogTimestamp = 0;
+                this.logPollPending = false;
+                return;
+            }
             if (this.isPollingLogs) {
                 this.logPollPending = true;
                 return;
             }
             if (options && options.background) {
                 const now = Date.now();
-                if (this.lastBackgroundLogPollAt && now - this.lastBackgroundLogPollAt < 5000) {
+                const backgroundInterval = this.getDashboardPollInterval('DASHBOARD_LOG_BACKGROUND_POLL_INTERVAL_MS', 5000)
+                    || this.getDashboardPollInterval('DASHBOARD_LOG_POLL_INTERVAL_MS', 1000);
+                if (this.lastBackgroundLogPollAt && backgroundInterval > 0 && now - this.lastBackgroundLogPollAt < backgroundInterval) {
                     return;
                 }
                 this.lastBackgroundLogPollAt = now;
@@ -734,6 +875,16 @@
             try {
                 const result = await this.apiRequest('/api/logs?after_seq=' + this.lastLogSeq);
                 if (generation !== Number(this.logGeneration || 0)) {
+                    return;
+                }
+                if (
+                    !this.getBrowserConstantBool('LOG_WEB_COLLECTOR_ENABLED', true)
+                    || this.getBrowserConstantNumber('LOG_WEB_MAX_RECORDS', 500, { min: 0 }) <= 0
+                ) {
+                    this.logs = [];
+                    this.lastLogSeq = 0;
+                    this.lastLogTimestamp = 0;
+                    this.logPollPending = false;
                     return;
                 }
 
@@ -764,7 +915,8 @@
                             messageAlias: log.message_alias || ''
                         }
                     });
-                    this.logs = this.logs.concat(nextLogs).slice(-500);
+                    const maxLogs = Math.floor(this.getBrowserConstantNumber('LOG_WEB_MAX_RECORDS', 500, { min: 0, max: 10000 }));
+                    this.logs = maxLogs > 0 ? this.logs.concat(nextLogs).slice(-maxLogs) : [];
                 }
                 this.lastLogSeq = Number(result.next_seq || this.lastLogSeq || 0);
                 this.lastLogTimestamp = Number(result.timestamp || this.lastLogTimestamp || 0);
@@ -1532,6 +1684,7 @@
                 this.browserConstantsRaw = JSON.parse(JSON.stringify(payload));
                 this.browserConstants = this.normalizeBrowserConstantsForEditor(payload);
                 this.browserConstantsOriginal = JSON.parse(JSON.stringify(this.browserConstants));
+                this.applyDashboardRuntimeSettings();
                 this.notify('浏览器常量已保存', 'success');
             } catch (error) {
                 this.notify('保存失败: ' + error.message, 'error');
@@ -1917,10 +2070,18 @@
             if (tab === 'monitor') {
                 const now = Date.now()
                 const stale = now - Number(this.requestHistoryFetchedAt || 0) > 2000
-                await Promise.all([
-                    this.fetchRequestHistory({ silent: true, ifChanged: !stale }),
-                    this.fetchSystemStats({ timeoutMs: 2500 })
-                ]);
+                const loaders = [];
+                if (this.isRequestMonitorEnabled()) {
+                    loaders.push(this.fetchRequestHistory({ silent: true, ifChanged: !stale }));
+                } else {
+                    this.requestHistory = [];
+                    this.requestHistoryRevision = '';
+                    this.requestHistoryError = '';
+                }
+                if (this.isSystemStatsPollingEnabled()) {
+                    loaders.push(this.fetchSystemStats({ timeoutMs: 2500 }));
+                }
+                await Promise.all(loaders);
                 return;
             }
             if (tab === 'settings' && !this.hasLoadedSettings) {
@@ -1937,6 +2098,13 @@
         },
 
         async fetchRequestHistory({ silent = false, ifChanged = false, force = false } = {}) {
+            if (!this.isRequestMonitorEnabled()) {
+                this.requestHistory = [];
+                this.requestHistoryRevision = '';
+                this.requestHistoryError = '';
+                this.requestHistoryPendingRefresh = null;
+                return this.requestHistory;
+            }
             if (this.requestHistoryLoading) {
                 this.requestHistoryPendingRefresh = {
                     silent: this.requestHistoryPendingRefresh
@@ -1960,14 +2128,35 @@
             const requestSeq = Number(this.requestHistoryRequestSeq || 0) + 1;
             this.requestHistoryRequestSeq = requestSeq;
             try {
-                const params = new URLSearchParams({ limit: '200' });
+                const maxRecords = this.getBrowserConstantNumber('REQUEST_MONITOR_MAX_RECORDS', 200, { min: 0, max: 2000 });
+                if (maxRecords <= 0) {
+                    this.requestHistory = [];
+                    this.requestHistoryRevision = '';
+                    this.requestHistoryError = '';
+                    return this.requestHistory;
+                }
+                const params = new URLSearchParams({ limit: String(Math.max(1, Math.floor(maxRecords))) });
                 if (ifChanged && !force && this.requestHistoryRevision) {
                     params.set('if_revision', String(this.requestHistoryRevision));
                 }
                 const data = await this.apiRequest('/api/system/request-history?' + params.toString(), {
                     timeoutMs: 5000
                 });
+                if (!this.isRequestMonitorEnabled()) {
+                    this.requestHistory = [];
+                    this.requestHistoryRevision = '';
+                    this.requestHistoryFetchedAt = Date.now();
+                    this.requestHistoryError = '';
+                    return this.requestHistory;
+                }
                 if (requestSeq !== this.requestHistoryRequestSeq) {
+                    return this.requestHistory;
+                }
+                if (data && data.enabled === false) {
+                    this.requestHistory = [];
+                    this.requestHistoryRevision = '';
+                    this.requestHistoryFetchedAt = Date.now();
+                    this.requestHistoryError = '';
                     return this.requestHistory;
                 }
                 const revision = String(data.revision || '');
@@ -2735,6 +2924,9 @@
         },
 
         async fetchSystemStats({ timeoutMs = 0 } = {}) {
+            if (!this.getBrowserConstantBool('DASHBOARD_SYSTEM_STATS_ENABLED', true)) {
+                return this.systemStats
+            }
             if (this.isFetchingSystemStats) {
                 return this.systemStatsRequestPromise || this.systemStats
             }

@@ -400,6 +400,10 @@ class BrowserConstants:
         'ELEMENT_CACHE_MAX_AGE': 5.0,
         'LOG_INFO_CUTE_MODE': False,
         'LOG_DEBUG_CUTE_MODE': False,
+        'LOG_CONSOLE_ENABLED': True,
+        'LOG_FILE_ENABLED': True,
+        'LOG_WEB_COLLECTOR_ENABLED': True,
+        'LOG_WEB_MAX_RECORDS': 500,
         'STREAM_CHECK_INTERVAL_MIN': 0.1,
         'STREAM_CHECK_INTERVAL_MAX': 1.0,
         'STREAM_CHECK_INTERVAL_DEFAULT': 0.3,
@@ -424,6 +428,16 @@ class BrowserConstants:
         'NETWORK_DEBUG_CAPTURE_PARSER_FILTER': '',
         'CONVERSATION_TIMEOUT_THRESHOLD': 0.0,
         'FORCE_NEW_CONVERSATION': False,
+        'REQUEST_MONITOR_ENABLED': True,
+        'REQUEST_MONITOR_MAX_RECORDS': 200,
+        'REQUEST_MONITOR_DETAIL_ENABLED': True,
+        'REQUEST_MONITOR_SAVE_TO_FILE': True,
+        'REQUEST_MONITOR_MAX_CAPTURED_RESPONSE_CHARS': 30000,
+        'DASHBOARD_LOG_POLL_INTERVAL_MS': 1000,
+        'DASHBOARD_LOG_BACKGROUND_POLL_INTERVAL_MS': 5000,
+        'DASHBOARD_REQUEST_HISTORY_POLL_INTERVAL_MS': 3000,
+        'DASHBOARD_SYSTEM_STATS_ENABLED': True,
+        'DASHBOARD_SYSTEM_STATS_POLL_INTERVAL_MS': 3000,
         'ATTACHMENT_READY_IDLE_TIMEOUT': 8.0,
         'ATTACHMENT_READY_HARD_MAX_WAIT': 90.0,
     }
@@ -473,6 +487,10 @@ class BrowserConstants:
     # 日志
     LOG_INFO_CUTE_MODE = False
     LOG_DEBUG_CUTE_MODE = False
+    LOG_CONSOLE_ENABLED = True
+    LOG_FILE_ENABLED = True
+    LOG_WEB_COLLECTOR_ENABLED = True
+    LOG_WEB_MAX_RECORDS = 500
     
     # 流式监控
     STREAM_CHECK_INTERVAL_MIN = 0.1
@@ -519,6 +537,18 @@ class BrowserConstants:
     # 对话会话控制
     CONVERSATION_TIMEOUT_THRESHOLD = 0.0
     FORCE_NEW_CONVERSATION = False
+
+    # 低资源运行
+    REQUEST_MONITOR_ENABLED = True
+    REQUEST_MONITOR_MAX_RECORDS = 200
+    REQUEST_MONITOR_DETAIL_ENABLED = True
+    REQUEST_MONITOR_SAVE_TO_FILE = True
+    REQUEST_MONITOR_MAX_CAPTURED_RESPONSE_CHARS = 30000
+    DASHBOARD_LOG_POLL_INTERVAL_MS = 1000
+    DASHBOARD_LOG_BACKGROUND_POLL_INTERVAL_MS = 5000
+    DASHBOARD_REQUEST_HISTORY_POLL_INTERVAL_MS = 3000
+    DASHBOARD_SYSTEM_STATS_ENABLED = True
+    DASHBOARD_SYSTEM_STATS_POLL_INTERVAL_MS = 3000
 
     @classmethod
     def _load_config(cls):
@@ -572,19 +602,77 @@ class BrowserConstants:
 
 # ================= 安全日志配置 =================
 
+def _browser_constant_bool(key: str, default: bool = True) -> bool:
+    value = BrowserConstants.get(key)
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
+def _browser_constant_int(
+    key: str,
+    default: int,
+    *,
+    min_value: int = 0,
+    max_value: Optional[int] = None,
+) -> int:
+    try:
+        value = int(BrowserConstants.get(key))
+    except Exception:
+        value = int(default)
+    value = max(int(min_value), value)
+    if max_value is not None:
+        value = min(int(max_value), value)
+    return value
+
+
+class _BrowserConstantEnabledFilter:
+    def __init__(self, key: str, default: bool = True):
+        self.key = key
+        self.default = default
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return _browser_constant_bool(self.key, self.default)
+
 # ================= 日志收集器（供前端展示）=================
 
 class LogCollector:
     """收集日志用于前端展示"""
 
-    def __init__(self, max_logs: int = 1200):
+    def __init__(self, max_logs: int = 500):
         self.logs: deque = deque(maxlen=max_logs)
         self.lock = threading.Lock()
         self._next_seq = 1
         self._last_clear_seq = 0
 
+    def is_enabled(self) -> bool:
+        return _browser_constant_bool("LOG_WEB_COLLECTOR_ENABLED", True)
+
+    def _target_max_logs(self) -> int:
+        return _browser_constant_int("LOG_WEB_MAX_RECORDS", 500, min_value=0, max_value=10000)
+
+    def _sync_limits_unlocked(self) -> None:
+        target_max_logs = self._target_max_logs()
+        if self.logs.maxlen == target_max_logs:
+            return
+        self.logs = deque(list(self.logs)[-target_max_logs:] if target_max_logs else [], maxlen=target_max_logs)
+
     def add(self, entry: Dict[str, Any]):
         with self.lock:
+            self._sync_limits_unlocked()
+            if not self.is_enabled() or self.logs.maxlen == 0:
+                if self.logs:
+                    self.logs.clear()
+                return
             payload = dict(entry or {})
             payload["seq"] = self._next_seq
             payload.setdefault("timestamp", time.time())
@@ -602,6 +690,11 @@ class LogCollector:
 
     def get_recent(self, since: float = 0, after_seq: int = 0) -> Tuple[List[Dict[str, Any]], int, bool]:
         with self.lock:
+            self._sync_limits_unlocked()
+            if not self.is_enabled() or self.logs.maxlen == 0:
+                if self.logs:
+                    self.logs.clear()
+                return [], self._next_seq - 1, False
             cursor = max(0, int(after_seq or 0))
             cleared = bool(cursor and self._last_clear_seq and cursor <= self._last_clear_seq)
             if cursor > 0:
@@ -1158,6 +1251,8 @@ class _WebLogHandler(logging.Handler):
 
     def emit(self, record):
         try:
+            if not log_collector.is_enabled():
+                return
             raw_message = _sanitize_sensitive_text(str(getattr(record, "codex_message", "") or ""))
             if not raw_message:
                 raw_message = _sanitize_sensitive_text(str(record.getMessage() or ""))
@@ -1411,6 +1506,7 @@ class _SafeRotatingFileHandler(RotatingFileHandler):
 _web_log_handler = _WebLogHandler()
 _web_log_handler.setLevel(logging.DEBUG)
 _web_log_handler.setFormatter(_DisplayLogFormatter())
+_web_log_handler.addFilter(_BrowserConstantEnabledFilter("LOG_WEB_COLLECTOR_ENABLED", True))
 setattr(_web_log_handler, "_codex_secure_handler", "web")
 
 
@@ -1464,6 +1560,7 @@ def get_shared_file_log_handler() -> Optional[logging.Handler]:
             )
             handler.setLevel(logging.DEBUG)
             handler.setFormatter(_FileLogFormatter())
+            handler.addFilter(_BrowserConstantEnabledFilter("LOG_FILE_ENABLED", True))
             setattr(handler, "_codex_secure_handler", "file")
             _shared_file_log_handler = handler
         except Exception as e:
@@ -2395,6 +2492,7 @@ class SecureLogger:
                 console_handler = logging.StreamHandler(sys.stdout)
                 console_handler.setLevel(logging.DEBUG)
                 console_handler.setFormatter(_ConsoleColorFormatter())
+                console_handler.addFilter(_BrowserConstantEnabledFilter("LOG_CONSOLE_ENABLED", True))
                 setattr(console_handler, "_codex_secure_handler", "console")
                 logger.addHandler(console_handler)
 

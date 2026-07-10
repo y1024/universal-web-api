@@ -219,6 +219,59 @@ def _coerce_tab_index(value) -> Optional[int]:
         return None
 
 
+def _manual_command_session_route_excluded(pool, session) -> bool:
+    checker = getattr(pool, "_is_session_excluded_from_dynamic_routing", None)
+    if callable(checker):
+        try:
+            return bool(checker(session))
+        except Exception as exc:
+            logger.debug(f"manual command route-exclusion session check failed: {exc}")
+
+    current_url = ""
+    try:
+        current_url, _domain = session.get_cached_route_snapshot()
+    except Exception:
+        current_url = str(getattr(session, "url", "") or "").strip()
+
+    if not current_url:
+        try:
+            info = session.get_info(use_cached_url=True)
+            if isinstance(info, dict):
+                current_url = str(info.get("url") or "").strip()
+        except Exception:
+            current_url = ""
+
+    if not current_url:
+        return False
+
+    url_checker = getattr(pool, "is_url_excluded", None)
+    if callable(url_checker):
+        try:
+            return bool(url_checker(current_url))
+        except Exception as exc:
+            logger.debug(f"manual command route-exclusion URL check failed: {exc}")
+    return False
+
+
+def _manual_command_tab_item_route_excluded(pool, item) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("route_excluded"):
+        return True
+
+    current_url = str(item.get("url") or item.get("current_url") or "").strip()
+    if not current_url:
+        return False
+
+    url_checker = getattr(pool, "is_url_excluded", None)
+    if callable(url_checker):
+        try:
+            return bool(url_checker(current_url))
+        except Exception as exc:
+            logger.debug(f"manual command route-exclusion status check failed: {exc}")
+    return False
+
+
 def _idle_tabs_for_manual_command(pool) -> List[dict]:
     items: List[dict] = []
     snapshot_failed = False
@@ -234,6 +287,8 @@ def _idle_tabs_for_manual_command(pool) -> List[dict]:
             tab_index = _coerce_tab_index(getattr(session, "persistent_index", None))
             if tab_index is None:
                 continue
+            if _manual_command_session_route_excluded(pool, session):
+                continue
             items.append({"tab_index": tab_index, "session": session})
     if not hasattr(pool, "get_sessions_snapshot") or snapshot_failed:
         status = pool.get_status()
@@ -242,6 +297,8 @@ def _idle_tabs_for_manual_command(pool) -> List[dict]:
                 continue
             tab_index = _coerce_tab_index(item.get("persistent_index"))
             if tab_index is None:
+                continue
+            if _manual_command_tab_item_route_excluded(pool, item):
                 continue
             items.append({"tab_index": tab_index, "session": None})
 
@@ -522,7 +579,14 @@ async def test_command(command_id: str, authenticated: bool = Depends(verify_aut
                 setattr(target_session, "_command_request_id", target_ctx.request_id)
                 request_manager.start_request(target_ctx, tab_id=target_session.id)
                 with command_engine._command_logging_context(cmd):
-                    command_engine._execute_command(cmd, target_session)
+                    execution_result = command_engine._execute_command(cmd, target_session)
+                result_text = str((execution_result or {}).get("result") or "").strip()
+                if result_text:
+                    request_manager.update_request_metadata(
+                        target_ctx.request_id,
+                        response_text=result_text,
+                        has_response_text=True,
+                    )
                 if not target_ctx.should_stop() and target_ctx.status == RequestStatus.RUNNING:
                     target_ctx.mark_completed()
             except Exception as e:

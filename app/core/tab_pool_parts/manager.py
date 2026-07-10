@@ -1820,19 +1820,44 @@ class TabPoolManager:
 
         for session in self._tabs.values():
             if session.status == TabStatus.BUSY:
-                busy_duration = now - session.last_used_at
+                try:
+                    timeout_info = session.get_busy_timeout_info(now=now)
+                except Exception:
+                    timeout_info = {
+                        "basis": "session",
+                        "duration": now - session.last_used_at,
+                        "command_loop": {},
+                    }
+                busy_duration = float(timeout_info.get("duration") or 0.0)
+                timeout_basis = str(timeout_info.get("basis") or "session")
+                command_loop = timeout_info.get("command_loop") if isinstance(timeout_info, dict) else {}
 
                 if busy_duration > self.stuck_timeout:
                     task_id = session.current_task_id or ""
+                    detail_parts = [
+                        f"busy_duration={busy_duration:.0f}s",
+                        f"basis={timeout_basis}",
+                    ]
+                    if isinstance(command_loop, dict) and command_loop.get("active"):
+                        loop_iteration = command_loop.get("iteration")
+                        loop_total = command_loop.get("total")
+                        loop_label = str(command_loop.get("label") or "").strip()
+                        loop_text = f"loop={loop_iteration or '-'}"
+                        if loop_total:
+                            loop_text = f"{loop_text}/{loop_total}"
+                        if loop_label:
+                            loop_text = f"{loop_label}:{loop_text}"
+                        detail_parts.append(loop_text)
                     cancel_submitted = self._cancel_active_request_for_session(
                         session,
                         "stuck_timeout",
-                        detail=f"busy_duration={busy_duration:.0f}s",
+                        detail=", ".join(detail_parts),
                     )
                     snapshot = self._describe_session(session)
                     action_label = "record stuck session" if self.preserve_error_tabs else "retire session"
                     logger.warning(
-                        f"[{session.id}] stuck for {busy_duration:.0f}s, {action_label} "
+                        f"[{session.id}] stuck for {busy_duration:.0f}s "
+                        f"(basis={timeout_basis}), {action_label} "
                         f"(task={task_id or '-'}, cancel_submitted={cancel_submitted}, "
                         f"snapshot={snapshot})"
                     )
@@ -1863,14 +1888,23 @@ class TabPoolManager:
         if session is None:
             return False
 
-        task_id = str(getattr(session, "current_task_id", "") or "").strip()
-        if not task_id:
+        request_ids = []
+        for attr_name in ("current_task_id", "_command_request_id", "_bound_request_id", "_command_loop_request_id"):
+            try:
+                request_id = str(getattr(session, attr_name, "") or "").strip()
+            except Exception:
+                request_id = ""
+            if request_id and request_id not in request_ids:
+                request_ids.append(request_id)
+        if not request_ids:
             return False
 
-        if getattr(session, "_last_cancel_request_task_id", None) == task_id:
+        task_id = request_ids[0]
+        cancel_key = "|".join(request_ids)
+        if getattr(session, "_last_cancel_request_task_id", None) == cancel_key:
             logger.debug(
                 f"[{session.id}] duplicate cancel skipped "
-                f"(task={task_id}, reason={reason}, "
+                f"(task={cancel_key}, reason={reason}, "
                 f"previous_reason={getattr(session, '_last_cancel_request_reason', '-')}, "
                 f"detail={detail or '-'})"
             )
@@ -1878,21 +1912,24 @@ class TabPoolManager:
 
         try:
             setattr(session, "_workflow_stop_reason", reason)
-            setattr(session, "_last_cancel_request_task_id", task_id)
+            setattr(session, "_last_cancel_request_task_id", cancel_key)
             setattr(session, "_last_cancel_request_reason", reason)
         except Exception:
             pass
 
-        cancel_submitted = self._submit_request_cancel(
-            task_id,
-            reason,
-            session_id=session.id,
-            detail=detail,
-        )
+        cancel_submitted = False
+        for request_id in request_ids:
+            cancel_submitted = bool(self._submit_request_cancel(
+                request_id,
+                reason,
+                session_id=session.id,
+                detail=detail,
+            )) or cancel_submitted
 
         logger.warning(
             f"[{session.id}] 会话失效，已请求取消任务 "
-            f"(task={task_id}, reason={reason}, cancel_submitted={cancel_submitted}, detail={detail or '-'})"
+            f"(task={task_id}, requests={','.join(request_ids)}, reason={reason}, "
+            f"cancel_submitted={cancel_submitted}, detail={detail or '-'})"
         )
         return cancel_submitted
 
@@ -2816,6 +2853,7 @@ class TabPoolManager:
         persistent_index: int,
         reason: str = "manual_terminate",
         clear_page: bool = True,
+        scope: str = "task",
     ) -> Dict[str, Any]:
         """
         按标签页编号终止当前任务并释放占用。
@@ -2826,6 +2864,10 @@ class TabPoolManager:
         3) 若标签页空闲且 clear_page=True，重置到 about:blank；
         4) 成功空闲后恢复全局网络监听。
         """
+        normalized_scope = str(scope or "task").strip().lower()
+        if normalized_scope not in {"task", "loop"}:
+            normalized_scope = "task"
+
         with self._condition:
             session_id = self._persistent_to_session_id.get(persistent_index)
             if not session_id:
@@ -2835,9 +2877,42 @@ class TabPoolManager:
             if not session:
                 return {"ok": False, "error": "tab_not_found", "tab_index": persistent_index}
 
+            if normalized_scope == "loop":
+                loop_cancelled = session.request_command_loop_cancel(reason)
+                self._condition.notify_all()
+                if not loop_cancelled:
+                    return {
+                        "ok": False,
+                        "error": "no_active_command_loop",
+                        "tab_index": persistent_index,
+                        "tab_id": session.id,
+                        "status": session.status.value,
+                        "reason": reason,
+                        "scope": normalized_scope,
+                    }
+                logger.warning(
+                    f"[{session.id}] 手动终止当前循环: idx=#{persistent_index}, "
+                    f"status={session.status.value}, reason={reason}, "
+                    f"loop={session.get_command_loop_info()}"
+                )
+                return {
+                    "ok": True,
+                    "tab_index": persistent_index,
+                    "tab_id": session.id,
+                    "was_busy": session.status == TabStatus.BUSY,
+                    "task_id": str(session.current_task_id or "").strip(),
+                    "cancelled": True,
+                    "status": session.status.value,
+                    "reason": reason,
+                    "scope": normalized_scope,
+                    "loop_cancelled": True,
+                    "command_loop": session.get_command_loop_info(),
+                }
+
             before_snapshot = self._describe_session(session)
             task_id = str(session.current_task_id or "").strip()
             command_request_id = str(getattr(session, "_command_request_id", "") or "").strip()
+            command_loop_request_id = str(getattr(session, "_command_loop_request_id", "") or "").strip()
             was_busy = session.status == TabStatus.BUSY
             use_force_release = bool(was_busy or clear_page)
             release_state = session._begin_release_state(
@@ -2859,7 +2934,7 @@ class TabPoolManager:
         cancel_error = ""
 
         request_ids_to_cancel = []
-        for request_id in (task_id, command_request_id):
+        for request_id in (task_id, command_request_id, command_loop_request_id):
             if request_id and request_id not in request_ids_to_cancel:
                 request_ids_to_cancel.append(request_id)
 
@@ -2911,6 +2986,7 @@ class TabPoolManager:
                 "cancelled": cancelled,
                 "status": session.status.value,
                 "reason": reason,
+                "scope": normalized_scope,
             }
             if cancel_error:
                 result["cancel_error"] = cancel_error

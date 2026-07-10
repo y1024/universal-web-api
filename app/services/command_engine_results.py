@@ -376,6 +376,7 @@ class CommandEngineResultsMixin:
         mode: str = "external",
         group_name: Any = "",
         trigger_commands: bool = True,
+        extra_fields: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if session is None:
             return None
@@ -398,6 +399,12 @@ class CommandEngineResultsMixin:
             "mode": str(mode or "external").strip() or "external",
             "task_id": str(getattr(session, "current_task_id", "") or ""),
         }
+        if isinstance(extra_fields, dict):
+            for key, value in extra_fields.items():
+                normalized_key = str(key or "").strip()
+                if not normalized_key or normalized_key in event:
+                    continue
+                event[normalized_key] = copy.deepcopy(value)
 
         with self._lock:
             self._append_bounded_event(
@@ -444,8 +451,7 @@ class CommandEngineResultsMixin:
             history.append(latest)
         return history[-50:]
 
-    @staticmethod
-    def _result_event_matches_trigger(trigger: Dict[str, Any], event: Dict[str, Any]) -> bool:
+    def _result_event_matches_trigger(self, trigger: Dict[str, Any], event: Dict[str, Any]) -> bool:
         listen_all = bool(trigger.get("listen_all_commands", False))
         raw = trigger.get("command_ids", [])
         values = raw if isinstance(raw, list) else str(raw or "").split(",")
@@ -461,6 +467,29 @@ class CommandEngineResultsMixin:
             return False
         if bool(trigger.get("informative_only", True)) and not bool(event.get("informative", False)):
             return False
+
+        expected = self._stringify_result(
+            trigger.get("expected_value")
+            if trigger.get("expected_value") not in (None, "")
+            else trigger.get("value", "")
+        )
+        if expected:
+            actual_parts = []
+            for field in (
+                "summary",
+                "result",
+                "default_response",
+                "response_a",
+                "response_b",
+                "source_command_name",
+                "source_command_id",
+            ):
+                value = self._stringify_result(event.get(field, ""))
+                if value:
+                    actual_parts.append(value)
+            actual = "\n".join(actual_parts)
+            if not self._match_value_rule(actual, expected, trigger.get("match_rule", "contains")):
+                return False
         return True
 
     @staticmethod

@@ -46,6 +46,13 @@ class TabSession:
     last_conversation_activity_at: float = 0.0
     last_conversation_domain: Optional[str] = None
     last_conversation_preset_name: Optional[str] = None
+    command_loop_started_at: float = 0.0
+    command_loop_iteration: Optional[int] = None
+    command_loop_total: Optional[int] = None
+    command_loop_label: Optional[str] = None
+    command_loop_cancel_requested: bool = False
+    command_loop_cancel_reason: Optional[str] = None
+    command_loop_cancel_requested_at: float = 0.0
     _health_cache_until: float = field(default=0.0, repr=False)
     _health_cache_result: bool = field(default=False, repr=False)
     _health_cache_url: str = field(default="", repr=False)
@@ -75,6 +82,96 @@ class TabSession:
         self._health_cache_result = False
         self._health_cache_url = ""
         self._health_cache_domain = ""
+
+    def _clear_command_loop_unlocked(self):
+        self.command_loop_started_at = 0.0
+        self.command_loop_iteration = None
+        self.command_loop_total = None
+        self.command_loop_label = None
+        self.command_loop_cancel_requested = False
+        self.command_loop_cancel_reason = None
+        self.command_loop_cancel_requested_at = 0.0
+
+    def begin_command_loop(
+        self,
+        *,
+        iteration: Optional[int] = None,
+        total: Optional[int] = None,
+        label: str = "",
+    ) -> Dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            self.command_loop_started_at = now
+            self.command_loop_iteration = iteration if iteration is None else int(iteration)
+            self.command_loop_total = total if total is None else int(total)
+            self.command_loop_label = str(label or "").strip() or None
+            self.command_loop_cancel_requested = False
+            self.command_loop_cancel_reason = None
+            self.command_loop_cancel_requested_at = 0.0
+            return self._command_loop_info_unlocked(now=now)
+
+    def end_command_loop(self, status: str = "completed") -> Dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            info = self._command_loop_info_unlocked(now=now)
+            info["final_status"] = str(status or "").strip() or "completed"
+            self._clear_command_loop_unlocked()
+            return info
+
+    def request_command_loop_cancel(self, reason: str = "manual_loop_cancel") -> bool:
+        now = time.time()
+        with self._lock:
+            if not self.command_loop_started_at:
+                return False
+            self.command_loop_cancel_requested = True
+            self.command_loop_cancel_reason = str(reason or "").strip() or "manual_loop_cancel"
+            self.command_loop_cancel_requested_at = now
+            return True
+
+    def is_command_loop_cancelled(self) -> bool:
+        with self._lock:
+            return bool(self.command_loop_cancel_requested)
+
+    def _command_loop_info_unlocked(self, *, now: Optional[float] = None) -> Dict[str, Any]:
+        current_time = time.time() if now is None else float(now)
+        started_at = float(self.command_loop_started_at or 0.0)
+        active = started_at > 0
+        elapsed = max(0.0, current_time - started_at) if active else 0.0
+        return {
+            "active": active,
+            "iteration": self.command_loop_iteration,
+            "total": self.command_loop_total,
+            "label": self.command_loop_label or "",
+            "started_at": started_at or None,
+            "elapsed_sec": round(elapsed, 1),
+            "cancel_requested": bool(self.command_loop_cancel_requested),
+            "cancel_reason": self.command_loop_cancel_reason or "",
+        }
+
+    def get_command_loop_info(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._command_loop_info_unlocked()
+
+    def touch_activity(self) -> None:
+        with self._lock:
+            self.last_used_at = time.time()
+
+    def get_busy_timeout_info(self, *, now: Optional[float] = None) -> Dict[str, Any]:
+        current_time = time.time() if now is None else float(now)
+        with self._lock:
+            loop_started_at = float(self.command_loop_started_at or 0.0)
+            if loop_started_at > 0:
+                reference_at = loop_started_at
+                basis = "command_loop"
+            else:
+                reference_at = float(self.last_used_at or current_time)
+                basis = "session"
+            return {
+                "basis": basis,
+                "started_at": reference_at,
+                "duration": max(0.0, current_time - reference_at),
+                "command_loop": self._command_loop_info_unlocked(now=current_time),
+            }
 
     def is_healthy(self, *, allow_live_check: bool = True) -> bool:
         """检查标签页是否健康，避免在忙碌时额外触发 live CDP 读取。"""
@@ -150,6 +247,7 @@ class TabSession:
             self.status = TabStatus.BUSY
             self.current_task_id = task_id
             self._clear_health_cache_unlocked()
+            self._clear_command_loop_unlocked()
             setattr(self, "_last_cancel_request_task_id", None)
             setattr(self, "_last_cancel_request_reason", None)
             self.last_used_at = time.time()
@@ -172,6 +270,7 @@ class TabSession:
             self.status = TabStatus.BUSY
             self.current_task_id = task_id
             self._clear_health_cache_unlocked()
+            self._clear_command_loop_unlocked()
             setattr(self, "_last_cancel_request_task_id", None)
             setattr(self, "_last_cancel_request_reason", None)
             self.last_used_at = time.time()
@@ -221,8 +320,10 @@ class TabSession:
             self.current_task_id = None
             self.current_command_name = None
             self._clear_health_cache_unlocked()
+            self._clear_command_loop_unlocked()
             setattr(self, "_bound_request_id", None)
             setattr(self, "_command_request_id", None)
+            setattr(self, "_command_loop_request_id", None)
             setattr(self, "_command_vars", {})
             self.last_used_at = time.time()
 
@@ -537,9 +638,13 @@ class TabSession:
             last_conversation_activity_at = self.last_conversation_activity_at
             last_conversation_domain = self.last_conversation_domain
             last_conversation_preset_name = self.last_conversation_preset_name
+            command_loop = self._command_loop_info_unlocked()
         busy_duration = None
         if status == TabStatus.BUSY:
-            busy_duration = round(time.time() - last_used_at, 1)
+            try:
+                busy_duration = round(self.get_busy_timeout_info(now=time.time()).get("duration") or 0.0, 1)
+            except Exception:
+                busy_duration = round(time.time() - last_used_at, 1)
 
         if use_cached_url:
             current_url = cached_url
@@ -578,6 +683,7 @@ class TabSession:
             "last_conversation_at": last_conversation_activity_at or None,
             "last_conversation_domain": last_conversation_domain,
             "last_conversation_preset_name": last_conversation_preset_name,
+            "command_loop": command_loop,
         }
 
     def _refresh_current_domain(self, url: str = "") -> str:

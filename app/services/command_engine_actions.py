@@ -1,5 +1,6 @@
 import ast
 import copy
+import hashlib
 import json
 import math
 import os
@@ -2645,7 +2646,7 @@ return (() => {
             initial_task_id = str(getattr(session, "current_task_id", "") or "").strip()
             initial_task_status = str(getattr(getattr(session, "status", None), "value", "") or "").strip().lower()
             try:
-                for attr_name in ("_command_request_id", "_bound_request_id"):
+                for attr_name in ("_command_request_id", "_bound_request_id", "_command_loop_request_id"):
                     request_id = str(getattr(session, attr_name, "") or "").strip()
                     if request_id and request_id not in initial_request_ids:
                         initial_request_ids.append(request_id)
@@ -2656,17 +2657,85 @@ return (() => {
                 pass
 
             _last_reset_time = 0.0
+            _loop_request_ctx = None
 
-            def _reset_timeout() -> None:
-                nonlocal _last_reset_time
-                now = time.monotonic()
-                if now - _last_reset_time < 0.5:
+            def _remember_command_loop_prompt_request(prompt: str, request_id: str) -> None:
+                prompt_text = str(prompt or "")
+                request_key = str(request_id or "").strip()
+                if not prompt_text or not request_key:
                     return
-                _last_reset_time = now
+                try:
+                    digest = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+                    now_ts = time.time()
+                    mapping = getattr(session, "_command_loop_prompt_request_ids", None)
+                    if not isinstance(mapping, dict):
+                        mapping = {}
+                    else:
+                        mapping = {
+                            key: value
+                            for key, value in mapping.items()
+                            if isinstance(value, dict)
+                            and float(value.get("expires_at", 0.0) or 0.0) > now_ts
+                        }
+                    mapping[digest] = {
+                        "request_id": request_key,
+                        "expires_at": now_ts + 900.0,
+                    }
+                    setattr(session, "_command_loop_prompt_request_ids", mapping)
+                except Exception:
+                    pass
 
+            def _remember_command_loop_request_window(
+                request_id: str,
+                *,
+                prompt: str = "",
+                ended: bool = False,
+            ) -> None:
+                request_key = str(request_id or "").strip()
+                if not request_key:
+                    return
+                try:
+                    now_ts = time.time()
+                    history = getattr(session, "_command_loop_request_history", None)
+                    if not isinstance(history, list):
+                        history = []
+                    kept = []
+                    found = False
+                    for item in history:
+                        if not isinstance(item, dict):
+                            continue
+                        if float(item.get("expires_at", 0.0) or 0.0) <= now_ts:
+                            continue
+                        if str(item.get("request_id") or "") == request_key:
+                            found = True
+                            if prompt:
+                                item["prompt"] = str(prompt or "")
+                            if ended:
+                                item["ended_at"] = now_ts
+                            item["expires_at"] = now_ts + 900.0
+                        kept.append(item)
+                    if not found:
+                        kept.append({
+                            "request_id": request_key,
+                            "prompt": str(prompt or ""),
+                            "started_at": now_ts,
+                            "ended_at": now_ts if ended else 0.0,
+                            "expires_at": now_ts + 900.0,
+                        })
+                    setattr(session, "_command_loop_request_history", kept[-50:])
+                except Exception:
+                    pass
+
+            def _session_domain() -> str:
+                try:
+                    return str(getattr(session, "current_domain", "") or "").strip()
+                except Exception:
+                    return ""
+
+            def _collect_request_ids() -> List[str]:
                 request_ids = list(initial_request_ids)
                 try:
-                    for attr_name in ("_command_request_id", "_bound_request_id"):
+                    for attr_name in ("_command_request_id", "_bound_request_id", "_command_loop_request_id"):
                         request_id = str(getattr(session, attr_name, "") or "").strip()
                         if request_id and request_id not in request_ids:
                             request_ids.append(request_id)
@@ -2678,6 +2747,36 @@ return (() => {
                         request_ids.append(task_id)
                 except Exception:
                     pass
+                return request_ids
+
+            def _command_loop_is_active() -> bool:
+                try:
+                    if hasattr(session, "get_command_loop_info"):
+                        return bool((session.get_command_loop_info() or {}).get("active"))
+                except Exception:
+                    pass
+                return False
+
+            def _touch_session_activity() -> None:
+                try:
+                    if hasattr(session, "touch_activity"):
+                        session.touch_activity()
+                    else:
+                        session.last_used_at = time.time()
+                except Exception:
+                    pass
+
+            def _reset_timeout(force: bool = False) -> None:
+                nonlocal _last_reset_time
+                now = time.monotonic()
+                if not force and now - _last_reset_time < 0.5:
+                    return
+                _last_reset_time = now
+
+                _touch_session_activity()
+                if not force and _command_loop_is_active():
+                    return
+                request_ids = _collect_request_ids()
                 for req_id in request_ids:
                     ctx = request_manager.get_request(req_id)
                     if ctx is not None and hasattr(ctx, "reset_timeout"):
@@ -2685,20 +2784,7 @@ return (() => {
 
             def _check_cancelled() -> bool:
                 _reset_timeout()
-                request_ids = list(initial_request_ids)
-                try:
-                    for attr_name in ("_command_request_id", "_bound_request_id"):
-                        request_id = str(getattr(session, attr_name, "") or "").strip()
-                        if request_id and request_id not in request_ids:
-                            request_ids.append(request_id)
-                except Exception:
-                    pass
-                try:
-                    task_id = str(getattr(session, "current_task_id", "") or "").strip()
-                    if task_id.startswith("req-") and task_id not in request_ids:
-                        request_ids.append(task_id)
-                except Exception:
-                    pass
+                request_ids = _collect_request_ids()
                 try:
                     for request_id in request_ids:
                         ctx = request_manager.get_request(request_id)
@@ -2727,6 +2813,207 @@ return (() => {
                 if _check_cancelled():
                     raise RuntimeError("python_script_cancelled")
 
+            def _begin_command_loop(iteration=None, total=None, label: str = "") -> Dict[str, Any]:
+                nonlocal _loop_request_ctx
+                _finish_command_loop_request("replaced")
+                info: Dict[str, Any] = {}
+                try:
+                    if hasattr(session, "begin_command_loop"):
+                        info = session.begin_command_loop(
+                            iteration=iteration,
+                            total=total,
+                            label=label,
+                        )
+                except Exception as e:
+                    logger.debug(f"[CMD] 记录命令循环状态失败（忽略）: {e}")
+                    info = {}
+                _reset_timeout(force=True)
+                _loop_request_ctx = _create_command_loop_request(
+                    iteration=iteration,
+                    total=total,
+                    label=label,
+                    prompt="",
+                )
+                return info
+
+            def _end_command_loop(status: str = "completed") -> Dict[str, Any]:
+                _finish_command_loop_request(status)
+                try:
+                    if hasattr(session, "end_command_loop"):
+                        return session.end_command_loop(status=status)
+                except Exception as e:
+                    logger.debug(f"[CMD] 清理命令循环状态失败（忽略）: {e}")
+                return {}
+
+            def _create_command_loop_request(iteration=None, total=None, label: str = "", prompt: str = ""):
+                loop_ctx = None
+                try:
+                    loop_ctx = request_manager.create_request()
+                    setattr(session, "_command_loop_request_id", loop_ctx.request_id)
+                    payload = {
+                        "model": str(command.get("name") or "command-python-loop"),
+                        "stream": False,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": str(prompt or ""),
+                            }
+                        ],
+                    }
+                    request_manager.record_request_input(
+                        loop_ctx,
+                        payload,
+                        endpoint="command/python-loop",
+                        route_domain=_session_domain(),
+                        tab_index=getattr(session, "persistent_index", None),
+                        preset_name=str(command.get("name") or "命令脚本"),
+                    )
+                    request_manager.update_request_metadata(
+                        loop_ctx.request_id,
+                        request_type="脚本循环",
+                        target_domain=_session_domain(),
+                        tab_id=getattr(session, "id", ""),
+                        command_id=str(command.get("id") or ""),
+                        command_name=str(command.get("name") or ""),
+                        command_loop={
+                            "iteration": iteration,
+                            "total": total,
+                            "label": str(label or ""),
+                        },
+                    )
+                    request_manager.start_request(loop_ctx, tab_id=session.id)
+                    _remember_command_loop_request_window(loop_ctx.request_id, prompt=prompt)
+                    return loop_ctx
+                except Exception as e:
+                    logger.debug(f"[CMD] 创建命令循环请求日志失败（忽略）: {e}")
+                    try:
+                        if loop_ctx is not None and not loop_ctx.is_terminal():
+                            loop_ctx.mark_failed(str(e))
+                            request_manager.finish_request(loop_ctx, success=False)
+                    except Exception:
+                        pass
+                return None
+
+            def _record_command_loop_request(
+                prompt: str = "",
+                payload: Any = None,
+                endpoint: str = "command/python-loop",
+                request_type: str = "脚本循环",
+                response_text: str = "",
+            ) -> Dict[str, Any]:
+                nonlocal _loop_request_ctx
+                try:
+                    if _loop_request_ctx is None or _loop_request_ctx.is_terminal():
+                        _loop_request_ctx = _create_command_loop_request(prompt=prompt)
+                    if _loop_request_ctx is None:
+                        return {"ok": False, "error": "create_failed"}
+
+                    if payload is None:
+                        payload = {
+                            "model": str(command.get("name") or "command-python-loop"),
+                            "stream": False,
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": str(prompt or ""),
+                                }
+                            ],
+                        }
+                    request_manager.record_request_input(
+                        _loop_request_ctx,
+                        payload,
+                        endpoint=str(endpoint or "command/python-loop"),
+                        route_domain=_session_domain(),
+                        tab_index=getattr(session, "persistent_index", None),
+                        preset_name=str(command.get("name") or "命令脚本"),
+                    )
+                    metadata = {
+                        "request_type": str(request_type or "脚本循环"),
+                        "target_domain": _session_domain(),
+                        "tab_id": getattr(session, "id", ""),
+                        "command_id": str(command.get("id") or ""),
+                        "command_name": str(command.get("name") or ""),
+                    }
+                    if response_text:
+                        metadata["response_text"] = str(response_text)
+                        metadata["has_response_text"] = True
+                    request_manager.update_request_metadata(_loop_request_ctx.request_id, **metadata)
+                    _remember_command_loop_request_window(_loop_request_ctx.request_id, prompt=prompt)
+                    _remember_command_loop_prompt_request(prompt, _loop_request_ctx.request_id)
+                    _touch_session_activity()
+                    return {"ok": True, "request_id": _loop_request_ctx.request_id}
+                except Exception as e:
+                    logger.debug(f"[CMD] 记录命令循环请求日志失败（忽略）: {e}")
+                    return {"ok": False, "error": str(e)}
+
+            def _finish_command_loop_request(status: str = "completed") -> None:
+                nonlocal _loop_request_ctx
+                loop_ctx = _loop_request_ctx
+                _loop_request_ctx = None
+                try:
+                    if loop_ctx is not None:
+                        _remember_command_loop_request_window(loop_ctx.request_id, ended=True)
+                        setattr(session, "_last_command_loop_request_id", loop_ctx.request_id)
+                        setattr(session, "_last_command_loop_request_until", time.time() + 300.0)
+                    setattr(session, "_command_loop_request_id", None)
+                except Exception:
+                    pass
+                if loop_ctx is None:
+                    return
+                try:
+                    if loop_ctx.is_terminal():
+                        return
+                    normalized = str(status or "completed").strip().lower()
+                    if normalized in {"cancelled", "canceled"}:
+                        loop_ctx.request_cancel("command_loop_cancelled")
+                        request_manager.finish_request(loop_ctx, success=False)
+                    elif normalized in {"failed", "error", "stopped", "replaced"}:
+                        if normalized == "replaced":
+                            loop_ctx.request_cancel("command_loop_replaced")
+                            request_manager.finish_request(loop_ctx, success=False)
+                        else:
+                            request_manager.capture_error(loop_ctx, normalized, code=f"command_loop_{normalized}")
+                            loop_ctx.mark_failed(f"command_loop_{normalized}")
+                            request_manager.finish_request(loop_ctx, success=False)
+                    else:
+                        has_existing_response = False
+                        try:
+                            with loop_ctx._lock:
+                                existing_response = str(loop_ctx.monitor.get("response_text") or "").strip()
+                                existing_parts = loop_ctx.monitor.get("response_parts")
+                                has_existing_response = bool(existing_response) or (
+                                    isinstance(existing_parts, list)
+                                    and any(str(item).strip() for item in existing_parts)
+                                )
+                        except Exception:
+                            has_existing_response = False
+                        if has_existing_response:
+                            request_manager.update_request_metadata(
+                                loop_ctx.request_id,
+                                has_response_text=True,
+                            )
+                        else:
+                            request_manager.update_request_metadata(
+                                loop_ctx.request_id,
+                                response_text="命令脚本循环已完成。",
+                                has_response_text=True,
+                            )
+                        request_manager.finish_request(loop_ctx, success=True)
+                except Exception as e:
+                    logger.debug(f"[CMD] 完成命令循环请求日志失败（忽略）: {e}")
+
+            def _check_command_loop_cancelled() -> bool:
+                try:
+                    if hasattr(session, "is_command_loop_cancelled"):
+                        return bool(session.is_command_loop_cancelled())
+                except Exception:
+                    return False
+                return False
+
+            def _raise_if_command_loop_cancelled() -> None:
+                if _check_command_loop_cancelled():
+                    raise RuntimeError("python_script_loop_cancelled")
+
             context = {
                 "tab": session.tab,
                 "session": session,
@@ -2739,8 +3026,14 @@ return (() => {
                 "check_cancelled": _check_cancelled,
                 "raise_if_cancelled": _raise_if_cancelled,
                 "reset_timeout": _reset_timeout,
+                "begin_command_loop": _begin_command_loop,
+                "end_command_loop": _end_command_loop,
+                "record_command_loop_request": _record_command_loop_request,
+                "check_command_loop_cancelled": _check_command_loop_cancelled,
+                "raise_if_command_loop_cancelled": _raise_if_command_loop_cancelled,
                 "result": "",
             }
+            globals_dict: Dict[str, Any] = {}
             try:
                 if self._command_env_flag("CMD_ALLOW_UNSAFE_PYTHON_COMMANDS", False):
                     logger.warning("[CMD] Python 脚本正在以非沙箱模式执行，请仅用于完全可信配置")
@@ -2758,6 +3051,14 @@ return (() => {
             except Exception as e:
                 logger.error(f"[CMD] Python 脚本执行失败: {e}")
                 return {"mode": "advanced", "result": f"python_failed: {e}", "steps": []}
+            finally:
+                try:
+                    stop_network_watch = globals_dict.get("_stop_claude_network_watch")
+                    if callable(stop_network_watch):
+                        stop_network_watch()
+                except Exception as e:
+                    logger.debug(f"[CMD] 清理脚本网络监听失败（忽略）: {e}")
+                _end_command_loop("stopped")
 
         logger.warning(f"[CMD] 不支持的脚本语言: {lang}")
         return {"mode": "advanced", "result": f"unsupported_lang:{lang}", "steps": []}

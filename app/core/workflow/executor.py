@@ -499,6 +499,7 @@ class WorkflowExecutor(
             "prompt": self._current_result_prompt,
             "completion_id": self._completion_id,
             "session_id": session_id,
+            "session": self.session,
         }
 
     def _handle_network_event(self, event: Dict[str, Any]) -> bool:

@@ -152,7 +152,7 @@
     },
     {
       "id": "cmd_arena_auto_battle",
-      "name": "ARENA自动盲测与身份翻牌",
+      "name": "ARENA自动盲测不翻牌",
       "enabled": true,
       "group_name": "arena"
     }

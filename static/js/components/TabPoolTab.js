@@ -54,6 +54,11 @@ window.TabPoolTabComponent = {
                 left: 0,
                 top: 0
             },
+            terminateModal: {
+                visible: false,
+                submitting: false,
+                tab: null
+            },
             modelNameTooltipText: '修改该标签页的模型显示名称后，前端选中这个模型时，只会在该标签页或同名模型的标签页中轮询，不会调度到其他模型标签页。'
         };
     },
@@ -645,6 +650,36 @@ window.TabPoolTabComponent = {
             return '当前生效: ' + this.getDisplayedPreset(tab) + '（手动指定）';
         },
 
+        getCommandLoopText(tab) {
+            const loop = tab && tab.command_loop ? tab.command_loop : null;
+            if (!loop || !loop.active) return '';
+            const parts = [];
+            if (loop.label) parts.push(loop.label);
+            if (loop.iteration) {
+                parts.push(loop.total ? `#${loop.iteration}/${loop.total}` : `#${loop.iteration}`);
+            }
+            const elapsed = Number(loop.elapsed_sec || 0);
+            parts.push(`本轮 ${elapsed.toFixed(1)}s`);
+            return parts.join(' · ');
+        },
+
+        openTerminateModal(tab) {
+            this.terminateModal = {
+                visible: true,
+                submitting: false,
+                tab
+            };
+        },
+
+        closeTerminateModal() {
+            if (this.terminateModal.submitting) return;
+            this.terminateModal = {
+                visible: false,
+                submitting: false,
+                tab: null
+            };
+        },
+
         async changePreset(tab, newPresetName) {
             const tabIndex = tab.persistent_index;
             this.presetUpdating = { ...this.presetUpdating, [tabIndex]: true };
@@ -676,13 +711,11 @@ window.TabPoolTabComponent = {
             }
         },
 
-        async terminateTask(tab) {
+        async terminateTask(tab, scope = 'task') {
+            if (!tab) return;
             const tabIndex = tab.persistent_index;
-            const task = tab.current_task || tab.command_task || '(无 task_id)';
-            const command = tab.current_command
-                ? `\n当前命令: ${tab.current_command}${tab.current_command_id ? ` (${tab.current_command_id})` : ''}`
-                : (tab.current_command_id ? `\n当前命令: ${tab.current_command_id}` : '');
-            if (!confirm(`确定终止标签页 #${tabIndex} 的当前任务吗？\n当前任务: ${task}${command}`)) return;
+            const normalizedScope = scope === 'loop' ? 'loop' : 'task';
+            this.terminateModal = { ...this.terminateModal, submitting: true };
 
             try {
                 const token = window.getDashboardAuthToken ? window.getDashboardAuthToken() : '';
@@ -693,20 +726,31 @@ window.TabPoolTabComponent = {
                     method: 'POST',
                     headers,
                     body: JSON.stringify({
-                        reason: 'manual_terminate_from_tab_pool',
-                        clear_page: true
+                        reason: normalizedScope === 'loop'
+                            ? 'manual_cancel_command_loop_from_tab_pool'
+                            : 'manual_terminate_from_tab_pool',
+                        clear_page: normalizedScope !== 'loop',
+                        scope: normalizedScope
                     })
                 });
 
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const data = await response.json();
-                const msg = data.cancelled
-                    ? `标签页 #${tabIndex} 已终止并解除占用`
-                    : `标签页 #${tabIndex} 已解除占用（无可取消请求）`;
+                const msg = normalizedScope === 'loop'
+                    ? `标签页 #${tabIndex} 已请求终止本次循环`
+                    : (data.cancelled
+                        ? `标签页 #${tabIndex} 已终止并解除占用`
+                        : `标签页 #${tabIndex} 已解除占用（无可取消请求）`);
                 this.$emit('notify', { type: 'success', message: msg });
+                this.terminateModal = {
+                    visible: false,
+                    submitting: false,
+                    tab: null
+                };
                 await this.fetchTabs({ force: true });
             } catch (e) {
                 this.$emit('notify', { type: 'error', message: '终止任务失败: ' + e.message });
+                this.terminateModal = { ...this.terminateModal, submitting: false };
             }
         },
 
@@ -1044,6 +1088,9 @@ window.TabPoolTabComponent = {
                             <div v-if="tab.busy_duration" class="text-yellow-600 dark:text-yellow-400">
                                 已忙碌: {{ tab.busy_duration }}s
                             </div>
+                            <div v-if="getCommandLoopText(tab)" class="text-orange-600 dark:text-orange-400 truncate max-w-40" :title="getCommandLoopText(tab)">
+                                {{ getCommandLoopText(tab) }}
+                            </div>
                             <div v-if="tab.current_task" class="text-blue-600 dark:text-blue-400 truncate max-w-32">
                                 任务: {{ tab.current_task }}
                             </div>
@@ -1057,7 +1104,7 @@ window.TabPoolTabComponent = {
                                 {{ tab.route_excluded ? '解除域名排除' : '排除域名路由' }}
                             </button>
                             <button v-if="tab.status === 'busy' || tab.current_task || tab.command_task || tab.current_command"
-                                    @click="terminateTask(tab)"
+                                    @click="openTerminateModal(tab)"
                                     class="mt-2 px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700 text-xs">
                                 终止并解锁
                             </button>
@@ -1072,6 +1119,70 @@ window.TabPoolTabComponent = {
                 class="fixed z-[70] w-[360px] max-w-[calc(100vw-24px)] pointer-events-none rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-xs leading-relaxed text-gray-700 dark:text-gray-200 shadow-xl text-left"
             >
                 {{ modelNameTooltip.text }}
+            </div>
+
+            <div
+                v-if="terminateModal.visible"
+                class="fixed inset-0 z-[65] flex items-center justify-center bg-black/45 px-4 py-6"
+            >
+                <div class="w-full max-w-md rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-2xl">
+                    <div class="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-700 px-5 py-4">
+                        <div>
+                            <div class="text-base font-semibold text-gray-900 dark:text-white">终止标签页任务</div>
+                            <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                标签页 #{{ terminateModal.tab && terminateModal.tab.persistent_index }}
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            @click="closeTerminateModal()"
+                            :disabled="terminateModal.submitting"
+                            class="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
+                        >
+                            关闭
+                        </button>
+                    </div>
+                    <div class="space-y-3 px-5 py-4 text-sm text-gray-700 dark:text-gray-200">
+                        <div class="rounded-md bg-gray-50 dark:bg-gray-900/60 px-3 py-2 text-xs leading-6">
+                            <div>当前任务: {{ (terminateModal.tab && (terminateModal.tab.current_task || terminateModal.tab.command_task)) || '无 task_id' }}</div>
+                            <div v-if="terminateModal.tab && (terminateModal.tab.current_command || terminateModal.tab.current_command_id)">
+                                当前命令: {{ terminateModal.tab.current_command || terminateModal.tab.current_command_id }}
+                            </div>
+                            <div v-if="terminateModal.tab && getCommandLoopText(terminateModal.tab)">
+                                当前循环: {{ getCommandLoopText(terminateModal.tab) }}
+                            </div>
+                        </div>
+                        <p class="text-xs leading-5 text-gray-500 dark:text-gray-400">
+                            终止本次循环只会给脚本发送单轮取消信号；终止整个任务会取消请求并释放标签页。
+                        </p>
+                    </div>
+                    <div class="flex flex-wrap justify-end gap-2 border-t border-gray-100 dark:border-gray-700 px-5 py-4">
+                        <button
+                            type="button"
+                            @click="closeTerminateModal()"
+                            :disabled="terminateModal.submitting"
+                            class="rounded-md border border-gray-200 dark:border-gray-700 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                        >
+                            取消
+                        </button>
+                        <button
+                            type="button"
+                            @click="terminateTask(terminateModal.tab, 'loop')"
+                            :disabled="terminateModal.submitting || !(terminateModal.tab && terminateModal.tab.command_loop && terminateModal.tab.command_loop.active)"
+                            class="rounded-md bg-orange-600 px-3 py-1.5 text-sm text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            终止本次循环
+                        </button>
+                        <button
+                            type="button"
+                            @click="terminateTask(terminateModal.tab, 'task')"
+                            :disabled="terminateModal.submitting"
+                            class="rounded-md bg-red-600 px-3 py-1.5 text-sm text-white hover:bg-red-700 disabled:opacity-50"
+                        >
+                            终止整个任务
+                        </button>
+                    </div>
+                </div>
             </div>
 
             <div

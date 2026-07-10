@@ -36,6 +36,28 @@ def _env_flag(name: str, default: bool = True) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _truncate_text(text: Any, max_chars: Optional[int]) -> str:
+    value = str(text or "")
+    if max_chars is None or max_chars <= 0 or len(value) <= max_chars:
+        return value
+    omitted = len(value) - max_chars
+    return f"{value[:max_chars]}\n...[truncated {omitted} chars]"
+
+
+def _get_command_event_text_limit() -> int:
+    return max(0, _env_int("ARENA_EVENT_BRIDGE_COMMAND_TEXT_LIMIT", 60000))
+
+
 def _get_event_path() -> Path:
     raw_path = str(os.getenv("ARENA_EVENT_BRIDGE_PATH") or "").strip()
     if raw_path:
@@ -287,6 +309,7 @@ def _build_event(payload: Dict[str, Any], context: Dict[str, Any]) -> Optional[D
         "url": str(event_meta.get("url") or ""),
         "method": str(event_meta.get("method") or ""),
         "status": event_meta.get("status", 0),
+        "network_timestamp": float(event_meta.get("timestamp", 0) or 0),
         "prompt": prompt,
         "response_a": sides["response_a"],
         "response_b": sides["response_b"],
@@ -357,6 +380,224 @@ def _dedupe_and_append(event: Dict[str, Any]) -> bool:
     return True
 
 
+def _resolve_session_from_event(
+    event: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+):
+    context = context if isinstance(context, dict) else {}
+    payload = payload if isinstance(payload, dict) else {}
+
+    for key in ("session", "tab_session"):
+        session = context.get(key) or payload.get(key)
+        if session is not None:
+            return session
+
+    session_id = str(
+        event.get("session_id")
+        or context.get("session_id")
+        or payload.get("session_id")
+        or ""
+    ).strip()
+    if not session_id:
+        return None
+
+    try:
+        from app.core.browser import get_browser
+
+        browser = get_browser(auto_connect=False)
+        pool = getattr(browser, "_tab_pool", None)
+        if pool is None:
+            return None
+
+        get_session = getattr(pool, "_get_session_for_monitor", None)
+        if callable(get_session):
+            session = get_session(session_id)
+            if session is not None:
+                return session
+
+        snapshot = getattr(pool, "get_sessions_snapshot", None)
+        if callable(snapshot):
+            for session in snapshot() or []:
+                if str(getattr(session, "id", "") or "") == session_id:
+                    return session
+    except Exception as exc:
+        logger.debug(f"[RESULT_EVENT_BRIDGE] resolve session failed: {exc}")
+    return None
+
+
+def _find_command_loop_request_id(
+    session: Any,
+    prompt: str = "",
+    *,
+    event_timestamp: float = 0.0,
+) -> str:
+    if session is None:
+        return ""
+
+    now_ts = time.time()
+    prompt_text = str(prompt or "")
+    if prompt_text:
+        try:
+            digest = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+            mapping = getattr(session, "_command_loop_prompt_request_ids", None)
+            if isinstance(mapping, dict):
+                item = mapping.get(digest)
+                if isinstance(item, dict) and float(item.get("expires_at", 0.0) or 0.0) > now_ts:
+                    request_id = str(item.get("request_id") or "").strip()
+                    if request_id:
+                        return request_id
+        except Exception:
+            pass
+
+    try:
+        target_ts = float(event_timestamp or 0.0)
+    except Exception:
+        target_ts = 0.0
+    if target_ts > 0:
+        try:
+            history = getattr(session, "_command_loop_request_history", None)
+            if isinstance(history, list):
+                now_ts = time.time()
+                candidates = []
+                for item in history:
+                    if not isinstance(item, dict):
+                        continue
+                    if float(item.get("expires_at", 0.0) or 0.0) <= now_ts:
+                        continue
+                    request_id = str(item.get("request_id") or "").strip()
+                    started_at = float(item.get("started_at", 0.0) or 0.0)
+                    ended_at = float(item.get("ended_at", 0.0) or 0.0)
+                    if not request_id or started_at <= 0:
+                        continue
+                    upper_bound = ended_at + 300.0 if ended_at > 0 else now_ts + 300.0
+                    if started_at <= target_ts <= upper_bound:
+                        candidates.append((started_at, request_id))
+                if candidates:
+                    candidates.sort(key=lambda item: item[0], reverse=True)
+                    return candidates[0][1]
+        except Exception:
+            pass
+
+    for attr_name in ("_command_loop_request_id", "_last_command_loop_request_id"):
+        request_id = str(getattr(session, attr_name, "") or "").strip()
+        if not request_id:
+            continue
+        if attr_name == "_last_command_loop_request_id":
+            try:
+                valid_until = float(getattr(session, "_last_command_loop_request_until", 0.0) or 0.0)
+            except Exception:
+                valid_until = 0.0
+            if valid_until and valid_until < now_ts:
+                continue
+        return request_id
+
+    return ""
+
+
+def _default_arena_response(event: Dict[str, Any]) -> str:
+    # Battle mode should present the left/modelA response by default.
+    return str(event.get("response_a") or event.get("response_b") or "")
+
+
+def _arena_command_result_payload(
+    event: Dict[str, Any],
+    *,
+    max_text_chars: Optional[int] = None,
+) -> Dict[str, Any]:
+    response_a = str(event.get("response_a") or "")
+    response_b = str(event.get("response_b") or "")
+    default_response = response_a or response_b
+    return {
+        "event_id": str(event.get("event_id") or ""),
+        "conversation_id": str(event.get("conversation_id") or ""),
+        "session_id": str(event.get("session_id") or ""),
+        "completion_id": str(event.get("completion_id") or ""),
+        "url": str(event.get("url") or ""),
+        "prompt": str(event.get("prompt") or ""),
+        "network_timestamp": float(event.get("network_timestamp") or 0),
+        "response_a": _truncate_text(response_a, max_text_chars),
+        "response_b": _truncate_text(response_b, max_text_chars),
+        "response_a_len": len(response_a),
+        "response_b_len": len(response_b),
+        "default_response": _truncate_text(default_response, max_text_chars),
+        "selected_side": str(event.get("selected_side") or ""),
+        "winner_side": str(event.get("winner_side") or ""),
+        "completion_side": str(event.get("completion_side") or ""),
+        "parser_id": str(event.get("parser_id") or ""),
+        "done": bool(event.get("done", False)),
+        "source": str(event.get("source") or ""),
+        "model_a": str(event.get("model_a") or ""),
+        "model_b": str(event.get("model_b") or ""),
+        "model_id_a": str(event.get("model_id_a") or ""),
+        "model_id_b": str(event.get("model_id_b") or ""),
+    }
+
+
+def _publish_arena_command_result_event(
+    event: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    session = _resolve_session_from_event(event, context, payload)
+    if session is None:
+        return
+
+    full_data = _arena_command_result_payload(event)
+    command_data = _arena_command_result_payload(
+        event,
+        max_text_chars=_get_command_event_text_limit(),
+    )
+    result_text = json.dumps(command_data, ensure_ascii=False, sort_keys=True)
+    summary = (
+        f"Arena 响应已捕获: A={full_data['response_a_len']} 字, "
+        f"B={full_data['response_b_len']} 字"
+    )
+
+    try:
+        from app.services.command_engine import command_engine
+
+        command_engine.emit_external_command_result_event(
+            session,
+            source_command_id="evt_arena_response",
+            source_command_name="ARENA_RESPONSE",
+            summary=summary,
+            result=result_text,
+            informative=True,
+            mode="arena_response",
+            group_name="arena",
+            trigger_commands=_env_flag("ARENA_EVENT_BRIDGE_TRIGGER_COMMANDS", True),
+            extra_fields=command_data,
+        )
+    except Exception as exc:
+        logger.debug(f"[RESULT_EVENT_BRIDGE] command event emit failed: {exc}")
+
+    request_id = _find_command_loop_request_id(
+        session,
+        full_data.get("prompt", ""),
+        event_timestamp=float(full_data.get("network_timestamp") or 0),
+    )
+    if not request_id:
+        return
+
+    try:
+        from app.services.request_manager import request_manager
+
+        request_manager.capture_external_response(
+            request_id,
+            full_data.get("default_response") or "",
+            metadata={
+                "arena_response_a": full_data.get("response_a") or "",
+                "arena_response_b": full_data.get("response_b") or "",
+                "arena_event_id": full_data.get("event_id") or "",
+                "arena_parser_id": full_data.get("parser_id") or "",
+                "arena_default_side": "a" if full_data.get("response_a") else "b",
+            },
+        )
+    except Exception as exc:
+        logger.debug(f"[RESULT_EVENT_BRIDGE] request monitor update failed: {exc}")
+
+
 def emit_arena_snapshot_event(snapshot: Dict[str, Any]) -> bool:
     """Emit a full Arena response event from a live page store snapshot."""
     if not _env_flag("ARENA_EVENT_BRIDGE_ENABLED", True):
@@ -406,6 +647,7 @@ def emit_arena_snapshot_event(snapshot: Dict[str, Any]) -> bool:
     event["event_id"] = _event_digest(event)
     emitted = _dedupe_and_append(event)
     if emitted:
+        _publish_arena_command_result_event(event)
         logger.debug(
             "[RESULT_EVENT_BRIDGE] Arena reveal snapshot emitted "
             f"(model_a={model_a}, model_b={model_b}, "
@@ -436,6 +678,7 @@ def create_result_event_handler(
                 event["conversation_id"] = str(event.get("conversation_id") or "")
             if not _dedupe_and_append(event):
                 return False
+            _publish_arena_command_result_event(event, context, payload if isinstance(payload, dict) else {})
             logger.debug(
                 "[RESULT_EVENT_BRIDGE] Arena event emitted "
                 f"(parser={event.get('parser_id')}, a={len(event.get('response_a') or '')}, "
