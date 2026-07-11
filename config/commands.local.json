@@ -1,6 +1,24 @@
 {
   "commands": [
     {
+      "id": "cmd_037f7eba",
+      "name": "ARENA自动盲测不翻牌 -GROK",
+      "enabled": true,
+      "group_name": "arena"
+    },
+    {
+      "id": "cmd_arena_auto_battle",
+      "name": "ARENA自动盲测不翻牌",
+      "enabled": true,
+      "group_name": "arena"
+    },
+    {
+      "id": "cmd_cf_pagecheck_arena_verify",
+      "name": "自动过cf盾",
+      "enabled": true,
+      "group_name": "arena"
+    },
+    {
       "id": "cmd_b34a8efd",
       "name": "网络错误闭环恢复",
       "enabled": false,
@@ -10,12 +28,6 @@
       "id": "cmd_9b1e4a01",
       "name": "黑屏后恢复1",
       "enabled": false,
-      "group_name": "arena"
-    },
-    {
-      "id": "cmd_cf_pagecheck_arena_verify",
-      "name": "自动过cf盾",
-      "enabled": true,
       "group_name": "arena"
     },
     {
@@ -49,12 +61,6 @@
       "group_name": "arena"
     },
     {
-      "id": "cmd_9b1e4a05",
-      "name": "网络错误后选择模型",
-      "enabled": false,
-      "group_name": "arena"
-    },
-    {
       "id": "cmd_gemrf001",
       "name": "自动刷新页面",
       "enabled": true,
@@ -79,14 +85,14 @@
       "group_name": "gemini"
     },
     {
-      "id": "cmd_0020e346",
-      "name": "新命令1",
-      "enabled": true,
-      "group_name": "gemini"
+      "id": "cmd_9b1e4a05",
+      "name": "网络错误后选择模型",
+      "enabled": false,
+      "group_name": "arena"
     },
     {
-      "id": "cmd_gemsidebar001",
-      "name": "Gemini自动展开侧边栏",
+      "id": "cmd_0020e346",
+      "name": "新命令1",
       "enabled": true,
       "group_name": "gemini"
     },
@@ -103,12 +109,6 @@
       "group_name": "arena"
     },
     {
-      "id": "cmd_arena_terms_refresh_followup",
-      "name": "ARENA_AGREE_POPUP_REFRESH_ABORT",
-      "enabled": false,
-      "group_name": "arena"
-    },
-    {
       "id": "cmd_72ae0f7d",
       "name": "ds刷新",
       "enabled": true,
@@ -119,6 +119,12 @@
       "name": "DeepSeek页面直发测试",
       "enabled": false,
       "group_name": "ds"
+    },
+    {
+      "id": "cmd_arena_terms_refresh_followup",
+      "name": "ARENA_AGREE_POPUP_REFRESH_ABORT",
+      "enabled": false,
+      "group_name": "arena"
     },
     {
       "id": "cmd_7dbc42e0",
@@ -139,6 +145,12 @@
       "group_name": "arena"
     },
     {
+      "id": "cmd_gemsidebar001",
+      "name": "Gemini自动展开侧边栏",
+      "enabled": true,
+      "group_name": "gemini"
+    },
+    {
       "id": "cmd_arena_stop_fix_runtime",
       "name": "ARENA_STOP_FIX_RUNTIME",
       "enabled": true,
@@ -147,12 +159,6 @@
     {
       "id": "cmd_arena_context_model_lab",
       "name": "ARENA_CONTEXT_MODEL_LAB",
-      "enabled": true,
-      "group_name": "arena"
-    },
-    {
-      "id": "cmd_arena_auto_battle",
-      "name": "ARENA自动盲测不翻牌",
       "enabled": true,
       "group_name": "arena"
     }

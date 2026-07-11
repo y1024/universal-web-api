@@ -288,11 +288,27 @@ class TabSession:
         clear_page: bool,
         rollback_request_count: bool = False,
         force: bool = False,
+        expected_task_id: str = "",
+        reject_ownerless: bool = False,
     ) -> Optional[Dict[str, Any]]:
         with self._lock:
             if self._release_in_progress:
                 action = "force_release" if force else "release"
                 logger.debug(f"[{self.id}] {action} skipped: another release is already in progress")
+                return None
+
+            expected_task = str(expected_task_id or "").strip()
+            current_task = str(self.current_task_id or "").strip()
+            if current_task and reject_ownerless and not expected_task:
+                logger.warning(
+                    f"[{self.id}] release skipped without ownership (current_task={current_task})"
+                )
+                return None
+            if expected_task and current_task != expected_task:
+                logger.warning(
+                    f"[{self.id}] release ownership mismatch "
+                    f"(expected_task={expected_task}, current_task={current_task or '-'})"
+                )
                 return None
 
             prev_status_obj = self.status
@@ -404,21 +420,25 @@ class TabSession:
         self,
         clear_page: bool = False,
         check_triggers: bool = True,
-        rollback_request_count: bool = False
-    ):
+        rollback_request_count: bool = False,
+        expected_task_id: str = "",
+    ) -> bool:
         state = self._begin_release_state(
             clear_page=clear_page,
             rollback_request_count=rollback_request_count,
             force=False,
+            expected_task_id=expected_task_id,
+            reject_ownerless=True,
         )
         if state is None:
-            return
+            return False
         self._run_release_from_state(
             state,
             clear_page=clear_page,
             check_triggers=check_triggers,
             rollback_request_count=rollback_request_count,
         )
+        return self.status == TabStatus.IDLE
 
     def _run_force_release_from_state(
         self,

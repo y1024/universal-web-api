@@ -224,6 +224,8 @@ def normalize_chat_role(role: Any, *, allow_tool: bool = True) -> str:
     normalized = str(role or "user").strip().lower() or "user"
     if normalized == "developer":
         return "system"
+    if normalized == "function":
+        return "tool" if allow_tool else "user"
     allowed = {"system", "user", "assistant"}
     if allow_tool:
         allowed.add("tool")

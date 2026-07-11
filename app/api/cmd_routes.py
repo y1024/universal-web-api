@@ -8,6 +8,7 @@ app/api/cmd_routes.py - 命令系统 API 路由
 """
 
 import json
+import time
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -24,6 +25,9 @@ router = APIRouter(tags=["commands"])
 
 
 SECRET_PLACEHOLDER = "__SECRET_REDACTED__"
+NON_SENSITIVE_KEY_HINTS = {
+    "claude_required_token",
+}
 SENSITIVE_KEY_HINTS = {
     "access_token",
     "authorization",
@@ -75,6 +79,8 @@ def _normalize_secret_key(key: object) -> str:
 
 def _is_command_secret_key(key: object) -> bool:
     normalized = _normalize_secret_key(key)
+    if normalized in NON_SENSITIVE_KEY_HINTS:
+        return False
     return normalized in SENSITIVE_KEY_HINTS or normalized.endswith(SENSITIVE_KEY_SUFFIXES)
 
 
@@ -202,9 +208,18 @@ def _finish_manual_command_request(ctx, success: bool) -> None:
         logger.debug(f"manual command request finish failed: {exc}")
 
 
-def _release_manual_command_session(pool, session, *, rollback_request_count: bool = False) -> None:
+def _release_manual_command_session(
+    pool,
+    session,
+    *,
+    expected_task_id: str,
+    rollback_request_count: bool = False,
+) -> None:
     try:
-        kwargs = {"check_triggers": False}
+        kwargs = {
+            "check_triggers": False,
+            "expected_task_id": expected_task_id,
+        }
         if rollback_request_count:
             kwargs["rollback_request_count"] = True
         pool.release(session.id, **kwargs)
@@ -427,6 +442,17 @@ async def create_command(
     return {"success": True, "command": _redact_command_secrets(cmd)}
 
 
+@router.post("/api/commands/{command_id}/duplicate")
+async def duplicate_command(command_id: str, authenticated: bool = Depends(verify_auth)):
+    existing = command_engine.get_command_config(command_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="命令不存在")
+    duplicated = command_engine.duplicate_command(command_id)
+    if not duplicated:
+        _raise_command_save_failed()
+    return {"success": True, "command": _redact_command_secrets(duplicated)}
+
+
 @router.put("/api/commands/reorder")
 async def reorder_commands(
     body: CommandReorderRequest,
@@ -442,6 +468,23 @@ async def reorder_commands(
 async def list_command_groups(authenticated: bool = Depends(verify_auth)):
     groups = command_engine.list_command_groups()
     return {"groups": groups, "count": len(groups)}
+
+
+@router.post("/api/command-groups/{group_name}/duplicate")
+async def duplicate_command_group(group_name: str, authenticated: bool = Depends(verify_auth)):
+    normalized_name = (group_name or "").strip()
+    existing_names = {item.get("name") for item in command_engine.list_command_groups()}
+    if not normalized_name or normalized_name not in existing_names:
+        raise HTTPException(status_code=404, detail="命令组不存在")
+    result = command_engine.duplicate_group(normalized_name)
+    if not result:
+        _raise_command_save_failed()
+    return {
+        "success": True,
+        "group_name": result["group_name"],
+        "count": result["count"],
+        "commands": _redact_command_secrets(result["commands"]),
+    }
 
 
 @router.put("/api/command-groups")
@@ -600,7 +643,11 @@ async def test_command(command_id: str, authenticated: bool = Depends(verify_aut
                     )
                 finally:
                     setattr(target_session, "_command_request_id", None)
-                    _release_manual_command_session(pool, target_session)
+                    _release_manual_command_session(
+                        pool,
+                        target_session,
+                        expected_task_id=target_ctx.request_id,
+                    )
 
         for tab_info in idle_tabs:
             tab_index = tab_info["tab_index"]
@@ -623,7 +670,12 @@ async def test_command(command_id: str, authenticated: bool = Depends(verify_aut
 
                 if not _manual_command_matches_scope(cmd, session):
                     skipped_tabs.append(tab_index)
-                    _release_manual_command_session(pool, session, rollback_request_count=True)
+                    _release_manual_command_session(
+                        pool,
+                        session,
+                        expected_task_id=ctx.request_id,
+                        rollback_request_count=True,
+                    )
                     _finish_manual_command_request(ctx, success=False)
                     continue
 
@@ -634,7 +686,12 @@ async def test_command(command_id: str, authenticated: bool = Depends(verify_aut
                     ctx.mark_failed(str(e))
                     _finish_manual_command_request(ctx, success=False)
                 if session is not None and getattr(getattr(session, "status", None), "value", "") == "busy":
-                    _release_manual_command_session(pool, session, rollback_request_count=True)
+                    _release_manual_command_session(
+                        pool,
+                        session,
+                        expected_task_id=ctx.request_id,
+                        rollback_request_count=True,
+                    )
                 failed_tabs.append({"tab_index": tab_index, "error": str(e)})
 
         if not scheduled_tabs:
@@ -692,7 +749,8 @@ async def execute_command_group(
 
         for tab_info in idle_tabs:
             tab_index = tab_info["tab_index"]
-            session = pool.acquire_by_index(tab_index, f"group_test_{normalized_name}_{tab_index}", timeout=5)
+            group_task_id = f"group_test_{normalized_name}_{tab_index}_{time.time_ns()}"
+            session = pool.acquire_by_index(tab_index, group_task_id, timeout=5)
             if not session:
                 acquire_failures.append(tab_index)
                 continue
@@ -734,7 +792,11 @@ async def execute_command_group(
                     **result,
                 }
             finally:
-                _release_manual_command_session(pool, session)
+                _release_manual_command_session(
+                    pool,
+                    session,
+                    expected_task_id=group_task_id,
+                )
 
         detail = {
             "error": "no_idle_tabs_match_group_scope",

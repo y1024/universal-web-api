@@ -89,10 +89,10 @@ class TabPoolManager:
         model_name_overrides: Optional[Dict[str, Any]] = None,
     ):
         self.page = browser_page
-        self.max_tabs = max_tabs
-        self.min_tabs = min_tabs
-        self.idle_timeout = idle_timeout
-        self.acquire_timeout = acquire_timeout
+        self.max_tabs = max(1, int(max_tabs))
+        self.min_tabs = min(self.max_tabs, max(1, int(min_tabs)))
+        self.idle_timeout = max(1.0, float(idle_timeout))
+        self.acquire_timeout = max(1.0, float(acquire_timeout))
         self.stuck_timeout = max(1.0, float(stuck_timeout))
         self.allocation_mode = self._normalize_allocation_mode(allocation_mode)
         self.excluded_urls = self._normalize_excluded_urls(excluded_urls)
@@ -103,6 +103,7 @@ class TabPoolManager:
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._scan_snapshot_lock = threading.Lock()
+        self._global_monitor_transition_lock = threading.RLock()
 
         self._initialized = False
         self._shutdown = False
@@ -523,61 +524,6 @@ class TabPoolManager:
         except RuntimeError as e:
             logger.debug(f"[TabPool] maintenance submit failed (dispose:{context_id}): {e}")
 
-    def _close_raw_tab(self, raw_tab_id: str) -> bool:
-        if not raw_tab_id:
-            return False
-
-        try:
-            browser = self._get_browser_handle()
-            if browser is None or not hasattr(browser, "_run_cdp"):
-                return False
-
-            # 🛡️ 安全防御：检查当前 Page 类型的 Tab 数量，防止关闭最后一个 Tab 导致整个浏览器退出
-            try:
-                targets_resp = browser._run_cdp("Target.getTargets") or {}
-                all_targets = targets_resp.get("targetInfos") or []
-                page_targets = [t for t in all_targets if str(t.get("type") or "").lower() == "page"]
-
-                # 如果要关闭的 raw_tab_id 在页面列表中，且当前总页面数 <= 1，先新建一个空白页做缓冲
-                if len(page_targets) <= 1 and any(t.get("targetId") == raw_tab_id for t in page_targets):
-                    logger.warning(
-                        f"[TabPool] 尝试关闭唯一的标签页 {raw_tab_id}，"
-                        f"将新建一个空白标签页以防止浏览器进程自动退出"
-                    )
-                    try:
-                        browser._run_cdp("Target.createTarget", url="about:blank")
-                    except Exception as ce:
-                        logger.error(f"[TabPool] 新建兜底标签页失败: {ce}")
-            except Exception as e:
-                logger.debug(f"[TabPool] 检查标签页数量失败（忽略并继续关闭）: {e}")
-
-            browser._run_cdp("Target.closeTarget", targetId=raw_tab_id)
-            return True
-        except Exception as e:
-            logger.debug(f"[TabPool] close raw tab failed ({raw_tab_id}): {e}")
-            return False
-
-    def _close_raw_tabs_async(self, raw_tab_ids: List[str], reason: str = "") -> None:
-        targets = [str(raw_id or "").strip() for raw_id in raw_tab_ids or [] if str(raw_id or "").strip()]
-        if not targets:
-            return
-
-        def _close_targets():
-            for raw_id in targets:
-                closed = self._close_raw_tab(raw_id)
-                logger.debug(
-                    f"[TabPool] close removed target raw={raw_id} "
-                    f"closed={closed} reason={reason or '-'}"
-                )
-
-        executor = self._maintenance_executor
-        if executor is None:
-            return
-        try:
-            executor.submit(_close_targets)
-        except RuntimeError as e:
-            logger.debug(f"[TabPool] maintenance submit failed (close:{targets[0][:8]}): {e}")
-
     def _arm_isolated_rebind_grace(self, session: TabSession, reason: str, detail: str) -> bool:
         now = time.time()
         same_reason = session.transient_disconnect_reason == reason
@@ -613,6 +559,8 @@ class TabPoolManager:
                 session.current_domain = cached_domain
         except Exception:
             pass
+        if session.status == TabStatus.IDLE:
+            self._restart_global_monitor_for_session_async(session.id, "target_rebind")
         return True
 
     def _get_browser_handle(self):
@@ -624,21 +572,24 @@ class TabPoolManager:
     def _list_current_tab_ids_via_cdp(self) -> List[str]:
         return [
             item[0]
-            for item in self._list_current_tab_targets_via_cdp()
+            for item in (self._list_current_tab_targets_via_cdp() or [])
             if item and item[0]
         ]
 
-    def _list_current_tab_targets_via_cdp(self) -> List[tuple[str, Dict[str, Any]]]:
+    def _list_current_tab_targets_via_cdp(self) -> Optional[List[tuple[str, Dict[str, Any]]]]:
         browser = self._get_browser_handle()
         if browser is None or not hasattr(browser, "_run_cdp"):
-            return []
+            return None
 
         try:
-            result = browser._run_cdp("Target.getTargets") or {}
-            target_infos = result.get("targetInfos") or []
+            result = browser._run_cdp("Target.getTargets")
+            if not isinstance(result, dict) or not isinstance(result.get("targetInfos"), list):
+                logger.debug("[TabPool] Target.getTargets returned an incomplete snapshot")
+                return None
+            target_infos = result["targetInfos"]
         except Exception as e:
             logger.debug(f"[TabPool] Target.getTargets 失败: {e}")
-            return []
+            return None
 
         targets: List[tuple[str, Dict[str, Any]]] = []
         for info in target_infos:
@@ -661,28 +612,30 @@ class TabPoolManager:
     def _list_current_tab_refs(self) -> List[Any]:
         browser = self._get_browser_handle()
         if browser is None:
-            return []
+            raise RuntimeError("browser_handle_unavailable")
 
         cdp_targets = self._list_current_tab_targets_via_cdp()
-        if cdp_targets:
+        if cdp_targets is not None:
             self._get_tabs_retry_after = 0.0
             return cdp_targets
 
         now = time.time()
         if now < self._get_tabs_retry_after:
-            return []
+            raise RuntimeError("tab_snapshot_temporarily_unavailable")
 
         try:
             tabs = browser.get_tabs()
+            if tabs is None:
+                raise RuntimeError("browser.get_tabs returned no snapshot")
             self._get_tabs_retry_after = 0.0
-            return list(tabs or [])
+            return list(tabs)
         except Exception as e:
             self._get_tabs_retry_after = max(
                 self._get_tabs_retry_after,
                 time.time() + self.GET_TABS_FAILURE_COOLDOWN_SEC,
             )
             cdp_targets = self._list_current_tab_targets_via_cdp()
-            if cdp_targets:
+            if cdp_targets is not None:
                 message = f"[TabPool] browser.get_tabs() 失败，回退到 Target.getTargets 扫描: {e}"
                 if _looks_like_transient_local_debug_error(e):
                     logger.debug(message)
@@ -787,37 +740,16 @@ class TabPoolManager:
                 "url": final_url,
             }
 
-        created = self._create_isolated_tab(final_url, background=False)
-        if not created:
-            return {
-                "tab": tab,
-                "raw_tab_id": raw_tab_id,
-                "browser_context_id": browser_context_id,
-                "is_isolated_context": False,
-                "url": final_url,
-            }
-
-        if not self._close_raw_tab(raw_tab_id):
-            created_raw_id = created.get("raw_tab_id")
-            self._close_raw_tab(created_raw_id)
-            self._dispose_browser_context(created.get("browser_context_id"))
-            self._isolated_context_by_raw_id.pop(created_raw_id, None)
-            logger.warning(f"[TabPool] fallback to shared tab because original tab could not be closed: {raw_tab_id}")
-            return {
-                "tab": tab,
-                "raw_tab_id": raw_tab_id,
-                "browser_context_id": browser_context_id,
-                "is_isolated_context": False,
-                "url": final_url,
-            }
-
-        logger.info(f"[TabPool] auto converted tab to isolated cookie context: {domain or final_url}")
+        logger.warning(
+            f"[TabPool] skipped automatic isolated-cookie takeover because existing tabs are never closed: "
+            f"{domain or final_url}"
+        )
         return {
-            "tab": created["tab"],
-            "raw_tab_id": created["raw_tab_id"],
-            "browser_context_id": created.get("browser_context_id"),
-            "is_isolated_context": True,
-            "url": created.get("url") or final_url,
+            "tab": tab,
+            "raw_tab_id": raw_tab_id,
+            "browser_context_id": browser_context_id,
+            "is_isolated_context": False,
+            "url": final_url,
         }
 
     def create_isolated_site_tab(self, domain: str) -> Dict[str, Any]:
@@ -838,10 +770,10 @@ class TabPoolManager:
 
         with self._condition:
             if len(self._tabs) >= self.max_tabs:
-                self._close_raw_tab(created.get("raw_tab_id"))
-                self._dispose_browser_context(created.get("browser_context_id"))
-                self._isolated_context_by_raw_id.pop(created.get("raw_tab_id"), None)
-                return {"ok": False, "error": "tab_pool_full"}
+                logger.warning(
+                    "[TabPool] pool reached capacity while creating an isolated tab; "
+                    "keeping the newly created tab managed"
+                )
 
             session = self._wrap_tab(
                 created["tab"],
@@ -892,8 +824,10 @@ class TabPoolManager:
 
         with self._condition:
             if len(self._tabs) >= self.max_tabs:
-                self._close_raw_tab(created.get("raw_tab_id"))
-                return {"ok": False, "error": "tab_pool_full"}
+                logger.warning(
+                    "[TabPool] pool reached capacity while creating a shared tab; "
+                    "keeping the newly created tab managed"
+                )
 
             session = self._wrap_tab(
                 created["tab"],
@@ -1067,17 +1001,64 @@ class TabPoolManager:
     def _start_global_monitor_for_session(self, session: Optional[TabSession]) -> bool:
         if not session or not self._global_network_monitor:
             return False
-        if self._shutdown:
-            return False
-        # 仅在空闲标签页常驻监听，任务执行时让位
-        if session.status != TabStatus.IDLE:
-            return False
-        return bool(self._global_network_monitor.start_for_session(session))
+        transition_lock = getattr(self, "_global_monitor_transition_lock", None)
+        if transition_lock is None:
+            transition_lock = self._global_monitor_transition_lock = threading.RLock()
+        # Start and stop use one transition lock. If acquisition changes the
+        # session to BUSY during a delayed start, its handoff stop waits here and
+        # removes the newly registered worker before returning the session.
+        with transition_lock:
+            if self._shutdown:
+                return False
+            if self._tabs.get(session.id) is not session:
+                return False
+            # 仅在空闲标签页常驻监听，任务执行时让位
+            if session.status != TabStatus.IDLE:
+                return False
+            return bool(self._global_network_monitor.start_for_session(session))
+
+    def _restart_global_monitor_for_session_async(self, session_id: str, reason: str) -> None:
+        """Restart an idle session monitor outside the pool lock after a target rebind."""
+        session_key = str(session_id or "").strip()
+        executor = self._maintenance_executor
+        if not session_key or executor is None or not self._global_network_monitor:
+            return
+
+        def _restart() -> None:
+            deadline = time.monotonic() + 5.0
+            while True:
+                with self._lock:
+                    if self._shutdown:
+                        return
+                    session = self._tabs.get(session_key)
+                    if session is None or session.status != TabStatus.IDLE:
+                        return
+                if self._start_global_monitor_for_session(session):
+                    logger.debug(f"[GlobalNet] rebound listener restarted: {session_key} ({reason})")
+                    return
+                if time.monotonic() >= deadline:
+                    logger.warning(f"[GlobalNet] rebound listener restart failed: {session_key} ({reason})")
+                    return
+                time.sleep(0.1)
+
+        try:
+            executor.submit(_restart)
+        except RuntimeError as e:
+            logger.debug(f"[GlobalNet] restart submit failed ({session_key}): {e}")
 
     def _stop_global_monitor_for_session(self, session_id: str, reason: str = "", wait: bool = False) -> bool:
         if not self._global_network_monitor:
             return True
-        return bool(self._global_network_monitor.stop_for_session(session_id, reason=reason, join=wait))
+        transition_lock = getattr(self, "_global_monitor_transition_lock", None)
+        if transition_lock is None:
+            transition_lock = self._global_monitor_transition_lock = threading.RLock()
+        # Do not hold the pool lock while joining a worker: command callbacks can
+        # legitimately need that lock while the worker is winding down.
+        with transition_lock:
+            monitor = self._global_network_monitor
+            if not monitor:
+                return True
+            return bool(monitor.stop_for_session(session_id, reason=reason, join=wait))
 
     def _request_global_monitor_stop_for_session(
         self,
@@ -1621,10 +1602,7 @@ class TabPoolManager:
                         pass
                     reserved_raw_ids.add(replacement_raw_id)
                     if session.status == TabStatus.IDLE:
-                        logger.warning(
-                            f"[{session_id}] global monitor not restarted after rebind "
-                            f"until previous worker finishes stopping"
-                        )
+                        self._restart_global_monitor_for_session_async(session_id, "target_rebind")
                     logger.info(
                         f"[{session_id}] rebound isolated context target: {raw_id} -> {replacement_raw_id}"
                     )
@@ -1734,6 +1712,8 @@ class TabPoolManager:
                     logger.debug(f"处理标签页出错: {e}")
                     continue
 
+            # Remove unusable pool sessions after discovery without closing targets.
+            self._cleanup_unhealthy_tabs()
             self._last_scan_time = time.time()
             if changed:
                 self._condition.notify_all()
@@ -1935,7 +1915,7 @@ class TabPoolManager:
 
     def _cleanup_unhealthy_tabs(self):
         """清理不健康的空闲标签页、关闭状态和错误状态的标签页"""
-        to_remove = []
+        to_remove: Dict[str, str] = {}
 
         for tab_id, session in list(self._tabs.items()):
             try:
@@ -1945,7 +1925,7 @@ class TabPoolManager:
                     self._preserved_error_session_ids.discard(tab_id)
 
                 if session.status == TabStatus.CLOSED:
-                    to_remove.append(tab_id)
+                    to_remove[tab_id] = "closed"
                 # 清理 ERROR 状态的标签页（包括强制释放失败的）
                 elif session.status == TabStatus.ERROR:
                     if self.preserve_error_tabs:
@@ -1956,7 +1936,7 @@ class TabPoolManager:
                             )
                             self._preserved_error_session_ids.add(tab_id)
                         continue
-                    to_remove.append(tab_id)
+                    to_remove[tab_id] = "error"
                 # 清理空闲但不健康的标签页
                 elif session.status == TabStatus.IDLE and not session.is_healthy(allow_live_check=False):
                     if session.is_isolated_context:
@@ -1968,23 +1948,30 @@ class TabPoolManager:
                             detail="health probe failed",
                         ):
                             continue
-                    to_remove.append(tab_id)
+                    to_remove[tab_id] = "unhealthy"
             except Exception as e:
                 logger.warning(f"[TabPool] cleanup check failed for tab {tab_id}: {e}")
-                to_remove.append(tab_id)
+                to_remove[tab_id] = "health_check_failed"
 
-        for tab_id in to_remove:
+        for tab_id, removal_reason in list(to_remove.items()):
             try:
                 session = self._tabs.get(tab_id)
                 if not session:
                     continue
                 self._cancel_active_request_for_session(
                     session,
-                    "tab_unhealthy",
-                    detail=f"status={getattr(getattr(session, 'status', None), 'value', 'unknown')}",
+                    removal_reason,
+                    detail=(
+                        f"status={getattr(getattr(session, 'status', None), 'value', 'unknown')}, "
+                        f"reason={removal_reason}"
+                    ),
                 )
-                logger.warning(f"[{tab_id}] 不健康或错误状态，从池中移除")
-                self._detach_global_monitor_for_session(tab_id, reason="unhealthy")
+                logger.warning(
+                    f"[{tab_id}] 不健康或错误状态，从池中移除但保留浏览器标签页 "
+                    f"({removal_reason})"
+                )
+                session.mark_closed(removal_reason)
+                self._detach_global_monitor_for_session(tab_id, reason=removal_reason)
 
                 # 清理映射表，允许相同 raw_tab_id 被重新扫描
                 raw_ids_to_remove = [
@@ -2010,7 +1997,6 @@ class TabPoolManager:
                 self._tabs.pop(tab_id, None)
                 self._preserved_error_session_ids.discard(tab_id)
                 self._on_session_removed(tab_id)
-                self._close_raw_tabs_async(raw_ids_to_remove, reason="unhealthy")
             except Exception as e:
                 logger.warning(f"[TabPool] cleanup remove failed for tab {tab_id}: {e}")
 
@@ -2111,17 +2097,23 @@ class TabPoolManager:
         check_triggers: bool = True,
         rollback_request_count: bool = False,
         expected_task_id: str = "",
-    ):
+    ) -> bool:
         """释放标签页"""
         with self._condition:
             session = self._tabs.get(tab_id)
             if not session:
-                return
+                return False
 
             before_snapshot = self._describe_session(session)
             expected_task = str(expected_task_id or "").strip()
             current_task = str(getattr(session, "current_task_id", "") or "").strip()
             session_status = getattr(getattr(session, "status", None), "value", "")
+            if current_task and not expected_task:
+                logger.warning(
+                    f"[{tab_id}] 跳过无所有权释放 "
+                    f"(current_task={current_task}, snapshot={before_snapshot})"
+                )
+                return False
             if expected_task:
                 if current_task and current_task != expected_task:
                     logger.warning(
@@ -2129,23 +2121,25 @@ class TabPoolManager:
                         f"(expected_task={expected_task}, current_task={current_task}, "
                         f"snapshot={before_snapshot})"
                     )
-                    return
+                    return False
                 if not current_task:
                     logger.warning(
                         f"[{tab_id}] 跳过释放：标签页 task_id 已丢失 "
                         f"(expected_task={expected_task}, status={session_status or 'unknown'}, "
                         f"snapshot={before_snapshot})"
                     )
-                    return
+                    return False
 
             release_state = session._begin_release_state(
                 clear_page=clear_page,
                 rollback_request_count=rollback_request_count,
                 force=False,
+                expected_task_id=expected_task,
+                reject_ownerless=True,
             )
             if release_state is None:
                 self._condition.notify_all()
-                return
+                return False
 
         session._run_release_from_state(
             release_state,
@@ -2164,6 +2158,8 @@ class TabPoolManager:
                     f"check_triggers={check_triggers}, rollback_request_count={rollback_request_count}, "
                     f"before={before_snapshot}, after={self._describe_session(session)})"
                 )
+                return session.status == TabStatus.IDLE
+        return False
 
     def force_release_all(self):
         """强制释放所有标签页（调试用）"""
@@ -2233,7 +2229,7 @@ class TabPoolManager:
             session.mark_error(str(e))
             raise
         finally:
-            self.release(session.id)
+            self.release(session.id, expected_task_id=task_id)
 
     def acquire_by_raw_tab_id(
         self,
@@ -2526,7 +2522,6 @@ class TabPoolManager:
 
         timeout = timeout or self.acquire_timeout
         deadline = time.time() + timeout
-        refreshed_live_snapshots = False
 
         with self._condition:
             waiters = self._route_waiters.setdefault(f"url::{target}", deque())
@@ -2543,10 +2538,6 @@ class TabPoolManager:
                     self._check_stuck_tabs()
                     self._cleanup_unhealthy_tabs()
 
-                    if not refreshed_live_snapshots:
-                        refreshed_live_snapshots = True
-                        self._refresh_route_snapshots_unlocked_once()
-
                     if not self._is_waiter_turn(waiters, waiter_token):
                         remaining = deadline - time.time()
                         if remaining <= 0:
@@ -2562,6 +2553,7 @@ class TabPoolManager:
                         self._condition.wait(timeout=min(remaining, 1.0))
                         continue
 
+                    self._refresh_route_snapshots_unlocked_once()
                     matching_sessions = self._get_sessions_for_exact_url(target)
                     if not matching_sessions:
                         logger.warning(f"No tab matches exact URL '{target}'")
@@ -2751,7 +2743,6 @@ class TabPoolManager:
 
         timeout = timeout or self.acquire_timeout
         deadline = time.time() + timeout
-        refreshed_live_snapshots = False
 
         with self._condition:
             waiters = self._route_waiters.setdefault(target, deque())
@@ -2768,10 +2759,6 @@ class TabPoolManager:
                     self._check_stuck_tabs()
                     self._cleanup_unhealthy_tabs()
 
-                    if not refreshed_live_snapshots:
-                        refreshed_live_snapshots = True
-                        self._refresh_route_snapshots_unlocked_once()
-
                     if not self._is_waiter_turn(waiters, waiter_token):
                         remaining = deadline - time.time()
                         if remaining <= 0:
@@ -2787,6 +2774,7 @@ class TabPoolManager:
                         self._condition.wait(timeout=min(remaining, 1.0))
                         continue
 
+                    self._refresh_route_snapshots_unlocked_once()
                     matching_sessions = self._get_sessions_for_route_domain(target)
                     if not matching_sessions:
                         logger.warning(f"No tab matches route domain '{target}'")
@@ -3185,44 +3173,21 @@ class TabPoolManager:
         with self._lock:
             return list(self._tabs.values())
 
-    def shutdown(self, close_browser_tabs: bool = True):
+    def shutdown(self):
         monitor = None
-        context_ids = set()
         maintenance_executor = None
-        shared_raw_tab_ids: List[str] = []
         with self._lock:
             self._shutdown = True
             self._condition.notify_all()
             monitor = self._global_network_monitor
-            context_ids = set(self._isolated_context_by_raw_id.values())
             self._global_network_monitor = None
             maintenance_executor = self._maintenance_executor
             self._maintenance_executor = None
-            raw_id_to_persistent = dict(self._raw_id_to_persistent)
-            persistent_to_session_id = dict(self._persistent_to_session_id)
-            sessions_by_id = dict(self._tabs)
-            for raw_id, persistent_idx in raw_id_to_persistent.items():
-                session_id = persistent_to_session_id.get(persistent_idx)
-                session = sessions_by_id.get(session_id) if session_id else None
-                if not close_browser_tabs:
-                    continue
-                if session is None or session.is_isolated_context:
-                    continue
-                normalized_raw_id = str(raw_id or "").strip()
-                if normalized_raw_id:
-                    shared_raw_tab_ids.append(normalized_raw_id)
 
         if monitor:
             monitor.shutdown()
         if maintenance_executor:
             maintenance_executor.shutdown(wait=False, cancel_futures=True)
-
-        if close_browser_tabs:
-            for raw_tab_id in shared_raw_tab_ids:
-                self._close_raw_tab(raw_tab_id)
-
-            for context_id in context_ids:
-                self._dispose_browser_context(context_id)
 
         with self._lock:
             self._tabs.clear()

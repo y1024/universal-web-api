@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import codecs
 import json
-import threading
 import time
 import uuid
-from collections import OrderedDict
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -35,34 +33,6 @@ from app.services.tool_calling import _decode_tool_arguments
 logger = get_logger("API.ANTHROPIC")
 
 router = APIRouter()
-
-_TOOL_NAME_CACHE_MAX = 2048
-_tool_name_cache_lock = threading.RLock()
-_tool_name_by_id_cache: "OrderedDict[str, str]" = OrderedDict()
-
-
-def _remember_tool_name(tool_use_id: str, tool_name: str) -> None:
-    key = str(tool_use_id or "").strip()
-    value = str(tool_name or "").strip()
-    if not key or not value:
-        return
-    with _tool_name_cache_lock:
-        _tool_name_by_id_cache[key] = value
-        _tool_name_by_id_cache.move_to_end(key)
-        while len(_tool_name_by_id_cache) > _TOOL_NAME_CACHE_MAX:
-            _tool_name_by_id_cache.popitem(last=False)
-
-
-def _lookup_tool_name(tool_use_id: str) -> str:
-    key = str(tool_use_id or "").strip()
-    if not key:
-        return ""
-    with _tool_name_cache_lock:
-        value = _tool_name_by_id_cache.get(key, "")
-        if value:
-            _tool_name_by_id_cache.move_to_end(key)
-        return value
-
 
 class AnthropicMessageRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -432,7 +402,6 @@ def _anthropic_messages_to_openai(messages: Any) -> List[Dict[str, Any]]:
                 )
                 if tool_name:
                     tool_name_by_id[tool_use_id] = tool_name
-                    _remember_tool_name(tool_use_id, tool_name)
                 continue
 
             if block_type == "tool_result" and role == "user":
@@ -458,12 +427,12 @@ def _anthropic_messages_to_openai(messages: Any) -> List[Dict[str, Any]]:
                     {
                         "role": "tool",
                         "tool_call_id": tool_use_id,
-                        "name": tool_name_by_id.get(tool_use_id) or _lookup_tool_name(tool_use_id) or "tool",
+                        "name": tool_name_by_id.get(tool_use_id) or "tool",
                         "content": content_text,
                     }
                 )
                 if content_image_parts:
-                    tool_name = tool_name_by_id.get(tool_use_id) or _lookup_tool_name(tool_use_id) or "tool"
+                    tool_name = tool_name_by_id.get(tool_use_id) or "tool"
                     text_parts.append(
                         {
                             "type": "text",

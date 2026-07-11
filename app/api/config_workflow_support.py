@@ -143,7 +143,7 @@ def _execute_workflow_editor_test_payload(
     if not browser_instance.get_browser_handle():
         raise HTTPException(status_code=503, detail="浏览器未连接")
 
-    task_id = f"workflow_editor_test_{int(time.time() * 1000)}"
+    task_id = f"workflow_editor_test_{time.time_ns()}"
     session = None
     executor = None
     started_at = time.time()
@@ -312,7 +312,11 @@ def _execute_workflow_editor_test_payload(
                 logger.debug(f"[WFE_TEST] executor cleanup skipped: {e}")
         if session is not None and getattr(browser_instance, "tab_pool", None) is not None:
             logger.debug(f"[WFE_TEST] release session={session.id!r}")
-            browser_instance.tab_pool.release(session.id, check_triggers=False)
+            browser_instance.tab_pool.release(
+                session.id,
+                check_triggers=False,
+                expected_task_id=task_id,
+            )
 
 
 def _save_site_workflow_payload(domain: str, data: Dict[str, Any]) -> Dict[str, Any]:

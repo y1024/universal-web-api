@@ -68,111 +68,141 @@ window.CommandsTabTemplate = `
             </div>
         </div>
 
-        <div v-if="commands.length > 0" class="rounded-xl border border-sky-200/80 bg-[linear-gradient(135deg,rgba(240,249,255,0.96),rgba(238,242,255,0.92))] p-2.5 shadow-sm dark:border-sky-800/60 dark:bg-[linear-gradient(145deg,rgba(10,25,47,0.7),rgba(30,41,59,0.75))]">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-                    <span class="rounded-full bg-slate-900/5 px-3 py-1.5 dark:bg-white/5">命令组 {{ commandGroups.length }}</span>
-                    <span class="rounded-full bg-slate-900/5 px-3 py-1.5 dark:bg-white/5">已选 {{ selectedCommands.length }}</span>
+        <section v-if="commands.length > 0"
+                 class="overflow-visible rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
+            <div class="flex min-h-[52px] flex-wrap items-center justify-between gap-3 px-4 py-3">
+                <div class="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+                    <div class="flex items-center gap-2 text-sm font-semibold text-slate-800 dark:text-slate-100">
+                        <span class="text-sky-600 dark:text-sky-400" v-html="$icons.folderOpen"></span>
+                        <span>分组工具</span>
+                    </div>
+                    <div class="h-4 w-px bg-slate-200 dark:bg-slate-700"></div>
+                    <div class="flex items-center gap-4 text-xs text-slate-500 dark:text-slate-400">
+                        <span><strong class="font-semibold text-slate-700 dark:text-slate-200">{{ commandGroups.length }}</strong> 个命令组</span>
+                        <span><strong class="font-semibold text-slate-700 dark:text-slate-200">{{ selectedCommands.length }}</strong> 条已选</span>
+                    </div>
                 </div>
                 <button @click="showGroupTools = !showGroupTools"
-                        class="rounded-xl border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-200 dark:hover:bg-slate-800">
-                    {{ showGroupTools ? '收起分组工具' : '展开分组工具' }}
+                        :aria-expanded="showGroupTools"
+                        class="inline-flex h-8 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800">
+                    <span>{{ showGroupTools ? '收起' : '管理分组' }}</span>
+                    <span v-html="showGroupTools ? $icons.chevronUp : $icons.chevronDown"></span>
                 </button>
             </div>
-            <div v-show="showGroupTools" class="mt-3 space-y-3">
-                <div class="grid gap-3 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.45fr)_minmax(0,1fr)]">
-                    <div class="rounded-2xl border border-slate-200/80 bg-white/70 p-3 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/50">
-                        <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">选择操作</div>
-                        <div class="flex flex-wrap items-center gap-2">
-                            <button @click="toggleCurrentPageSelection"
-                                    class="rounded-xl border border-slate-200 bg-white/85 px-3 py-2 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-300 dark:hover:bg-slate-800">
-                                当前可见全选/反选
+
+            <div v-show="showGroupTools" class="border-t border-slate-200 dark:border-slate-700">
+                <div class="flex flex-col gap-3 border-b border-slate-200 bg-slate-50/80 px-4 py-3 dark:border-slate-700 dark:bg-slate-950/35 lg:flex-row lg:items-center lg:justify-between">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="mr-1 text-xs font-semibold text-slate-500 dark:text-slate-400">选择范围</span>
+                        <button @click="toggleCurrentPageSelection"
+                                class="h-8 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800">
+                            当前页全选 / 反选
+                        </button>
+                        <button @click="clearSelection"
+                                :disabled="!hasSelection"
+                                class="h-8 rounded-lg px-3 text-xs font-medium text-slate-500 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800">
+                            清空选择
+                        </button>
+                    </div>
+                    <div class="relative self-start lg:self-auto">
+                        <button @click.stop="toggleBulkActionMenu"
+                                :aria-expanded="isBulkActionMenuOpen()"
+                                class="inline-flex h-8 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800">
+                            <span>全部命令</span>
+                            <span v-html="isBulkActionMenuOpen() ? $icons.chevronUp : $icons.chevronDown"></span>
+                        </button>
+                        <div v-if="isBulkActionMenuOpen()"
+                             class="absolute right-0 top-full z-20 mt-1.5 min-w-[144px] overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-lg dark:border-slate-700 dark:bg-slate-900">
+                            <button @click.stop="disableAllCommands"
+                                    :disabled="groupWorking || commands.length === 0"
+                                    class="flex w-full items-center rounded-md px-3 py-2 text-left text-xs font-medium text-rose-600 transition hover:bg-rose-50 disabled:opacity-40 dark:text-rose-300 dark:hover:bg-slate-800">
+                                全部禁用
                             </button>
-                            <button @click="clearSelection"
-                                    :disabled="!hasSelection"
-                                    class="rounded-xl border border-slate-200 bg-white/85 px-3 py-2 text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-300 dark:hover:bg-slate-800">
-                                清空选择
+                            <button @click.stop="enableAllDisabledCommands"
+                                    :disabled="groupWorking || disabledCount === 0"
+                                    class="flex w-full items-center rounded-md px-3 py-2 text-left text-xs font-medium text-emerald-600 transition hover:bg-emerald-50 disabled:opacity-40 dark:text-emerald-300 dark:hover:bg-slate-800">
+                                全部启用
                             </button>
-                            <div class="relative">
-                                <button @click.stop="toggleBulkActionMenu"
-                                        class="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/85 px-3 py-2 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-300 dark:hover:bg-slate-800">
-                                    <span>批量操作</span>
-                                    <span class="text-[10px]">{{ isBulkActionMenuOpen() ? '▲' : '▼' }}</span>
-                                </button>
-                                <div v-if="isBulkActionMenuOpen()"
-                                     class="absolute left-0 top-full z-20 mt-2 min-w-[140px] overflow-hidden rounded-xl border border-slate-200/90 bg-white/95 p-1.5 shadow-lg backdrop-blur dark:border-slate-700 dark:bg-slate-900/95">
-                                    <button @click.stop="disableAllCommands"
-                                            :disabled="groupWorking || commands.length === 0"
-                                            class="flex w-full items-center rounded-lg px-3 py-2 text-left text-xs font-medium text-rose-600 transition hover:bg-rose-50 disabled:opacity-40 dark:text-rose-300 dark:hover:bg-slate-800">
-                                        全部禁用
-                                    </button>
-                                    <button @click.stop="enableAllDisabledCommands"
-                                            :disabled="groupWorking || disabledCount === 0"
-                                            class="flex w-full items-center rounded-lg px-3 py-2 text-left text-xs font-medium text-emerald-600 transition hover:bg-emerald-50 disabled:opacity-40 dark:text-emerald-300 dark:hover:bg-slate-800">
-                                        全部解禁
-                                    </button>
-                                </div>
-                            </div>
                         </div>
                     </div>
+                </div>
 
-                    <div class="rounded-2xl border border-slate-200/80 bg-white/70 p-3 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/50">
-                        <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">命令组操作</div>
-                        <div class="space-y-2.5">
-                            <div class="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto]">
-                                <input v-model.trim="pendingGroupName"
-                                       type="text"
-                                       list="existing-command-groups"
-                                       placeholder="输入新组名，留空时自动生成"
-                                       class="min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+                <div class="grid xl:grid-cols-[minmax(0,2fr)_minmax(280px,0.8fr)]">
+                    <div class="p-4 xl:pr-5">
+                        <div class="mb-3">
+                            <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-100">分组归属</h3>
+                            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">将已选命令收纳到新组，或调整现有组。</p>
+                        </div>
+
+                        <div class="space-y-3">
+                            <div class="grid items-end gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+                                <label class="block min-w-0">
+                                    <span class="mb-1.5 block text-xs font-medium text-slate-600 dark:text-slate-300">目标组名称</span>
+                                    <input v-model.trim="pendingGroupName"
+                                           type="text"
+                                           list="existing-command-groups"
+                                           placeholder="输入组名，留空时自动生成"
+                                           class="h-9 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
+                                </label>
                                 <button @click="assignSelectedToGroup"
                                         :disabled="groupWorking || !hasSelection"
-                                        class="rounded-xl bg-sky-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-sky-700 disabled:opacity-40">
-                                    收纳为命令组
+                                        class="h-9 rounded-lg bg-sky-600 px-4 text-xs font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40">
+                                    收纳到此组
                                 </button>
                             </div>
                             <datalist id="existing-command-groups">
                                 <option v-for="group in commandGroups" :key="'group_hint_' + group.name" :value="group.name"></option>
                             </datalist>
-                            <div class="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto_auto]">
-                                <select v-model="selectedExistingGroupName"
-                                        :disabled="groupWorking || commandGroups.length === 0"
-                                        class="min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
-                                    <option value="" disabled>选择已有命令组</option>
-                                    <option v-for="group in commandGroups" :key="'group_pick_' + group.name" :value="group.name">
-                                        {{ group.name }}
-                                    </option>
-                                </select>
+
+                            <div class="grid items-end gap-2 md:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
+                                <label class="block min-w-0">
+                                    <span class="mb-1.5 block text-xs font-medium text-slate-600 dark:text-slate-300">现有命令组</span>
+                                    <select v-model="selectedExistingGroupName"
+                                            :disabled="groupWorking || commandGroups.length === 0"
+                                            class="h-9 w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
+                                        <option value="" disabled>选择命令组</option>
+                                        <option v-for="group in commandGroups" :key="'group_pick_' + group.name" :value="group.name">
+                                            {{ group.name }}
+                                        </option>
+                                    </select>
+                                </label>
                                 <button @click="assignSelectedToExistingGroup"
                                         :disabled="groupWorking || !hasSelection || !selectedExistingGroupName"
-                                        class="rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 disabled:opacity-40 dark:border-sky-700 dark:bg-sky-900/30 dark:text-sky-300 dark:hover:bg-sky-900/40">
-                                    加入已有组
+                                        class="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800">
+                                    加入
                                 </button>
                                 <button @click="renameSelectedGroup"
                                         :disabled="groupWorking || !selectedExistingGroupName || !pendingGroupName.trim()"
-                                        class="rounded-xl border border-violet-300 bg-violet-50 px-3 py-2 text-xs font-semibold text-violet-700 transition hover:bg-violet-100 disabled:opacity-40 dark:border-violet-700 dark:bg-violet-900/20 dark:text-violet-300 dark:hover:bg-violet-900/30">
+                                        class="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800">
                                     重命名
                                 </button>
+                                <button @click="ungroupSelectedCommands"
+                                        :disabled="groupWorking || !hasSelection"
+                                        title="将已选命令移出所属分组"
+                                        class="inline-flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-rose-300 dark:hover:bg-rose-950/30">
+                                    <span v-html="$icons.xMark"></span>
+                                    移出分组
+                                </button>
                             </div>
-                            <button @click="ungroupSelectedCommands"
-                                    :disabled="groupWorking || !hasSelection"
-                                    class="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 transition hover:bg-amber-100 disabled:opacity-40 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300 dark:hover:bg-amber-900/30">
-                                解散选中分组
-                            </button>
                         </div>
                     </div>
 
-                    <div class="rounded-2xl border border-slate-200/80 bg-white/70 p-3 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/50">
-                        <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">执行组设置</div>
-                        <div class="space-y-2.5">
-                            <label class="flex items-center gap-2 rounded-xl border border-slate-200 bg-white/85 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-300">
-                                <input type="checkbox" v-model="includeDisabledWhenRunGroup">
-                                <span>执行组时包含禁用命令</span>
+                    <div class="border-t border-slate-200 p-4 dark:border-slate-700 xl:border-l xl:border-t-0">
+                        <div class="mb-3">
+                            <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-100">执行策略</h3>
+                            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">应用于手动执行整个命令组。</p>
+                        </div>
+                        <div class="space-y-3">
+                            <label class="flex cursor-pointer items-center justify-between gap-3 text-xs font-medium text-slate-700 dark:text-slate-200">
+                                <span>包含已禁用命令</span>
+                                <input type="checkbox"
+                                       v-model="includeDisabledWhenRunGroup"
+                                       class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
                             </label>
-                            <label class="flex flex-col gap-2 rounded-xl border border-slate-200 bg-white/85 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-300">
-                                <span>执行组占用策略</span>
+                            <label class="block">
+                                <span class="mb-1.5 block text-xs font-medium text-slate-600 dark:text-slate-300">标签页占用策略</span>
                                 <select v-model="runGroupAcquirePolicy"
-                                        class="rounded-lg border border-slate-200 bg-white px-2 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+                                        class="h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
                                     <option value="inherit_session">沿用当前会话</option>
                                     <option value="try_acquire">尝试重新占用</option>
                                     <option value="require_acquire">必须重新占用</option>
@@ -181,22 +211,23 @@ window.CommandsTabTemplate = `
                         </div>
                     </div>
                 </div>
-                <div class="text-xs text-slate-500 dark:text-slate-400">
-                    可直接拖动命令卡片到某个组头完成收纳。
+
+                <div class="border-t border-slate-200 px-4 py-2.5 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                    拖动卡片可调整同组顺序；拖入其他组的任意区域即可移动命令。
                 </div>
             </div>
-        </div>
+        </section>
 
         <div class="space-y-3">
             <div v-for="row in paginatedDisplayRows" :key="row.key"
+                 @dragover.prevent="row.isGroup && onGroupDragOver(row.groupName, $event)"
+                 @dragleave="row.isGroup && onGroupDragLeave(row.groupName, $event)"
+                 @drop.prevent="row.isGroup && onGroupDrop(row.groupName)"
                  :class="[
                     row.isGroup ? 'rounded-xl border border-sky-200/80 bg-sky-50/50 p-2.5 dark:border-sky-800/50 dark:bg-sky-900/10' : '',
                     row.isGroup && isGroupDropTarget(row.groupName) ? 'ring-2 ring-sky-400 ring-offset-1 ring-offset-white dark:ring-offset-slate-900' : ''
                  ]">
                 <div v-if="row.isGroup"
-                     @dragover.prevent="onGroupDragOver(row.groupName, $event)"
-                     @dragleave="onGroupDragLeave(row.groupName)"
-                     @drop.prevent="onGroupDrop(row.groupName)"
                      class="flex flex-wrap items-center justify-between gap-2">
                     <div class="flex items-center gap-2">
                         <button @click="toggleGroupCollapse(row.groupName)"
@@ -240,6 +271,12 @@ window.CommandsTabTemplate = `
                                     class="flex w-full items-center rounded-lg px-3 py-2 text-left text-xs font-medium text-emerald-600 transition hover:bg-emerald-50 disabled:opacity-40 dark:text-emerald-300 dark:hover:bg-slate-800">
                                 全部解禁
                             </button>
+                            <button @click.stop="duplicateGroup(row.groupName)"
+                                    :disabled="groupWorking"
+                                    class="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium text-sky-700 transition hover:bg-sky-50 disabled:opacity-40 dark:text-sky-300 dark:hover:bg-slate-800">
+                                <span v-html="$icons.copy"></span>
+                                复制命令组
+                            </button>
                             <button @click.stop="disbandGroup(row.groupName)"
                                     :disabled="groupWorking"
                                     class="flex w-full items-center rounded-lg px-3 py-2 text-left text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-40 dark:text-red-300 dark:hover:bg-slate-800">
@@ -251,13 +288,23 @@ window.CommandsTabTemplate = `
 
                 <div :class="row.isGroup ? 'mt-2 space-y-2' : 'space-y-2'" v-show="!row.isGroup || !isGroupCollapsed(row.groupName)">
                     <div v-for="cmd in row.commands" :key="cmd.id"
-                         draggable="true"
+                         :draggable="!reordering && !groupWorking"
                          @dragstart="beginGroupDrag(cmd.id, $event)"
                          @dragend="clearGroupDragState"
-                         :class="['rounded-xl border p-3 transition-all shadow-sm',
+                         @dragover.prevent.stop="onCommandDragOver(cmd.id, $event)"
+                         @dragleave="onCommandDragLeave(cmd.id, $event)"
+                         @drop.prevent.stop="onCommandDrop(cmd.id, $event)"
+                         title="拖动可调整同组命令顺序"
+                         :class="['relative cursor-grab rounded-xl border p-3 transition-all shadow-sm active:cursor-grabbing',
                                   cmd.enabled
                                   ? 'bg-[linear-gradient(145deg,rgba(255,255,255,0.98),rgba(241,245,249,0.94))] border-slate-200/80 hover:-translate-y-0.5 hover:shadow-md dark:bg-[linear-gradient(145deg,rgba(15,23,42,0.96),rgba(30,41,59,0.92))] dark:border-slate-700/70'
-                                  : 'bg-slate-100/85 dark:bg-slate-900 border-slate-200 dark:border-slate-700 opacity-70']">
+                                  : 'bg-slate-100/85 dark:bg-slate-900 border-slate-200 dark:border-slate-700',
+                                  draggingCommandId === cmd.id ? 'opacity-50' : '',
+                                  isCommandDropTarget(cmd.id) ? 'ring-2 ring-sky-400 ring-offset-1 ring-offset-white dark:ring-offset-slate-900' : '']">
+                        <div v-if="isCommandDropTarget(cmd.id, 'before')"
+                             class="pointer-events-none absolute -top-1 left-3 right-3 h-1 rounded-full bg-sky-500"></div>
+                        <div v-if="isCommandDropTarget(cmd.id, 'after')"
+                             class="pointer-events-none absolute -bottom-1 left-3 right-3 h-1 rounded-full bg-sky-500"></div>
                         <div class="flex items-start justify-between">
                             <div class="flex-1 min-w-0">
                                 <div class="flex items-center gap-3 mb-2">
@@ -319,31 +366,64 @@ window.CommandsTabTemplate = `
                                 </div>
                             </div>
 
-                            <div class="flex flex-wrap items-center gap-2 ml-4">
-                                <button @click="moveCommand(cmd, -1)" :disabled="reordering || getCommandOrder(cmd.id) === 1"
-                                        class="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
-                                    ↑ 上移
+                            <div class="ml-4 flex flex-wrap items-center gap-2">
+                                <button @click="testCommand(cmd)" title="手动执行" aria-label="手动执行"
+                                        class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white/80 text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
+                                    <span v-html="$icons.play"></span>
                                 </button>
-                                <button @click="moveCommand(cmd, 1)" :disabled="reordering || getCommandOrder(cmd.id) === commands.length"
-                                        class="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
-                                    ↓ 下移
+                                <button @click="openEditCommand(cmd)" title="编辑" aria-label="编辑"
+                                        class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white/80 text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
+                                    <span v-html="$icons.pencil"></span>
                                 </button>
-                                <button @click="testCommand(cmd)" title="手动执行"
-                                        class="rounded-lg bg-blue-500 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-blue-600">
-                                    ▶️
-                                </button>
-                                <button @click="toggleCommand(cmd)" :title="cmd.enabled ? '禁用' : '启用'"
-                                        class="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
-                                    {{ cmd.enabled ? '⏸️' : '▶️' }}
-                                </button>
-                                <button @click="openEditCommand(cmd)" title="编辑"
-                                        class="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
-                                    ✏️
-                                </button>
-                                <button @click="deleteCommand(cmd)" title="删除"
-                                        class="rounded-lg border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-500 transition hover:bg-red-100 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300 dark:hover:bg-red-500/20">
-                                    🗑️
-                                </button>
+                                <div class="relative">
+                                    <button @click.stop="toggleCommandActionMenu(cmd.id)"
+                                            title="更多操作" aria-label="更多操作"
+                                            :aria-expanded="isCommandActionMenuOpen(cmd.id)"
+                                            class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white/80 text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
+                                        <span v-html="$icons.ellipsisVertical"></span>
+                                    </button>
+                                    <div v-if="isCommandActionMenuOpen(cmd.id)"
+                                         class="absolute right-0 top-full z-30 mt-2 min-w-[152px] overflow-hidden rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+                                        <button @click.stop="moveCommand(cmd, -1); closeCommandActionMenu()"
+                                                aria-label="上移"
+                                                :disabled="reordering || !canMoveCommand(cmd, -1)"
+                                                class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-200 dark:hover:bg-slate-800">
+                                            <span v-html="$icons.arrowUp"></span>
+                                            上移
+                                        </button>
+                                        <button @click.stop="moveCommand(cmd, 1); closeCommandActionMenu()"
+                                                aria-label="下移"
+                                                :disabled="reordering || !canMoveCommand(cmd, 1)"
+                                                class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-200 dark:hover:bg-slate-800">
+                                            <span v-html="$icons.arrowDown"></span>
+                                            下移
+                                        </button>
+                                        <button @click.stop="toggleCommand(cmd); closeCommandActionMenu()"
+                                                :aria-label="cmd.enabled ? '禁用' : '启用'"
+                                                :class="[
+                                                    'flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-medium transition',
+                                                    cmd.enabled
+                                                        ? 'text-amber-600 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-slate-800'
+                                                        : 'text-emerald-600 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-slate-800'
+                                                ]">
+                                            <span v-html="$icons.power"></span>
+                                            {{ cmd.enabled ? '禁用' : '启用' }}
+                                        </button>
+                                        <button @click.stop="duplicateCommand(cmd); closeCommandActionMenu()"
+                                                aria-label="复制"
+                                                :disabled="!!duplicatingCommandId"
+                                                class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-medium text-sky-600 transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-sky-300 dark:hover:bg-slate-800">
+                                            <span v-html="$icons.copy"></span>
+                                            复制
+                                        </button>
+                                        <div class="my-1 border-t border-slate-200 dark:border-slate-700"></div>
+                                        <button @click.stop="deleteCommand(cmd); closeCommandActionMenu()"
+                                                class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-medium text-red-500 transition hover:bg-red-50 dark:text-red-300 dark:hover:bg-slate-800">
+                                            <span v-html="$icons.trash"></span>
+                                            删除
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>

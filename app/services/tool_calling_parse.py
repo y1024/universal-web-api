@@ -88,7 +88,12 @@ def parse_tool_response(
     }
 
 
-def build_tool_completion_response(model: str, parsed: Dict[str, Any]) -> Dict[str, Any]:
+def build_tool_completion_response(
+    model: str,
+    parsed: Dict[str, Any],
+    *,
+    legacy_function_call: bool = False,
+) -> Dict[str, Any]:
     completion_id = _new_completion_id()
     tool_calls = parsed.get("tool_calls") or []
     content = parsed.get("content")
@@ -96,9 +101,13 @@ def build_tool_completion_response(model: str, parsed: Dict[str, Any]) -> Dict[s
         message: Dict[str, Any] = {
             "role": "assistant",
             "content": content if content not in ("", None) else None,
-            "tool_calls": tool_calls,
         }
-        finish_reason = "tool_calls"
+        if legacy_function_call:
+            message["function_call"] = _legacy_function_call_from_tool_call(tool_calls[0])
+            finish_reason = "function_call"
+        else:
+            message["tool_calls"] = tool_calls
+            finish_reason = "tool_calls"
     else:
         message = {
             "role": "assistant",
@@ -126,15 +135,25 @@ def build_tool_completion_response(model: str, parsed: Dict[str, Any]) -> Dict[s
     }
 
 
-def iter_tool_stream_chunks(model: str, parsed: Dict[str, Any]) -> Iterable[str]:
+def iter_tool_stream_chunks(
+    model: str,
+    parsed: Dict[str, Any],
+    *,
+    legacy_function_call: bool = False,
+) -> Iterable[str]:
     completion_id = _new_completion_id()
     created = int(time.time())
 
     first_delta: Dict[str, Any] = {"role": "assistant"}
-    if parsed.get("tool_calls"):
-        first_delta["tool_calls"] = _tool_calls_for_stream_delta(parsed["tool_calls"])
-    elif parsed.get("content"):
+    if parsed.get("content") not in ("", None):
         first_delta["content"] = str(parsed.get("content") or "")
+    if parsed.get("tool_calls"):
+        if legacy_function_call:
+            first_delta["function_call"] = _legacy_function_call_from_tool_call(
+                parsed["tool_calls"][0]
+            )
+        else:
+            first_delta["tool_calls"] = _tool_calls_for_stream_delta(parsed["tool_calls"])
 
     yield _pack_sse_chunk(
         {
@@ -146,7 +165,13 @@ def iter_tool_stream_chunks(model: str, parsed: Dict[str, Any]) -> Iterable[str]
         }
     )
 
-    finish_reason = "tool_calls" if parsed.get("tool_calls") else "stop"
+    finish_reason = (
+        "function_call"
+        if parsed.get("tool_calls") and legacy_function_call
+        else "tool_calls"
+        if parsed.get("tool_calls")
+        else "stop"
+    )
     yield _pack_sse_chunk(
         {
             "id": completion_id,
@@ -171,6 +196,18 @@ def _tool_calls_for_stream_delta(tool_calls: Any) -> List[Dict[str, Any]]:
             delta_item["index"] = fallback_index
         normalized.append(delta_item)
     return normalized
+
+
+def _legacy_function_call_from_tool_call(tool_call: Any) -> Dict[str, str]:
+    item = tool_call if isinstance(tool_call, dict) else {}
+    function_data = item.get("function") if isinstance(item.get("function"), dict) else {}
+    arguments = function_data.get("arguments")
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
+    return {
+        "name": str(function_data.get("name") or "").strip(),
+        "arguments": arguments,
+    }
 
 _TOOL_CALLING_PLACEHOLDER_URL_RE = re.compile(
     r"^\s*https?://(?:[\w.-]+\.)?googleusercontent\.com/"
@@ -420,7 +457,7 @@ def _normalize_parsed_payload(
         if raw_calls:
             return None
 
-    if mode == "final" or "content" in payload:
+    if mode == "final":
         return {
             "mode": "final",
             "content": str(payload.get("content", "") or ""),
@@ -1354,7 +1391,7 @@ def _xml_local_name(tag: Any) -> str:
     value = str(tag or "")
     if "}" in value:
         value = value.rsplit("}", 1)[-1]
-    return value.strip().lower()
+    return value.strip()
 
 
 def _append_xml_value(target: Dict[str, Any], key: str, value: Any) -> None:
@@ -1453,8 +1490,9 @@ def _parse_xml_element_value(
             _parse_xml_element_value(child, child_name, child_schema),
         )
 
-    if len(result) == 1 and "item" in result:
-        items = result["item"]
+    item_key = next((key for key in result if key.lower() == "item"), "")
+    if len(result) == 1 and item_key:
+        items = result[item_key]
         return items if isinstance(items, list) else [items]
 
     text_parts: List[str] = []
@@ -1493,7 +1531,11 @@ def _parse_xml_invoke_arguments(
     parameters_schema = _tool_parameters_schema(tool_def)
     for child in children:
         child_tag = _xml_local_name(child.tag)
-        is_named_arg = child_tag in {_PREFERRED_XML_ARG_TAG, _LEGACY_XML_ARG_TAG, "argument"}
+        is_named_arg = child_tag.lower() in {
+            _PREFERRED_XML_ARG_TAG,
+            _LEGACY_XML_ARG_TAG,
+            "argument",
+        }
         if is_named_arg:
             param_name = str(child.attrib.get("name", "") or "").strip()
         else:
@@ -1526,12 +1568,19 @@ def _parse_wrapped_xml_tool_calls(
     except (ET.ParseError, DefusedXmlException):
         return []
 
-    if _xml_local_name(root.tag) not in {_PREFERRED_XML_WRAPPER_TAG, _LEGACY_XML_WRAPPER_TAG}:
+    if _xml_local_name(root.tag).lower() not in {
+        _PREFERRED_XML_WRAPPER_TAG,
+        _LEGACY_XML_WRAPPER_TAG,
+    }:
         return []
 
     tool_calls: List[Dict[str, Any]] = []
     for child in list(root):
-        if _xml_local_name(child.tag) not in {_PREFERRED_XML_CALL_TAG, _LEGACY_XML_CALL_TAG, "tool_call"}:
+        if _xml_local_name(child.tag).lower() not in {
+            _PREFERRED_XML_CALL_TAG,
+            _LEGACY_XML_CALL_TAG,
+            "tool_call",
+        }:
             continue
         raw_name = str(child.attrib.get("name", "") or "").strip()
         name = _resolve_tool_name(raw_name, allowed_tools)

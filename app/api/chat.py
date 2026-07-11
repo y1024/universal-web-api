@@ -9,6 +9,7 @@ app/api/chat.py - 核心聊天 API
 
 import json
 import codecs
+import copy
 import os
 import re
 import time
@@ -16,6 +17,7 @@ import asyncio
 import queue
 import threading
 import uuid
+from collections import OrderedDict
 from typing import Optional, Any, Dict, List, Callable, AsyncIterator
 
 from fastapi import APIRouter, Request, HTTPException, Header, Depends
@@ -73,6 +75,11 @@ router = APIRouter()
 MODEL_LIST_CREATED = int(time.time())
 STREAM_QUEUE_POLL_TIMEOUT = 0.5
 SSE_HEARTBEAT_INTERVAL = 15.0
+RESPONSES_STATE_MAX_ENTRIES = 1024
+RESPONSES_STATE_TTL_SEC = 3600.0
+
+_responses_state_lock = threading.RLock()
+_responses_state_by_id: "OrderedDict[str, tuple[float, List[Dict[str, Any]]]]" = OrderedDict()
 
 
 class _ToolCallingExecutionCancelled(Exception):
@@ -363,6 +370,66 @@ def _new_response_id() -> str:
 
 def _new_response_item_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _prune_responses_state_locked(now: Optional[float] = None) -> None:
+    cutoff = float(now if now is not None else time.time()) - RESPONSES_STATE_TTL_SEC
+    expired_ids = [
+        response_id
+        for response_id, (stored_at, _messages) in _responses_state_by_id.items()
+        if stored_at < cutoff
+    ]
+    for response_id in expired_ids:
+        _responses_state_by_id.pop(response_id, None)
+    while len(_responses_state_by_id) > RESPONSES_STATE_MAX_ENTRIES:
+        _responses_state_by_id.popitem(last=False)
+
+
+def _load_responses_state(previous_response_id: Optional[str]) -> List[Dict[str, Any]]:
+    response_id = str(previous_response_id or "").strip()
+    if not response_id:
+        return []
+    with _responses_state_lock:
+        _prune_responses_state_locked()
+        entry = _responses_state_by_id.get(response_id)
+        if entry is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"previous_response_id not found or expired: {response_id}",
+            )
+        _responses_state_by_id.move_to_end(response_id)
+        return copy.deepcopy(entry[1])
+
+
+def _store_responses_state(
+    response_id: str,
+    request_messages: List[Dict[str, Any]],
+    chat_payload: Dict[str, Any],
+    *,
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+
+    choices = chat_payload.get("choices") if isinstance(chat_payload, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    assistant = choice.get("message") if isinstance(choice.get("message"), dict) else None
+    if assistant is None:
+        return
+
+    history = copy.deepcopy(list(request_messages or []))
+    assistant_message = copy.deepcopy(assistant)
+    assistant_message["role"] = "assistant"
+    history.append(assistant_message)
+
+    key = str(response_id or "").strip()
+    if not key:
+        return
+    with _responses_state_lock:
+        _prune_responses_state_locked()
+        _responses_state_by_id[key] = (time.time(), history)
+        _responses_state_by_id.move_to_end(key)
+        _prune_responses_state_locked()
 
 
 def _pack_responses_sse(event: str, data: Dict[str, Any]) -> str:
@@ -775,10 +842,10 @@ def _append_response_input_item(messages: List[Dict[str, Any]], item: Any) -> No
 
 def _responses_input_to_messages(body: ResponsesRequest) -> List[Dict[str, Any]]:
     messages: List[Dict[str, Any]] = []
-
     instructions = str(body.instructions or "").strip()
     if instructions:
         messages.append({"role": "system", "content": instructions})
+    messages.extend(_load_responses_state(body.previous_response_id))
 
     source = body.input
     if source in (None, "") and body.prompt not in (None, ""):
@@ -1138,6 +1205,7 @@ async def _run_chat_completion_final(
 async def _stream_responses_compat(
     request: Request,
     body: ResponsesRequest,
+    chat_body: ChatRequest,
     authenticated: bool,
 ):
     response_id = _new_response_id()
@@ -1631,7 +1699,7 @@ async def _stream_responses_compat(
     try:
         chat_response = await chat_completions(
             request=request,
-            body=_responses_request_to_chat_request(body, stream=True),
+            body=chat_body,
             authenticated=authenticated,
         )
 
@@ -1693,6 +1761,12 @@ async def _stream_responses_compat(
             incomplete_details=incomplete_details,
         )
         completed["output"] = _completed_output()
+        _store_responses_state(
+            response_id,
+            chat_body.messages,
+            chat_payload,
+            enabled=body.store is not False,
+        )
         yield _pack_response_event(terminal_event, completed)
     except Exception as e:
         yield _pack_response_event(
@@ -1841,9 +1915,15 @@ def _iter_stream_chunks_with_optional_usage(body: ChatRequest, chunks):
 # ================= 认证依赖 =================
 
 
-async def verify_auth(authorization: Optional[str] = Header(None)) -> bool:
-    """验证对外服务 API 的 Bearer Token。"""
-    return await verify_service_auth(authorization)
+async def verify_auth(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> bool:
+    """验证对外服务 API 的 Bearer Token 或 X-API-Key。"""
+    return await verify_service_auth(
+        authorization=authorization,
+        x_api_key=x_api_key,
+    )
 
 
 # ================= 核心聊天 API =================
@@ -1993,13 +2073,14 @@ async def create_response(
     authenticated: bool = Depends(verify_auth)
 ):
     """OpenAI Responses API 兼容入口。"""
-    chat_body = _responses_request_to_chat_request(body, stream=False)
+    chat_body = _responses_request_to_chat_request(body, stream=bool(body.stream))
 
     if body.stream:
         return StreamingResponse(
             _stream_responses_compat(
                 request=request,
                 body=body,
+                chat_body=chat_body,
                 authenticated=authenticated,
             ),
             media_type="text/event-stream",
@@ -2045,6 +2126,12 @@ async def create_response(
         status=response_status,
         error=None,
         incomplete_details=incomplete_details,
+    )
+    _store_responses_state(
+        str(response_obj.get("id") or ""),
+        chat_body.messages,
+        payload,
+        enabled=body.store is not False,
     )
     return JSONResponse(content=response_obj)
 
@@ -2390,6 +2477,7 @@ async def _run_tool_calling_async(
     stop_checker=None,
     worker_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    legacy_function_call = bool(body.functions) and not bool(body.tools)
     tools, tool_choice = normalize_tool_request(
         tools=body.tools,
         tool_choice=body.tool_choice,
@@ -2420,7 +2508,9 @@ async def _run_tool_calling_async(
         messages=body.messages,
         tools=tools,
         tool_choice=tool_choice,
-        parallel_tool_calls=body.parallel_tool_calls,
+        parallel_tool_calls=(
+            False if legacy_function_call else body.parallel_tool_calls
+        ),
         round_executor=_round_executor,
         stop_checker=stop_checker,
     )
@@ -2430,7 +2520,11 @@ async def _run_tool_calling_async(
             str(parsed.get("content") or ""),
             body.stop,
         )
-    return build_tool_completion_response(body.model, parsed)
+    return build_tool_completion_response(
+        body.model,
+        parsed,
+        legacy_function_call=legacy_function_call,
+    )
 
 
 async def _complete_tool_calling_with_lifecycle(
@@ -2541,13 +2635,23 @@ async def _stream_tool_calling_with_lifecycle(
     try:
         response = await _complete_tool_calling_with_lifecycle(request, body, ctx)
         message = response.get("choices", [{}])[0].get("message", {}) or {}
+        legacy_function_call = bool(body.functions) and not bool(body.tools)
+        response_tool_calls = message.get("tool_calls") or []
+        if legacy_function_call and not response_tool_calls and isinstance(message.get("function_call"), dict):
+            response_tool_calls = [
+                {"type": "function", "function": message["function_call"]}
+            ]
         parsed = {
             "content": message.get("content"),
-            "tool_calls": message.get("tool_calls") or [],
+            "tool_calls": response_tool_calls,
         }
         for chunk in _iter_stream_chunks_with_optional_usage(
             body,
-            iter_tool_stream_chunks(body.model, parsed),
+            iter_tool_stream_chunks(
+                body.model,
+                parsed,
+                legacy_function_call=legacy_function_call,
+            ),
         ):
             if await request.is_disconnected():
                 ctx.request_cancel("client_disconnected")

@@ -81,9 +81,12 @@ def verify_dashboard_token(authorization: Optional[str] = None) -> None:
     )
 
 
-async def verify_service_auth(authorization: Optional[str] = Header(None)) -> bool:
-    """验证对外服务 API 的 Bearer Token。"""
-    verify_service_token(authorization=authorization)
+async def verify_service_auth(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> bool:
+    """验证对外服务 API 的 Bearer Token 或 X-API-Key。"""
+    verify_service_token(authorization=authorization, x_api_key=x_api_key)
     return True
 
 

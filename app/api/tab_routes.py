@@ -1451,14 +1451,15 @@ async def list_models_with_tab(
 
     try:
         browser = get_browser(auto_connect=False)
+        task_id = f"models_tab_{tab_index}_{time.time_ns()}"
         session = browser.tab_pool.acquire_by_index(
             tab_index,
-            task_id=f"models_tab_{tab_index}_{int(time.time() * 1000)}",
+            task_id=task_id,
             timeout=0.1,
         )
         if session is None:
             raise HTTPException(status_code=404, detail=f"标签页 #{tab_index} 不可用或不存在")
-        browser.tab_pool.release(session.id)
+        browser.tab_pool.release(session.id, expected_task_id=task_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -3192,6 +3193,7 @@ async def _run_tool_calling_async_for_tab(
     stop_checker=None,
     worker_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    legacy_function_call = bool(body.functions) and not bool(body.tools)
     tools, tool_choice = normalize_tool_request(
         tools=body.tools,
         tool_choice=body.tool_choice,
@@ -3233,7 +3235,11 @@ async def _run_tool_calling_async_for_tab(
         messages=body.messages,
         tools=tools,
         tool_choice=tool_choice,
-        parallel_tool_calls=body.parallel_tool_calls,
+        parallel_tool_calls=(
+            False
+            if legacy_function_call and body.parallel_tool_calls is None
+            else body.parallel_tool_calls
+        ),
         round_executor=_round_executor,
         stop_checker=stop_checker,
     )
@@ -3243,7 +3249,11 @@ async def _run_tool_calling_async_for_tab(
             str(parsed.get("content") or ""),
             body.stop,
         )
-    return build_tool_completion_response(body.model, parsed)
+    return build_tool_completion_response(
+        body.model,
+        parsed,
+        legacy_function_call=legacy_function_call,
+    )
 
 
 async def _run_tool_calling_async_for_route_domain(
@@ -3255,6 +3265,7 @@ async def _run_tool_calling_async_for_route_domain(
     worker_state: Optional[Dict[str, Any]] = None,
     allocation_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
+    legacy_function_call = bool(body.functions) and not bool(body.tools)
     tools, tool_choice = normalize_tool_request(
         tools=body.tools,
         tool_choice=body.tool_choice,
@@ -3297,7 +3308,11 @@ async def _run_tool_calling_async_for_route_domain(
         messages=body.messages,
         tools=tools,
         tool_choice=tool_choice,
-        parallel_tool_calls=body.parallel_tool_calls,
+        parallel_tool_calls=(
+            False
+            if legacy_function_call and body.parallel_tool_calls is None
+            else body.parallel_tool_calls
+        ),
         round_executor=_round_executor,
         stop_checker=stop_checker,
     )
@@ -3307,7 +3322,11 @@ async def _run_tool_calling_async_for_route_domain(
             str(parsed.get("content") or ""),
             body.stop,
         )
-    return build_tool_completion_response(body.model, parsed)
+    return build_tool_completion_response(
+        body.model,
+        parsed,
+        legacy_function_call=legacy_function_call,
+    )
 
 
 async def _run_tool_calling_async_for_exact_url(
@@ -3319,6 +3338,7 @@ async def _run_tool_calling_async_for_exact_url(
     worker_state: Optional[Dict[str, Any]] = None,
     resolved_tab_index: Optional[int] = None,
 ) -> Dict[str, Any]:
+    legacy_function_call = bool(body.functions) and not bool(body.tools)
     tools, tool_choice = normalize_tool_request(
         tools=body.tools,
         tool_choice=body.tool_choice,
@@ -3361,7 +3381,11 @@ async def _run_tool_calling_async_for_exact_url(
         messages=body.messages,
         tools=tools,
         tool_choice=tool_choice,
-        parallel_tool_calls=body.parallel_tool_calls,
+        parallel_tool_calls=(
+            False
+            if legacy_function_call and body.parallel_tool_calls is None
+            else body.parallel_tool_calls
+        ),
         round_executor=_round_executor,
         stop_checker=stop_checker,
     )
@@ -3371,7 +3395,11 @@ async def _run_tool_calling_async_for_exact_url(
             str(parsed.get("content") or ""),
             body.stop,
         )
-    return build_tool_completion_response(body.model, parsed)
+    return build_tool_completion_response(
+        body.model,
+        parsed,
+        legacy_function_call=legacy_function_call,
+    )
 
 
 async def _complete_tool_calling_with_tab_index(
@@ -3665,13 +3693,23 @@ async def _stream_tool_calling_with_tab_index(
     try:
         response = await _complete_tool_calling_with_tab_index(request, body, ctx, tab_index)
         message = response.get("choices", [{}])[0].get("message", {}) or {}
+        legacy_function_call = bool(body.functions) and not bool(body.tools)
+        response_tool_calls = message.get("tool_calls") or []
+        if legacy_function_call and not response_tool_calls and isinstance(message.get("function_call"), dict):
+            response_tool_calls = [
+                {"type": "function", "function": message["function_call"]}
+            ]
         parsed = {
             "content": message.get("content"),
-            "tool_calls": message.get("tool_calls") or [],
+            "tool_calls": response_tool_calls,
         }
         for chunk in _iter_stream_chunks_with_optional_usage(
             body,
-            iter_tool_stream_chunks(body.model, parsed),
+            iter_tool_stream_chunks(
+                body.model,
+                parsed,
+                legacy_function_call=legacy_function_call,
+            ),
         ):
             if await request.is_disconnected():
                 ctx.request_cancel("client_disconnected")
@@ -3703,13 +3741,23 @@ async def _stream_tool_calling_with_route_domain(
             allocation_mode=allocation_mode,
         )
         message = response.get("choices", [{}])[0].get("message", {}) or {}
+        legacy_function_call = bool(body.functions) and not bool(body.tools)
+        response_tool_calls = message.get("tool_calls") or []
+        if legacy_function_call and not response_tool_calls and isinstance(message.get("function_call"), dict):
+            response_tool_calls = [
+                {"type": "function", "function": message["function_call"]}
+            ]
         parsed = {
             "content": message.get("content"),
-            "tool_calls": message.get("tool_calls") or [],
+            "tool_calls": response_tool_calls,
         }
         for chunk in _iter_stream_chunks_with_optional_usage(
             body,
-            iter_tool_stream_chunks(body.model, parsed),
+            iter_tool_stream_chunks(
+                body.model,
+                parsed,
+                legacy_function_call=legacy_function_call,
+            ),
         ):
             if await request.is_disconnected():
                 ctx.request_cancel("client_disconnected")
@@ -3741,13 +3789,23 @@ async def _stream_tool_calling_with_exact_url(
             resolved_tab_index=resolved_tab_index,
         )
         message = response.get("choices", [{}])[0].get("message", {}) or {}
+        legacy_function_call = bool(body.functions) and not bool(body.tools)
+        response_tool_calls = message.get("tool_calls") or []
+        if legacy_function_call and not response_tool_calls and isinstance(message.get("function_call"), dict):
+            response_tool_calls = [
+                {"type": "function", "function": message["function_call"]}
+            ]
         parsed = {
             "content": message.get("content"),
-            "tool_calls": message.get("tool_calls") or [],
+            "tool_calls": response_tool_calls,
         }
         for chunk in _iter_stream_chunks_with_optional_usage(
             body,
-            iter_tool_stream_chunks(body.model, parsed),
+            iter_tool_stream_chunks(
+                body.model,
+                parsed,
+                legacy_function_call=legacy_function_call,
+            ),
         ):
             if await request.is_disconnected():
                 ctx.request_cancel("client_disconnected")

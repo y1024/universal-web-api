@@ -314,58 +314,8 @@ def _resolve_raw_tab_id(pool: Any, session: Any) -> str:
         return ""
 
 
-def _submit_raw_tab_close(pool: Any, tab_id: str, raw_tab_id: str, context_id: str, reason: str) -> bool:
-    if pool is None or not raw_tab_id or not hasattr(pool, "_close_raw_tab"):
-        return False
-
-    def _close_and_dispose() -> None:
-        closed_raw_tab = False
-        try:
-            closed_raw_tab = bool(pool._close_raw_tab(raw_tab_id))
-        except Exception as e:
-            logger.debug(f"[{tab_id}] close leaked raw tab failed: raw={raw_tab_id}, err={e}")
-
-        if closed_raw_tab and context_id and hasattr(pool, "_dispose_browser_context"):
-            try:
-                pool._dispose_browser_context(context_id)
-            except Exception as e:
-                logger.debug(f"[{tab_id}] dispose leaked browser context failed: {e}")
-
-        try:
-            condition = getattr(pool, "_condition", None)
-            if condition is not None:
-                with condition:
-                    condition.notify_all()
-        except Exception:
-            pass
-
-        logger.warning(
-            f"[{tab_id}] leaked worker raw tab close finished "
-            f"(reason={reason}, raw={raw_tab_id}, closed={closed_raw_tab})"
-        )
-
-    executor = getattr(pool, "_maintenance_executor", None)
-    if executor is not None:
-        try:
-            executor.submit(_close_and_dispose)
-            return True
-        except RuntimeError as e:
-            logger.debug(f"[{tab_id}] maintenance submit failed for leaked raw tab close: {e}")
-
-    try:
-        threading.Thread(
-            target=_close_and_dispose,
-            daemon=True,
-            name=f"tab-retire-close-{tab_id}",
-        ).start()
-        return True
-    except Exception as e:
-        logger.debug(f"[{tab_id}] failed to spawn leaked raw tab close thread: {e}")
-        return False
-
-
 def retire_bound_tab_after_worker_leak(ctx: RequestContext, reason: str) -> None:
-    """Mark the tab bound to ctx as unhealthy and close its raw target off-thread."""
+    """Mark the tab bound to ctx as unhealthy without closing its browser target."""
     tab_id = str(getattr(ctx, "tab_id", "") or "").strip()
     if not tab_id:
         return
@@ -398,7 +348,6 @@ def retire_bound_tab_after_worker_leak(ctx: RequestContext, reason: str) -> None
             session.mark_error(reason)
 
         raw_tab_id = _resolve_raw_tab_id(pool, session)
-        context_id = str(getattr(session, "browser_context_id", "") or "").strip()
 
         if pool is not None:
             try:
@@ -407,16 +356,6 @@ def retire_bound_tab_after_worker_leak(ctx: RequestContext, reason: str) -> None
                     monitor.request_stop_for_session(tab_id, reason=reason, detach=True)
             except Exception as e:
                 logger.debug(f"[{tab_id}] stop leaked tab global monitor failed: {e}")
-
-        preserve_error_tabs = bool(getattr(pool, "preserve_error_tabs", False)) if pool is not None else False
-        if preserve_error_tabs:
-            close_submitted = False
-            logger.warning(
-                f"[{tab_id}] leaked worker tab close skipped by config "
-                f"(reason={reason}, raw={raw_tab_id or '-'}, preserve_error_tabs=True)"
-            )
-        else:
-            close_submitted = _submit_raw_tab_close(pool, tab_id, raw_tab_id, context_id, reason)
 
         if pool is not None and hasattr(pool, "_condition"):
             try:
@@ -428,7 +367,7 @@ def retire_bound_tab_after_worker_leak(ctx: RequestContext, reason: str) -> None
         logger.warning(
             f"[{tab_id}] worker did not exit in time; marked tab ERROR "
             f"(request={ctx.request_id}, reason={reason}, raw={raw_tab_id or '-'}, "
-            f"close_submitted={close_submitted}, preserve_error_tabs={preserve_error_tabs})"
+            "browser_tab_retained=True)"
         )
     except Exception as e:
         logger.debug(f"retire leaked worker tab failed: {e}")

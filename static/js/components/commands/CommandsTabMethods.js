@@ -1566,11 +1566,47 @@ window.CommandsTabMethods = {
             this.bulkActionMenuOpen = next;
             if (next) {
                 this.closeGroupActionMenu();
+                this.closeCommandActionMenu();
+            }
+        },
+
+        async duplicateCommand(cmd) {
+            if (!cmd?.id || this.duplicatingCommandId) return;
+            this.duplicatingCommandId = cmd.id;
+            try {
+                const result = await this.apiRequest('/api/commands/' + encodeURIComponent(cmd.id) + '/duplicate', {
+                    method: 'POST'
+                });
+                const duplicatedName = result.command?.name || '命令副本';
+                this.$emit('notify', { type: 'success', message: '已复制命令：' + duplicatedName });
+                await this.fetchCommands();
+            } catch (e) {
+                this.$emit('notify', { type: 'error', message: '复制命令失败: ' + e.message });
+            } finally {
+                this.duplicatingCommandId = '';
             }
         },
 
         closeBulkActionMenu() {
             this.bulkActionMenuOpen = false;
+        },
+
+        toggleCommandActionMenu(commandId) {
+            const id = String(commandId || '').trim();
+            const next = this.commandActionMenuOpen === id ? '' : id;
+            this.commandActionMenuOpen = next;
+            if (next) {
+                this.closeBulkActionMenu();
+                this.closeGroupActionMenu();
+            }
+        },
+
+        closeCommandActionMenu() {
+            this.commandActionMenuOpen = '';
+        },
+
+        isCommandActionMenuOpen(commandId) {
+            return this.commandActionMenuOpen === String(commandId || '').trim();
         },
 
         isGroupActionMenuOpen(groupName) {
@@ -1581,6 +1617,7 @@ window.CommandsTabMethods = {
             const key = String(groupName || '').trim();
             if (!key) return;
             this.closeBulkActionMenu();
+            this.closeCommandActionMenu();
             this.groupActionMenuOpen = this.isGroupActionMenuOpen(key) ? '' : key;
         },
 
@@ -1672,12 +1709,16 @@ window.CommandsTabMethods = {
         clearGroupDragState() {
             this.draggingCommandId = '';
             this.dragOverGroupName = '';
+            this.dragOverCommandId = '';
+            this.dragOverCommandPosition = '';
         },
 
         beginGroupDrag(commandId, event) {
-            if (this.groupWorking) return;
+            if (this.groupWorking || this.reordering) return;
             this.draggingCommandId = String(commandId || '').trim();
             this.dragOverGroupName = '';
+            this.dragOverCommandId = '';
+            this.dragOverCommandPosition = '';
             if (this.draggingCommandId) {
                 this.showGroupTools = true;
             }
@@ -1685,6 +1726,129 @@ window.CommandsTabMethods = {
                 event.dataTransfer.setData('text/plain', this.draggingCommandId);
                 event.dataTransfer.effectAllowed = 'move';
             }
+        },
+
+        getCommandGroupKey(cmd) {
+            return String(cmd?.group_name || '').trim();
+        },
+
+        getCommandGroupPeers(cmd) {
+            const groupKey = this.getCommandGroupKey(cmd);
+            return (this.commands || []).filter(item => this.getCommandGroupKey(item) === groupKey);
+        },
+
+        canMoveCommand(cmd, direction) {
+            const peers = this.getCommandGroupPeers(cmd);
+            const index = peers.findIndex(item => item.id === cmd?.id);
+            const targetIndex = index + Number(direction || 0);
+            return index >= 0 && targetIndex >= 0 && targetIndex < peers.length;
+        },
+
+        isCommandDropTarget(commandId, position = '') {
+            if (this.dragOverCommandId !== String(commandId || '').trim()) return false;
+            return !position || this.dragOverCommandPosition === position;
+        },
+
+        getCommandDropPosition(event) {
+            const target = event?.currentTarget;
+            if (!target?.getBoundingClientRect) return 'before';
+            const rect = target.getBoundingClientRect();
+            return event.clientY < rect.top + (rect.height / 2) ? 'before' : 'after';
+        },
+
+        onCommandDragOver(commandId, event) {
+            if (this.groupWorking || this.reordering) return;
+            const sourceId = String(this.draggingCommandId || '').trim();
+            const targetId = String(commandId || '').trim();
+            if (!sourceId || !targetId || sourceId === targetId) {
+                this.dragOverCommandId = '';
+                this.dragOverCommandPosition = '';
+                return;
+            }
+
+            const source = (this.commands || []).find(item => item.id === sourceId);
+            const target = (this.commands || []).find(item => item.id === targetId);
+            if (!source || !target) {
+                this.dragOverCommandId = '';
+                this.dragOverCommandPosition = '';
+                if (event?.dataTransfer) event.dataTransfer.dropEffect = 'none';
+                return;
+            }
+
+            const sourceGroup = this.getCommandGroupKey(source);
+            const targetGroup = this.getCommandGroupKey(target);
+            if (sourceGroup !== targetGroup) {
+                this.dragOverCommandId = '';
+                this.dragOverCommandPosition = '';
+                this.dragOverGroupName = targetGroup;
+                if (event?.dataTransfer) event.dataTransfer.dropEffect = targetGroup ? 'move' : 'none';
+                return;
+            }
+
+            this.dragOverGroupName = '';
+            this.dragOverCommandId = targetId;
+            this.dragOverCommandPosition = this.getCommandDropPosition(event);
+            if (event?.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        },
+
+        onCommandDragLeave(commandId, event) {
+            if (event?.currentTarget?.contains(event.relatedTarget)) return;
+            if (this.dragOverCommandId === String(commandId || '').trim()) {
+                this.dragOverCommandId = '';
+                this.dragOverCommandPosition = '';
+            }
+        },
+
+        buildCommandGroupOrder(sourceId, targetId, position) {
+            const source = (this.commands || []).find(item => item.id === sourceId);
+            const target = (this.commands || []).find(item => item.id === targetId);
+            if (!source || !target || source.id === target.id) return null;
+            if (this.getCommandGroupKey(source) !== this.getCommandGroupKey(target)) return null;
+
+            const groupKey = this.getCommandGroupKey(source);
+            const groupIndexes = [];
+            const groupCommands = [];
+            (this.commands || []).forEach((item, index) => {
+                if (this.getCommandGroupKey(item) === groupKey) {
+                    groupIndexes.push(index);
+                    groupCommands.push(item);
+                }
+            });
+
+            const sourceIndex = groupCommands.findIndex(item => item.id === sourceId);
+            if (sourceIndex < 0) return null;
+            const reorderedGroup = groupCommands.slice();
+            const [moved] = reorderedGroup.splice(sourceIndex, 1);
+            const targetIndex = reorderedGroup.findIndex(item => item.id === targetId);
+            if (targetIndex < 0) return null;
+            reorderedGroup.splice(position === 'after' ? targetIndex + 1 : targetIndex, 0, moved);
+
+            if (reorderedGroup.every((item, index) => item.id === groupCommands[index].id)) return null;
+            const next = (this.commands || []).slice();
+            groupIndexes.forEach((commandIndex, index) => {
+                next[commandIndex] = reorderedGroup[index];
+            });
+            return next;
+        },
+
+        async onCommandDrop(commandId, event) {
+            const sourceId = String(this.draggingCommandId || event?.dataTransfer?.getData('text/plain') || '').trim();
+            const targetId = String(commandId || '').trim();
+            const source = (this.commands || []).find(item => item.id === sourceId);
+            const target = (this.commands || []).find(item => item.id === targetId);
+            const sourceGroup = this.getCommandGroupKey(source);
+            const targetGroup = this.getCommandGroupKey(target);
+            if (source && target && sourceGroup !== targetGroup && targetGroup) {
+                await this.onGroupDrop(targetGroup);
+                return;
+            }
+            const position = this.dragOverCommandId === targetId
+                ? this.dragOverCommandPosition
+                : this.getCommandDropPosition(event);
+            this.clearGroupDragState();
+            if (!sourceId || !targetId || this.groupWorking || this.reordering) return;
+            const next = this.buildCommandGroupOrder(sourceId, targetId, position);
+            if (next) await this.persistCommandOrder(next);
         },
 
         isGroupDropTarget(groupName) {
@@ -1703,7 +1867,8 @@ window.CommandsTabMethods = {
             }
         },
 
-        onGroupDragLeave(groupName) {
+        onGroupDragLeave(groupName, event) {
+            if (event?.currentTarget?.contains(event.relatedTarget)) return;
             const name = String(groupName || '').trim();
             if (!name) return;
             if (this.dragOverGroupName === name) {
@@ -2022,6 +2187,30 @@ window.CommandsTabMethods = {
             }
         },
 
+        async duplicateGroup(groupName) {
+            const name = String(groupName || '').trim();
+            if (!name || this.groupWorking) return;
+            this.groupWorking = true;
+            this.groupActionMenuOpen = '';
+            try {
+                const result = await this.apiRequest('/api/command-groups/' + encodeURIComponent(name) + '/duplicate', {
+                    method: 'POST'
+                });
+                const duplicatedName = result.group_name || '命令组副本';
+                this.selectedExistingGroupName = duplicatedName;
+                this.pendingGroupName = duplicatedName;
+                this.$emit('notify', {
+                    type: 'success',
+                    message: '已复制命令组：' + duplicatedName + '（' + Number(result.count || 0) + ' 条）'
+                });
+                await this.fetchCommands();
+            } catch (e) {
+                this.$emit('notify', { type: 'error', message: '复制命令组失败: ' + e.message });
+            } finally {
+                this.groupWorking = false;
+            }
+        },
+
         applyPageSize() {
             const value = Number(this.pageSize);
             if (!Number.isFinite(value) || value <= 0) {
@@ -2047,16 +2236,21 @@ window.CommandsTabMethods = {
 
         async moveCommand(cmd, direction) {
             if (this.reordering) return;
-            const index = this.commands.findIndex(item => item.id === cmd.id);
-            if (index < 0) return;
+            const peers = this.getCommandGroupPeers(cmd);
+            const index = peers.findIndex(item => item.id === cmd?.id);
+            const target = peers[index + direction];
+            if (!target) return;
+            const next = this.buildCommandGroupOrder(
+                cmd.id,
+                target.id,
+                direction < 0 ? 'before' : 'after'
+            );
+            if (next) await this.persistCommandOrder(next);
+        },
 
-            const targetIndex = index + direction;
-            if (targetIndex < 0 || targetIndex >= this.commands.length) return;
-
+        async persistCommandOrder(next) {
+            if (this.reordering || !Array.isArray(next)) return;
             const previous = this.commands.slice();
-            const next = this.commands.slice();
-            const [moved] = next.splice(index, 1);
-            next.splice(targetIndex, 0, moved);
             this.commands = next;
             this.reordering = true;
 

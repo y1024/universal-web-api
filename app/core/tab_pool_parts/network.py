@@ -360,13 +360,15 @@ class _GlobalNetworkInterceptionManager:
                 stop_thread.start()
                 stop_thread.join(timeout=cls.LISTENER_STOP_TIMEOUT_SEC)
                 if stop_thread.is_alive():
-                    reset_ok = cls._force_reset_listen_state(tab)
                     logger.warning(
                         f"[GlobalNet] listen.stop timed out after "
                         f"{cls.LISTENER_STOP_TIMEOUT_SEC:.1f}s; "
-                        f"driver_stop_skipped=True, forced_reset={reset_ok}"
+                        "listener remains unavailable"
                     )
-                    return reset_ok and not cls._listener_is_marked_active(listener)
+                    # The stop thread can still mutate the listener when it eventually
+                    # returns. Never report success or reset its private fields here,
+                    # otherwise a new owner could start listening before that late write.
+                    return False
                 if stop_result["error"] is not None:
                     raise stop_result["error"]
         except Exception as e:
@@ -865,7 +867,12 @@ class _GlobalNetworkInterceptionManager:
                     else:
                         logger.debug(f"[GlobalNet] wait 异常: {session_id}, err={e}")
                     listening = False
-                    self._safe_stop_listen(tab)
+                    if not self._safe_stop_listen(tab):
+                        logger.warning(
+                            f"[GlobalNet] listener could not stop safely; "
+                            f"ending worker: {session_id}"
+                        )
+                        break
                     stop_event.wait(self._retry_delay)
                     continue
 

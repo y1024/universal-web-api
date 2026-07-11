@@ -205,21 +205,8 @@ class CommandEngineActionsMixin:
         }
 
     def _run_command_js(self, tab: Any, code: Any) -> Any:
-        result = tab.run_js(code)
-        if result is not None:
-            return result
-
         wrapped_code = self._wrap_run_js_for_return(code)
-        if not wrapped_code:
-            return result
-
-        try:
-            wrapped_result = tab.run_js(wrapped_code)
-            logger.debug("[CMD] JS 首次返回空，已自动补 return 重试一次")
-            return wrapped_result
-        except Exception as e:
-            logger.debug(f"[CMD] JS return 包装重试失败（忽略）: {e}")
-            return result
+        return tab.run_js(wrapped_code if wrapped_code is not None else code)
 
     def _execute_command_async(
         self,
@@ -256,7 +243,7 @@ class CommandEngineActionsMixin:
             acquired = False
             moved_running = False
             focus_emulation_applied = False
-            cmd_task_id = f"cmd_{command['id'][:8]}_{int(time.time() * 1000)}"
+            cmd_task_id = f"cmd_{command['id'][:8]}_{time.time_ns()}"
             trigger = command.get("trigger", {}) or {}
             acquire_timeout = max(1.0, self._coerce_float(trigger.get("acquire_timeout_sec", 20), 20.0))
             deadline = time.time() + acquire_timeout
@@ -356,9 +343,17 @@ class CommandEngineActionsMixin:
                         browser = self._get_browser()
                         pool = getattr(browser, "_tab_pool", None)
                         if pool is not None and hasattr(pool, "release"):
-                            pool.release(session.id, check_triggers=False)
+                            pool.release(
+                                session.id,
+                                check_triggers=False,
+                                expected_task_id=cmd_task_id,
+                            )
                         else:
-                            session.release(clear_page=False, check_triggers=False)
+                            session.release(
+                                clear_page=False,
+                                check_triggers=False,
+                                expected_task_id=cmd_task_id,
+                            )
                     except Exception as e:
                         logger.debug(f"[CMD] 命令释放标签页失败（忽略）: {e}")
                     try:
@@ -603,7 +598,7 @@ return (() => {
     const rect = visibleRect(el);
     if (!rect) return;
     const text = describe(el);
-    const checkboxLike = /checkbox|anchor|recaptcha|turnstile|challenge|cloudflare/.test(text);
+    const checkboxLike = /checkbox|anchor|recaptcha|hcaptcha|turnstile|challenge|cloudflare/.test(text);
     let clickX = rect.left + rect.width / 2;
     let clickY = rect.top + rect.height / 2;
     if (checkboxLike || rect.width >= 120) {
@@ -625,12 +620,17 @@ return (() => {
 
   for (const el of document.querySelectorAll('iframe')) {
     const text = describe(el);
+    const rect = visibleRect(el);
+    const isExpandedImageChallenge = !!rect && rect.width >= 360 && rect.height >= 300;
+    if (isExpandedImageChallenge) continue;
     if (/recaptcha|google\.com\/recaptcha/.test(text)) pushCandidate(el, 'recaptcha_iframe', 100);
+    else if (/hcaptcha|hcaptcha\.com/.test(text)) pushCandidate(el, 'hcaptcha_iframe', 95);
     else if (/turnstile|challenges\.cloudflare\.com|cloudflare|challenge/.test(text)) pushCandidate(el, 'cloudflare_iframe', 90);
   }
 
   for (const selector of [
     '.g-recaptcha',
+    '.h-captcha',
     '.cf-turnstile',
     '[data-sitekey]',
     '[role="checkbox"]',

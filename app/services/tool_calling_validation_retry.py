@@ -12,6 +12,8 @@ import re
 from collections.abc import Sequence
 from typing import Any, Dict, List, Optional
 
+from jsonschema.validators import validator_for
+
 from app.services.tool_calling_common import (
     _LEGACY_XML_ARG_TAG,
     _LEGACY_XML_CALL_TAG,
@@ -72,7 +74,7 @@ def _get_partial_tool_success_enabled() -> bool:
 
 
 def _get_tool_failure_degrade_enabled() -> bool:
-    raw_value = str(os.getenv("TOOL_CALLING_DEGRADE_ON_FAILURE", "1") or "1").strip().lower()
+    raw_value = str(os.getenv("TOOL_CALLING_DEGRADE_ON_FAILURE", "0") or "0").strip().lower()
     return raw_value not in {"0", "false", "no", "off"}
 
 
@@ -350,24 +352,37 @@ def _build_tool_calling_degraded_response(
     failure_summary: str = "",
 ) -> Dict[str, Any]:
     if isinstance(inspection, dict):
-        rejected_tool_calls = [
-            item for item in (inspection.get("rejected_tool_calls") or [])
+        accepted_tool_calls = [
+            item for item in (inspection.get("accepted_tool_calls") or [])
             if isinstance(item, dict)
         ]
-        if rejected_tool_calls:
+        blocking_codes = {
+            "tool_choice_none",
+            "parallel_tool_calls_disabled",
+            "required_tool_missing",
+            "wrong_required_tool",
+            "tool_required_but_missing",
+            "malformed_tool_payload",
+        }
+        has_blocking_error = any(
+            str(item.get("code") or "") in blocking_codes
+            for item in (inspection.get("errors") or [])
+            if isinstance(item, dict)
+        )
+        if accepted_tool_calls and not has_blocking_error:
             logger.warning(
-                "[tool_calling] 修复耗尽后保留原始 tool_calls 以闭合客户端工具协议 "
-                f"count={len(rejected_tool_calls)}"
+                "[tool_calling] 修复耗尽后仅保留通过校验的 tool_calls "
+                f"count={len(accepted_tool_calls)}"
             )
             return {
                 "mode": "tool_calls",
-                "content": None,
-                "tool_calls": copy.deepcopy(rejected_tool_calls),
+                "content": parsed.get("content") if isinstance(parsed, dict) else None,
+                "tool_calls": copy.deepcopy(accepted_tool_calls),
             }
 
     summary = str(failure_summary or "tool_call_validation_failed").strip()
     logger.warning(
-        "[tool_calling] 修复耗尽后没有可保留的 tool_calls，拒绝降级为普通文本 "
+        "[tool_calling] 修复耗尽后没有通过校验的 tool_calls，拒绝降级 "
         f"原因={summary}"
     )
     raise RuntimeError(f"tool_call_validation_exhausted: {summary}")
@@ -464,7 +479,65 @@ def _validate_tool_arguments_against_schema(
 ) -> List[str]:
     if not isinstance(schema, dict):
         return []
-    return _validate_json_schema_value(args, schema, path=path)
+    ref_errors = _validate_local_schema_refs(schema, path)
+    if ref_errors:
+        return ref_errors
+    finite_errors = _validate_finite_json_numbers(args, path)
+    if finite_errors:
+        return finite_errors
+    try:
+        validator_class = validator_for(schema)
+        validator_class.check_schema(schema)
+        validation_errors = sorted(
+            validator_class(schema).iter_errors(args),
+            key=lambda item: tuple(str(part) for part in item.absolute_path),
+        )
+    except Exception as e:
+        return [f"{path} could not be validated against its JSON Schema: {e}"]
+
+    errors: List[str] = []
+    for error in validation_errors:
+        location = path
+        for part in error.absolute_path:
+            if isinstance(part, int):
+                location += f"[{part}]"
+            else:
+                location += f".{part}"
+        errors.append(f"{location} {error.message}")
+    return errors
+
+
+def _validate_local_schema_refs(value: Any, path: str) -> List[str]:
+    if isinstance(value, dict):
+        ref_value = value.get("$ref")
+        if isinstance(ref_value, str) and not ref_value.startswith("#"):
+            return [f"{path} contains an unsupported external JSON Schema reference."]
+        errors: List[str] = []
+        for item in value.values():
+            errors.extend(_validate_local_schema_refs(item, path))
+        return errors
+    if isinstance(value, list):
+        errors = []
+        for item in value:
+            errors.extend(_validate_local_schema_refs(item, path))
+        return errors
+    return []
+
+
+def _validate_finite_json_numbers(value: Any, path: str) -> List[str]:
+    if isinstance(value, float) and not math.isfinite(value):
+        return [f"{path} must be a finite number."]
+    if isinstance(value, dict):
+        errors: List[str] = []
+        for key, item in value.items():
+            errors.extend(_validate_finite_json_numbers(item, f"{path}.{key}"))
+        return errors
+    if isinstance(value, list):
+        errors = []
+        for index, item in enumerate(value):
+            errors.extend(_validate_finite_json_numbers(item, f"{path}[{index}]"))
+        return errors
+    return []
 
 
 def _walk_json_shape(
@@ -569,7 +642,7 @@ def _validate_json_schema_value(value: Any, schema: Dict[str, Any], path: str) -
                 pass
 
     if _is_number_like(value):
-        if not math.isfinite(float(value)):
+        if isinstance(value, float) and not math.isfinite(value):
             errors.append(f"{path} must be a finite number.")
             return errors
         minimum = schema.get("minimum")

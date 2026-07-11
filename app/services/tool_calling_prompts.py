@@ -115,9 +115,9 @@ def has_tool_calling_request(
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role", "") or "").strip().lower()
-        if role == "tool":
+        if role in {"tool", "function"}:
             return True
-        if msg.get("tool_calls"):
+        if msg.get("tool_calls") or msg.get("function_call"):
             return True
 
     return False
@@ -160,9 +160,23 @@ def build_browser_messages_for_tools(
             browser_messages.append({"role": "user", "content": payload})
             continue
 
-        if role == "assistant" and msg.get("tool_calls"):
+        if role == "assistant" and (msg.get("tool_calls") or msg.get("function_call")):
             tool_calls_payload = []
-            for item in msg.get("tool_calls") or []:
+            raw_tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
+            legacy_function_call = (
+                msg.get("function_call")
+                if isinstance(msg.get("function_call"), dict)
+                else None
+            )
+            if not raw_tool_calls and legacy_function_call is not None:
+                raw_tool_calls = [
+                    {
+                        "id": msg.get("id"),
+                        "type": "function",
+                        "function": legacy_function_call,
+                    }
+                ]
+            for item in raw_tool_calls:
                 if not isinstance(item, dict):
                     continue
                 function_data = item.get("function") if isinstance(item.get("function"), dict) else {}

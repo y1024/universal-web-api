@@ -1623,6 +1623,51 @@ return (function() {
             candidate = f"{root}{next_num}"
         return candidate
 
+    @staticmethod
+    def _ensure_unique_copy_name(raw_name: Any, existing_names: set[str], max_length: int = 100) -> str:
+        source_name = str(raw_name or "").strip() or "未命名"
+        root = re.sub(r"\s*-\s*副本(?:\s+\d+)?$", "", source_name).strip() or source_name
+
+        def build_candidate(copy_number: int) -> str:
+            suffix = " - 副本" if copy_number == 1 else f" - 副本 {copy_number}"
+            available = max(1, max_length - len(suffix))
+            return f"{root[:available].rstrip()}{suffix}"
+
+        copy_number = 1
+        candidate = build_candidate(copy_number)
+        while candidate in existing_names:
+            copy_number += 1
+            candidate = build_candidate(copy_number)
+        return candidate
+
+    @staticmethod
+    def _remap_duplicated_command_references(
+        command: Dict[str, Any],
+        command_id_map: Dict[str, str],
+        source_group_name: str = "",
+        target_group_name: str = "",
+    ) -> None:
+        trigger = command.get("trigger")
+        if isinstance(trigger, dict):
+            source_id = str(trigger.get("command_id") or "").strip()
+            if source_id in command_id_map:
+                trigger["command_id"] = command_id_map[source_id]
+
+            source_ids = trigger.get("command_ids")
+            if isinstance(source_ids, list):
+                trigger["command_ids"] = [
+                    command_id_map.get(str(command_id or "").strip(), command_id)
+                    for command_id in source_ids
+                ]
+
+        if not source_group_name or not target_group_name:
+            return
+        for action in command.get("actions") or []:
+            if not isinstance(action, dict) or action.get("type") != "execute_command_group":
+                continue
+            if str(action.get("group_name") or "").strip() == source_group_name:
+                action["group_name"] = target_group_name
+
     # ================= CRUD =================
 
     def _load_commands(self) -> List[Dict]:
@@ -1698,6 +1743,102 @@ return (function() {
 
         logger.info(f"[OK] 命令已添加: {command.get('name')} ({command['id']})")
         return copy.deepcopy(command)
+
+    def duplicate_command(self, command_id: str) -> Optional[Dict]:
+        """复制单条命令，并将副本紧跟在原命令之后。"""
+        command_key = str(command_id or "").strip()
+        if not command_key:
+            return None
+
+        with self._commands_lock:
+            commands = self._load_commands()
+            source_index = next(
+                (index for index, item in enumerate(commands) if item.get("id") == command_key),
+                -1,
+            )
+            if source_index < 0:
+                return None
+
+            duplicated = copy.deepcopy(commands[source_index])
+            duplicated["id"] = _new_command_id()
+            duplicated["name"] = self._ensure_unique_copy_name(
+                duplicated.get("name"),
+                {str(item.get("name") or "").strip() for item in commands},
+            )
+            self._normalize_command_logging(duplicated)
+            commands.insert(source_index + 1, duplicated)
+            if not self._save_commands(commands):
+                return None
+
+        logger.info(f"[OK] 命令已复制: {command_key} -> {duplicated['id']}")
+        return copy.deepcopy(duplicated)
+
+    def duplicate_group(self, group_name: str) -> Optional[Dict[str, Any]]:
+        """复制整个命令组，并重映射副本组内的命令引用。"""
+        source_group = self._normalize_group_name(group_name)
+        if not source_group:
+            return None
+
+        with self._commands_lock:
+            commands = self._load_commands()
+            source_commands = [
+                item
+                for item in commands
+                if self._normalize_group_name(item.get("group_name")) == source_group
+            ]
+            if not source_commands:
+                return None
+
+            existing_group_names = {
+                self._normalize_group_name(item.get("group_name"))
+                for item in commands
+                if self._normalize_group_name(item.get("group_name"))
+            }
+            target_group = self._ensure_unique_copy_name(source_group, existing_group_names)
+            command_id_map = {
+                str(item.get("id") or "").strip(): _new_command_id()
+                for item in source_commands
+                if str(item.get("id") or "").strip()
+            }
+            existing_command_names = {
+                str(item.get("name") or "").strip()
+                for item in commands
+                if str(item.get("name") or "").strip()
+            }
+            duplicated_commands: List[Dict[str, Any]] = []
+
+            for source in source_commands:
+                duplicated = copy.deepcopy(source)
+                source_id = str(source.get("id") or "").strip()
+                duplicated["id"] = command_id_map.get(source_id) or _new_command_id()
+                duplicated["name"] = self._ensure_unique_copy_name(
+                    source.get("name"),
+                    existing_command_names,
+                )
+                existing_command_names.add(duplicated["name"])
+                duplicated["group_name"] = target_group
+                self._remap_duplicated_command_references(
+                    duplicated,
+                    command_id_map,
+                    source_group_name=source_group,
+                    target_group_name=target_group,
+                )
+                self._normalize_command_logging(duplicated)
+                duplicated_commands.append(duplicated)
+
+            commands.extend(duplicated_commands)
+            if not self._save_commands(commands):
+                return None
+
+        logger.info(
+            f"[OK] 命令组已复制: {source_group} -> {target_group} "
+            f"({len(duplicated_commands)} 条命令)"
+        )
+        return {
+            "group_name": target_group,
+            "commands": copy.deepcopy(duplicated_commands),
+            "count": len(duplicated_commands),
+        }
 
     def update_command(self, command_id: str, updates: Dict) -> Optional[Dict]:
         updates = dict(updates or {})
@@ -1938,7 +2079,7 @@ return (function() {
         if not chain_seed and source_command_id:
             chain_seed = [source_command_id]
         group_acquired = False
-        group_task_id = f"group_{normalized_group}_{int(time.time() * 1000)}"
+        group_task_id = f"group_{normalized_group}_{uuid.uuid4().hex[:12]}"
         can_acquire = hasattr(session, "acquire_for_command")
         if effective_policy != "inherit_session":
             if not can_acquire:
@@ -2011,9 +2152,17 @@ return (function() {
                     browser = self._get_browser()
                     pool = getattr(browser, "_tab_pool", None)
                     if pool is not None and hasattr(pool, "release"):
-                        pool.release(session.id, check_triggers=False)
+                        pool.release(
+                            session.id,
+                            check_triggers=False,
+                            expected_task_id=group_task_id,
+                        )
                     else:
-                        session.release(clear_page=False, check_triggers=False)
+                        session.release(
+                            clear_page=False,
+                            check_triggers=False,
+                            expected_task_id=group_task_id,
+                        )
                 except Exception as e:
                     logger.debug(f"[CMD] 命令组释放标签页失败（忽略）: {e}")
 

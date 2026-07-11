@@ -108,7 +108,7 @@ class BrowserConnectionMixin:
             return
         self._tab_pool = None
         try:
-            pool.shutdown(close_browser_tabs=False)
+            pool.shutdown()
             logger.info(f"[BrowserCore] 已重置旧 TabPool ({reason})")
         except Exception as e:
             logger.warning(f"[BrowserCore] 重置旧 TabPool 失败 ({reason}): {e}")
@@ -514,7 +514,7 @@ class BrowserConnectionMixin:
         Raises:
             BrowserConnectionError: 无法获取可用标签页时抛出
         """
-        task_id = f"temp_{int(time.time() * 1000)}"
+        task_id = f"temp_{time.time_ns()}"
         session = None
     
         try:
@@ -528,7 +528,7 @@ class BrowserConnectionMixin:
         
         finally:
             if session is not None:
-                self.tab_pool.release(session.id)
+                self.tab_pool.release(session.id, expected_task_id=task_id)
                 logger.debug(f"[{session.id}] 临时标签页已释放")
 
     def get_pool_status(self) -> Dict:

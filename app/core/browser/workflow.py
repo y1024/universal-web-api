@@ -450,7 +450,7 @@ class BrowserWorkflowMixin:
             return
         
         if task_id is None:
-            task_id = f"task_{int(time.time() * 1000)}"
+            task_id = f"task_{time.time_ns()}"
         effective_stop_checker = stop_checker or self._should_stop_checker
         
         session = None
@@ -526,7 +526,7 @@ class BrowserWorkflowMixin:
             return
         
         if task_id is None:
-            task_id = f"tab{tab_index}_{int(time.time() * 1000)}"
+            task_id = f"tab{tab_index}_{time.time_ns()}"
         effective_stop_checker = stop_checker or self._should_stop_checker
         
         session = None
@@ -615,7 +615,7 @@ class BrowserWorkflowMixin:
 
         if task_id is None:
             safe_route_key = normalized_route_domain.replace(".", "_")
-            task_id = f"url_{safe_route_key}_{int(time.time() * 1000)}"
+            task_id = f"url_{safe_route_key}_{time.time_ns()}"
         effective_stop_checker = stop_checker or self._should_stop_checker
 
         session = None
@@ -708,7 +708,7 @@ class BrowserWorkflowMixin:
             return
 
         if task_id is None:
-            task_id = f"tab_url_{int(time.time() * 1000)}"
+            task_id = f"tab_url_{time.time_ns()}"
         effective_stop_checker = stop_checker or self._should_stop_checker
 
         session = None
@@ -730,7 +730,12 @@ class BrowserWorkflowMixin:
                 if session is not None:
                     cached_url, _cached_domain = session.get_cached_route_snapshot()
                     if not tab_url_matches(normalized_exact_url, cached_url):
-                        self.tab_pool.release(session.id, check_triggers=False, rollback_request_count=True)
+                        self.tab_pool.release(
+                            session.id,
+                            check_triggers=False,
+                            rollback_request_count=True,
+                            expected_task_id=task_id,
+                        )
                         session = None
                         yield self.formatter.pack_error(
                             f"URL 路由 '{normalized_exact_url}' 已不匹配标签页 #{resolved_index}",
