@@ -20,6 +20,7 @@ from app.core.page_lifecycle import BACKGROUND_WAKE_CDP_TIMEOUT
 from app.core.workflow import WorkflowExecutor
 from app.core.tab_pool import TabSession
 from app.models.schemas import get_modality_run_policy, is_modality_enabled
+from app.services.arena_direct_models import is_arena_direct_model_id
 
 if TYPE_CHECKING:
     from .main import BrowserCore
@@ -431,6 +432,7 @@ class BrowserWorkflowMixin:
         stop_checker: Optional[Callable[[], bool]] = None,
         workflow_priority: Optional[int] = None,
         allow_media_postprocess: bool = True,
+        requested_model: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """
         工作流执行入口（v2.0 改进版）
@@ -480,6 +482,7 @@ class BrowserWorkflowMixin:
                     stop_checker=effective_stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
             else:
                 yield from self._execute_workflow_non_stream(
@@ -488,6 +491,7 @@ class BrowserWorkflowMixin:
                     stop_checker=effective_stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
         
         finally:
@@ -513,6 +517,7 @@ class BrowserWorkflowMixin:
         stop_checker: Optional[Callable[[], bool]] = None,
         workflow_priority: Optional[int] = None,
         allow_media_postprocess: bool = True,
+        requested_model: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """使用指定编号的标签页执行工作流"""
         is_valid, error_msg, sanitized_messages = MessageValidator.validate(messages)
@@ -557,6 +562,7 @@ class BrowserWorkflowMixin:
                     stop_checker=effective_stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
             else:
                 yield from self._execute_workflow_non_stream(
@@ -566,6 +572,7 @@ class BrowserWorkflowMixin:
                     stop_checker=effective_stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
         
         finally:
@@ -592,6 +599,7 @@ class BrowserWorkflowMixin:
         workflow_priority: Optional[int] = None,
         allow_media_postprocess: bool = True,
         allocation_mode: Optional[str] = None,
+        requested_model: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """使用指定域名路由匹配的标签页执行工作流。"""
         is_valid, error_msg, sanitized_messages = MessageValidator.validate(messages)
@@ -651,6 +659,7 @@ class BrowserWorkflowMixin:
                     stop_checker=effective_stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
             else:
                 yield from self._execute_workflow_non_stream(
@@ -660,8 +669,102 @@ class BrowserWorkflowMixin:
                     stop_checker=effective_stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
 
+        finally:
+            if session:
+                self._release_workflow_session(
+                    session,
+                    effective_stop_checker=effective_stop_checker,
+                    task_id=task_id,
+                )
+                try:
+                    from app.services.command_engine import command_engine
+                    command_engine.schedule_deferred_workflow_commands(session, delay_sec=0.25)
+                except Exception:
+                    pass
+
+    def execute_workflow_for_route_group(
+        self,
+        group_id: str,
+        messages: List[Dict],
+        stream: bool = True,
+        task_id: str = None,
+        preset_name: Optional[str] = None,
+        stop_checker: Optional[Callable[[], bool]] = None,
+        workflow_priority: Optional[int] = None,
+        allow_media_postprocess: bool = True,
+        allocation_mode: Optional[str] = None,
+        requested_model: Optional[str] = None,
+    ) -> Generator[str, None, None]:
+        """Execute a workflow on an atomically acquired route-group member."""
+        is_valid, error_msg, sanitized_messages = MessageValidator.validate(messages)
+        if not is_valid:
+            yield self.formatter.pack_error(
+                f"无效请求: {error_msg}",
+                error_type="invalid_request_error",
+                code="invalid_messages",
+            )
+            return
+
+        normalized_group_id = str(group_id or "").strip().lower()
+        if not normalized_group_id:
+            yield self.formatter.pack_error(
+                "标签页路由组不能为空",
+                error_type="invalid_request_error",
+                code="invalid_route_group",
+            )
+            return
+
+        if task_id is None:
+            task_id = f"group_{normalized_group_id}_{time.time_ns()}"
+        effective_stop_checker = stop_checker or self._should_stop_checker
+
+        session = None
+        try:
+            session = self.tab_pool.acquire_by_route_group(
+                normalized_group_id,
+                task_id,
+                timeout=60,
+                allocation_mode=allocation_mode,
+            )
+            if session is None:
+                yield self.formatter.pack_error(
+                    f"标签页路由组 '{normalized_group_id}' 没有可用成员",
+                    error_type="not_found_error",
+                    code="route_group_not_available",
+                )
+                yield self.formatter.pack_finish()
+                return
+
+            self._bind_request_tab_id(task_id, session)
+            effective_stop_checker = self._build_task_ownership_stop_checker(
+                session,
+                task_id,
+                effective_stop_checker,
+            )
+
+            if stream:
+                yield from self._execute_workflow_stream(
+                    session,
+                    sanitized_messages,
+                    preset_name=preset_name,
+                    stop_checker=effective_stop_checker,
+                    workflow_priority=workflow_priority,
+                    allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
+                )
+            else:
+                yield from self._execute_workflow_non_stream(
+                    session,
+                    sanitized_messages,
+                    preset_name=preset_name,
+                    stop_checker=effective_stop_checker,
+                    workflow_priority=workflow_priority,
+                    allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
+                )
         finally:
             if session:
                 self._release_workflow_session(
@@ -686,6 +789,7 @@ class BrowserWorkflowMixin:
         workflow_priority: Optional[int] = None,
         allow_media_postprocess: bool = True,
         resolved_tab_index: Optional[int] = None,
+        requested_model: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """使用标签页完整 URL 严格匹配的唯一标签页执行工作流。"""
         is_valid, error_msg, sanitized_messages = MessageValidator.validate(messages)
@@ -771,6 +875,7 @@ class BrowserWorkflowMixin:
                     stop_checker=effective_stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
             else:
                 yield from self._execute_workflow_non_stream(
@@ -780,6 +885,7 @@ class BrowserWorkflowMixin:
                     stop_checker=effective_stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
 
         finally:
@@ -830,6 +936,7 @@ class BrowserWorkflowMixin:
         stop_checker: Optional[Callable[[], bool]] = None,
         workflow_priority: Optional[int] = None,
         allow_media_postprocess: bool = True,
+        requested_model: Optional[str] = None,
     ) -> Generator[str, None, None]:
         max_terminal_retries = 1
         attempt = 0
@@ -845,6 +952,7 @@ class BrowserWorkflowMixin:
                     stop_checker=stop_checker,
                     workflow_priority=workflow_priority,
                     allow_media_postprocess=allow_media_postprocess,
+                    requested_model=requested_model,
                 )
                 saw_content = False
                 retry_requested = False
@@ -1178,6 +1286,7 @@ class BrowserWorkflowMixin:
         stop_checker: Optional[Callable[[], bool]] = None,
         workflow_priority: Optional[int] = None,
         allow_media_postprocess: bool = True,
+        requested_model: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """流式工作流执行（v2.0）"""
         tab = session.tab
@@ -1266,6 +1375,8 @@ class BrowserWorkflowMixin:
         
         config_engine = self._get_config_engine()
         effective_preset_name = preset_name if preset_name is not None else session.preset_name
+        if domain == "arena.ai" and is_arena_direct_model_id(requested_model):
+            effective_preset_name = "主预设-直连模式"
         resolved_preset_name = effective_preset_name or config_engine.get_default_preset(domain) or "主预设"
         site_config = config_engine.get_site_config(domain, tab.html, preset_name=effective_preset_name)
         if not site_config:
@@ -1315,7 +1426,7 @@ class BrowserWorkflowMixin:
                 f"preset={resolved_preset_name}, threshold={conversation_threshold}s"
             )
         
-        image_config = site_config.get("image_extraction", {})
+        image_config = dict(site_config.get("image_extraction", {}) or {})
         modalities = image_config.get("modalities") or {}
         image_extraction_enabled = bool(image_config.get("enabled", False)) or any(
             is_modality_enabled(modalities, key) for key in ("image", "audio", "video")
@@ -1480,7 +1591,8 @@ class BrowserWorkflowMixin:
 
         context = {
             "prompt": prompt_text,
-            "images": user_images
+            "images": user_images,
+            "model": str(requested_model or "").strip(),
         }
         
         extractor = config_engine.get_site_extractor(domain, preset_name=effective_preset_name)
@@ -1541,6 +1653,8 @@ class BrowserWorkflowMixin:
             setattr(session, "_workflow_user_stop_logged", False)
         streamed_text_parts: List[str] = []
         conversation_activity_marked = False
+        media_dom_baseline: Optional[Dict[str, Any]] = None
+        media_dom_baseline_captured = False
         
         try:
             with executor.workflow_execution_scope():
@@ -1625,6 +1739,7 @@ class BrowserWorkflowMixin:
                     target_key = step.get('target', '')
                     optional = step.get('optional', False)
                     param_value = step.get('value')
+                    execution_policy = step.get('execution')
                     action_upper = str(action or "").strip().upper()
                     target_key_normalized = str(target_key or "").strip().lower()
 
@@ -1703,6 +1818,25 @@ class BrowserWorkflowMixin:
                             )
                             break
 
+                    submits_request = (
+                        self._step_submits_conversation_request(action, target_key, param_value)
+                        or action_upper == "PAGE_FETCH"
+                    )
+                    if (
+                        submits_request
+                        and image_extraction_enabled
+                        and not media_dom_baseline_captured
+                    ):
+                        media_dom_baseline_captured = True
+                        media_dom_baseline = self._capture_media_dom_baseline(tab, image_config)
+                        if media_dom_baseline:
+                            image_config["request_baseline_token"] = str(
+                                media_dom_baseline.get("token") or ""
+                            )
+                            image_config["request_baseline_property"] = str(
+                                media_dom_baseline.get("property") or ""
+                            )
+
                     try:
                         chunk_count = 0
                         delta_chars = 0
@@ -1712,7 +1846,8 @@ class BrowserWorkflowMixin:
                             target_key=target_key,
                             value=param_value,
                             optional=optional,
-                            context=context
+                            context=context,
+                            execution=execution_policy,
                         ):
                             chunk_count += 1
                             delta_content = self._extract_stream_delta_content(chunk)
@@ -1904,6 +2039,11 @@ class BrowserWorkflowMixin:
                                 for item in dom_stream_media_items
                                 if isinstance(item, dict)
                             ]
+                            media_items = self._merge_dom_and_stream_media_items(
+                                media_items,
+                                stream_media_items or [],
+                                image_config,
+                            )
                             image_items = [item for item in media_items if item.get("media_type") == "image"]
                             if image_items:
                                 localized_images = self._localize_images_with_background_cache(
@@ -1938,6 +2078,7 @@ class BrowserWorkflowMixin:
                                 media_generation_state=media_generation_state,
                                 stream_media_items=stream_media_items,
                                 direct_modalities=direct_modalities,
+                                media_dom_baseline=media_dom_baseline,
                             )
                     
                     if media_items:
@@ -2009,6 +2150,7 @@ class BrowserWorkflowMixin:
         stop_checker: Optional[Callable[[], bool]] = None,
         workflow_priority: Optional[int] = None,
         allow_media_postprocess: bool = True,
+        requested_model: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """非流式工作流执行"""
         collected_content = []
@@ -2022,6 +2164,7 @@ class BrowserWorkflowMixin:
             stop_checker=stop_checker,
             workflow_priority=workflow_priority,
             allow_media_postprocess=allow_media_postprocess,
+            requested_model=requested_model,
         )
 
         try:

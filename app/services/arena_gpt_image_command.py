@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import random
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+from PIL import Image
 
 
 GPT_IMAGE_MARKERS = (
     b"gpt-image",
     b"OpenAI Media Service API",
     b"OpenAI OpCo, LLC",
+)
+
+ARENA_RESULT_IMAGE_SELECTOR = (
+    "img.transition-opacity.duration-500.opacity-100.aspect-square.object-cover"
 )
 
 
@@ -106,16 +113,21 @@ def _new_image_chat_ready(tab: Any, redirect_url: str) -> bool:
 
 
 def _visible_image_sources(tab: Any) -> list[str]:
-    script = """
-        return Array.from(document.images)
-            .filter((img) => {
+    script = f"""
+        const collect = (images) => Array.from(images)
+            .filter((img) => {{
                 const r = img.getBoundingClientRect();
                 const s = getComputedStyle(img);
                 return img.isConnected && img.complete && img.naturalWidth >= 256
                     && img.naturalHeight >= 256 && r.width >= 120 && r.height >= 120
-                    && r.bottom > 0 && r.right > 0 && r.top < innerHeight
                     && s.display !== 'none' && s.visibility !== 'hidden';
-            })
+            }});
+        const resultImages = collect(document.querySelectorAll(
+            {ARENA_RESULT_IMAGE_SELECTOR!r}
+        ));
+        const images = resultImages.length ? resultImages : collect(document.images);
+        return images
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)
             .map((img) => img.currentSrc || img.src)
             .filter(Boolean);
     """
@@ -123,6 +135,53 @@ def _visible_image_sources(tab: Any) -> list[str]:
         return list(dict.fromkeys(str(item) for item in (tab.run_js(script) or []) if item))
     except Exception:
         return []
+
+
+def _image_signatures(payload: bytes) -> dict[str, Any]:
+    data = bytes(payload or b"")
+    signatures: dict[str, Any] = {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "dhash": None,
+    }
+    try:
+        with Image.open(BytesIO(data)) as image:
+            grayscale = image.convert("L").resize((17, 16), Image.Resampling.LANCZOS)
+            pixels = list(grayscale.getdata())
+        bits = 0
+        for row in range(16):
+            offset = row * 17
+            for column in range(16):
+                bits = (bits << 1) | int(
+                    pixels[offset + column] > pixels[offset + column + 1]
+                )
+        signatures["dhash"] = bits
+    except Exception:
+        pass
+    return signatures
+
+
+def _same_image(
+    candidate: dict[str, Any], reference: dict[str, Any] | None
+) -> bool:
+    if not reference:
+        return False
+    if candidate.get("sha256") == reference.get("sha256"):
+        return True
+    candidate_dhash = candidate.get("dhash")
+    reference_dhash = reference.get("dhash")
+    return (
+        isinstance(candidate_dhash, int)
+        and isinstance(reference_dhash, int)
+        and (candidate_dhash ^ reference_dhash).bit_count() <= 4
+    )
+
+
+def _log_image_url(url: str) -> str:
+    try:
+        parsed = urlsplit(str(url or ""))
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"[:200]
+    except Exception:
+        return str(url or "").split("?", 1)[0][:200]
 
 
 def _read_image_bytes(tab: Any, url: str, timeout: float = 20.0) -> bytes:
@@ -208,10 +267,6 @@ def _upload_reference_image(ctx: dict[str, Any], path: str) -> bool:
     for file_input in inputs:
         try:
             file_input.input(str(image_path))
-            file_input.run_js(
-                "this.dispatchEvent(new Event('input',{bubbles:true}));"
-                "this.dispatchEvent(new Event('change',{bubbles:true}));"
-            )
             logger.info(f"[GPT-IMAGE-2] reference image uploaded: {image_path.name}")
             _sleep(ctx, 2.0)
             return True
@@ -569,12 +624,15 @@ def _send_prompt(
 
 
 def _wait_for_gpt_image2(
-    ctx: dict[str, Any], baseline: set[str], timeout: float
+    ctx: dict[str, Any],
+    baseline: set[str],
+    timeout: float,
+    reference_signature: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     tab = ctx["tab"]
     logger = ctx["logger"]
     deadline = time.time() + timeout
-    inspected: set[str] = set()
+    inspected: dict[str, str] = {}
     matches: list[dict[str, Any]] = []
     candidates: list[str] = []
     last_new_image_at = 0.0
@@ -590,27 +648,79 @@ def _wait_for_gpt_image2(
             payload = _read_image_bytes(tab, url)
             if not payload:
                 continue
-            inspected.add(url)
-            candidates.append(url)
+            signatures = _image_signatures(payload)
+            inspected[url] = signatures["sha256"]
+            if _same_image(signatures, reference_signature):
+                logger.info(
+                    f"[GPT-IMAGE-2] skipped submitted reference image: "
+                    f"side={'A' if side_index == 0 else 'B'} "
+                    f"url={_log_image_url(url)}"
+                )
+                continue
+            if url not in candidates:
+                candidates.append(url)
             evidence = inspect_gpt_image2_png(payload)
             logger.info(
                 f"[GPT-IMAGE-2][C2PA] side={'A' if side_index == 0 else 'B'} "
-                f"matched={evidence['matched']} reason={evidence['reason']}"
+                f"matched={evidence['matched']} reason={evidence['reason']} "
+                f"bytes={len(payload)} url={_log_image_url(url)}"
             )
             if evidence["matched"]:
                 matches.append({"url": url, "side": "A" if side_index == 0 else "B", **evidence})
+        generation_done = _is_generation_stopped(tab) or not _is_generating(tab)
         if (
             last_new_image_at
             and time.time() - last_new_image_at >= 4.0
-            and len(inspected) >= len(sources)
-            and (_is_generation_stopped(tab) or not _is_generating(tab))
+            and generation_done
         ):
+            # Arena can reuse a URL while replacing an early preview with the
+            # final PNG, so force one content-aware pass after generation ends.
+            final_sources = [
+                url for url in _visible_image_sources(tab) if url not in baseline
+            ]
+            for side_index, url in enumerate(final_sources):
+                payload = _read_image_bytes(tab, url)
+                if not payload:
+                    continue
+                signatures = _image_signatures(payload)
+                final_side = "A" if side_index == 0 else "B"
+                if inspected.get(url) == signatures["sha256"]:
+                    for match in matches:
+                        if match.get("url") == url:
+                            match["side"] = final_side
+                    continue
+                inspected[url] = signatures["sha256"]
+                if _same_image(signatures, reference_signature):
+                    continue
+                if url not in candidates:
+                    candidates.append(url)
+                evidence = inspect_gpt_image2_png(payload)
+                logger.info(
+                    f"[GPT-IMAGE-2][C2PA][FINAL] "
+                    f"side={final_side} "
+                    f"matched={evidence['matched']} reason={evidence['reason']} "
+                    f"bytes={len(payload)} url={_log_image_url(url)}"
+                )
+                if evidence["matched"]:
+                    matches.append(
+                        {
+                            "url": url,
+                            "side": final_side,
+                            **evidence,
+                        }
+                    )
             break
-    return matches, candidates
+    unique_matches = list(
+        {item.get("url", ""): item for item in matches if item.get("url")}.values()
+    )
+    return unique_matches, candidates
 
 
 def _recover_timed_out_generation(
-    ctx: dict[str, Any], initial_matches: list[dict[str, Any]], initial_candidates: list[str]
+    ctx: dict[str, Any],
+    initial_matches: list[dict[str, Any]],
+    initial_candidates: list[str],
+    reference_signature: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
     tab = ctx["tab"]
     logger = ctx["logger"]
@@ -628,7 +738,9 @@ def _recover_timed_out_generation(
         return matches, candidates, True
     else:
         logger.info("[GPT-IMAGE-2] generation completed after refresh; inspecting current images")
-        recovered_matches, recovered_candidates = _wait_for_gpt_image2(ctx, set(), 5.0)
+        recovered_matches, recovered_candidates = _wait_for_gpt_image2(
+            ctx, set(), 5.0, reference_signature
+        )
         matches.extend(recovered_matches)
         candidates.extend(recovered_candidates)
 
@@ -660,6 +772,13 @@ def run(ctx: dict[str, Any], *, single_mode: bool = False) -> str:
     prompt = str(_value(values, "prompt_text", "Create an image.")).strip()
     random_chars = str(_value(values, "random_insert_chars", "abcdefghijklmnopqrstuvwxyz"))
     reference_image = str(_value(values, "reference_image", "")).strip()
+    reference_signature = None
+    if reference_image:
+        reference_path = Path(
+            os.path.expandvars(os.path.expanduser(reference_image))
+        ).resolve()
+        if reference_path.is_file():
+            reference_signature = _image_signatures(reference_path.read_bytes())
     generation_mode = "image-to-image" if reference_image else "text-to-image"
     timeout = 150.0 if single_mode else min(
         100.0,
@@ -717,7 +836,9 @@ def run(ctx: dict[str, Any], *, single_mode: bool = False) -> str:
                 continue
             consecutive_send_failures = 0
 
-            matches, candidates = _wait_for_gpt_image2(ctx, baseline, timeout)
+            matches, candidates = _wait_for_gpt_image2(
+                ctx, baseline, timeout, reference_signature
+            )
             if single_mode and not matches and _is_generation_stopped(tab):
                 logger.info(
                     f"[GPT-IMAGE-2] round {index + 1}/{total_runs} generation stopped "
@@ -730,7 +851,7 @@ def run(ctx: dict[str, Any], *, single_mode: bool = False) -> str:
                     "without a completed image response; refreshing within the same round"
                 )
                 matches, candidates, interrupted = _recover_timed_out_generation(
-                    ctx, matches, candidates
+                    ctx, matches, candidates, reference_signature
                 )
                 if interrupted:
                     continue

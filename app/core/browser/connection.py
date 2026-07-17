@@ -55,6 +55,7 @@ def _load_tab_pool_config() -> Dict:
         "excluded_urls": [],
         "preserve_error_tabs": False,
         "model_name_overrides": {"sites": {}, "urls": {}},
+        "route_groups": [],
     }
     
     # 从 browser_config.json 加载
@@ -88,6 +89,7 @@ def _load_tab_pool_config() -> Dict:
         "excluded_urls",
         "preserve_error_tabs",
         "model_name_overrides",
+        "route_groups",
     }
     return {key: value for key, value in config.items() if key in allowed_keys}
 

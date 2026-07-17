@@ -17,7 +17,7 @@ import time
 import asyncio
 import threading as _threading
 from pathlib import Path
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 
 from app import __version__ as APP_VERSION
 from fastapi import APIRouter, Request, HTTPException, Depends
@@ -36,6 +36,7 @@ from app.services.config_engine import config_engine, ConfigConstants
 from app.services.command_engine import command_engine
 from app.services.extractor_manager import extractor_manager
 from app.services.request_manager import request_manager
+from app.utils.site_url import extract_remote_site_domain, route_domain_matches
 from update_preserve import load_update_preserve_settings, save_update_preserve_settings
 
 logger = get_logger("API.SYSTEM")
@@ -437,6 +438,7 @@ DEFAULT_BROWSER_CONSTANTS: Dict[str, Any] = {
         "allocation_mode": "first_idle",
         "excluded_urls": [],
         "preserve_error_tabs": False,
+        "route_groups": [],
     },
 }
 
@@ -1040,6 +1042,7 @@ async def save_browser_constants(
                         allocation_mode=tab_pool_config.get("allocation_mode"),
                         excluded_urls=tab_pool_config.get("excluded_urls"),
                         preserve_error_tabs=tab_pool_config.get("preserve_error_tabs"),
+                        route_groups=tab_pool_config.get("route_groups"),
                     )
                     tab_pool_synced = True
                     logger.info("运行中的标签页池配置已同步")
@@ -1103,61 +1106,139 @@ async def save_update_preserve(
 
 # ================= 调试 API =================
 
-def _run_selector_test(selector: str, timeout: Any = 2, highlight: bool = False) -> Dict[str, Any]:
+def _selector_test_tab_summary(session: Any, tab: Any) -> Dict[str, Any]:
+    url = ""
+    try:
+        url = str(getattr(tab, "url", "") or "")
+    except Exception:
+        pass
+    return {
+        "tab_id": str(getattr(tab, "tab_id", "") or ""),
+        "session_id": str(getattr(session, "id", "") or "") if session else "",
+        "tab_index": int(getattr(session, "persistent_index", 0) or 0) if session else 0,
+        "url": url,
+    }
+
+
+def _selector_test_session_candidates(browser: Any) -> List[Any]:
+    """Return a stable snapshot instead of letting the pool choose a random tab."""
+    pool = browser.tab_pool
+    pool.refresh_tabs()
+    sessions = pool.get_sessions_snapshot()
+    return sorted(
+        sessions,
+        key=lambda item: (
+            int(getattr(item, "persistent_index", 0) or 0),
+            str(getattr(item, "id", "") or ""),
+        ),
+    )
+
+
+def _run_selector_test(
+    selector: str,
+    timeout: Any = 2,
+    highlight: bool = False,
+    route_domain: str = "",
+) -> Dict[str, Any]:
     try:
         browser = get_browser()
+        normalized_domain = str(route_domain or "").strip()
+        if selector.startswith(('tag:', '@', 'xpath:', 'css:')) or '@@' in selector:
+            query_selector = selector
+        else:
+            query_selector = f'css:{selector}'
 
-        with browser.get_temporary_tab() as tab:
-            if selector.startswith(('tag:', '@', 'xpath:', 'css:')) or '@@' in selector:
-                query_selector = selector
-            else:
-                query_selector = f'css:{selector}'
+        detail_limit = 6
+        result = {
+            "success": False,
+            "selector": selector,
+            "locator_used": query_selector,
+            "route_domain": normalized_domain,
+            "count": 0,
+            "elements": [],
+            "tabs": [],
+            "tabs_tested": 0,
+            "matched_tabs": 0,
+            "skipped_busy_tabs": 0,
+            "inspected_count": 0,
+            "truncated": False,
+        }
 
-            elements = tab.eles(query_selector, timeout=timeout)
-            logger.debug(f"[DEBUG] query={query_selector}, result={type(elements)}, len={len(elements) if elements else 0}")
+        def inspect_tab(tab: Any, session: Any = None) -> None:
+            tab_summary = _selector_test_tab_summary(session, tab)
+            actual_domain = extract_remote_site_domain(tab_summary.get("url", "")) or ""
+            if normalized_domain and not route_domain_matches(normalized_domain, actual_domain):
+                return
 
-            if not elements:
-                return {"success": False, "count": 0, "message": "元素未找到"}
+            try:
+                elements = tab.eles(query_selector, timeout=timeout)
+            except Exception as error:
+                tab_summary.update({"success": False, "count": 0, "message": str(error)})
+                result["tabs"].append(tab_summary)
+                return
 
             if not isinstance(elements, list):
-                elements = [elements]
+                elements = [elements] if elements else []
 
             valid_elements = []
             for ele in elements:
                 try:
                     if ele and hasattr(ele, 'tag'):
                         valid_elements.append(ele)
-                except:
+                except Exception:
                     pass
 
-            if not valid_elements:
-                return {"success": False, "count": 0, "message": "元素未找到或无效"}
+            tab_summary.update({
+                "success": bool(valid_elements),
+                "count": len(valid_elements),
+                "message": "找到元素" if valid_elements else "元素未找到",
+            })
+            result["tabs"].append(tab_summary)
+            result["count"] += len(valid_elements)
 
             if highlight:
-                try:
-                    tab.set.activate()
-                except Exception as e:
-                    logger.debug(f"激活调试标签页失败: {e}")
+                for ele in valid_elements:
+                    try:
+                        ele.run_js("""
+                            const token = `selector-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                            const previous = {
+                                outline: this.style.outline,
+                                outlineOffset: this.style.outlineOffset,
+                                boxShadow: this.style.boxShadow,
+                                transition: this.style.transition,
+                            };
 
-            detail_limit = 6
-            result = {
-                "success": True,
-                "selector": selector,
-                "locator_used": query_selector,
-                "count": len(valid_elements),
-                "elements": [],
-                "inspected_count": min(len(valid_elements), detail_limit),
-                "truncated": len(valid_elements) > detail_limit,
-            }
+                            this.dataset.selectorTestHighlightToken = token;
+                            this.style.transition = 'outline .15s ease, box-shadow .15s ease';
+                            this.style.outline = '3px solid rgba(239, 68, 68, 0.95)';
+                            this.style.outlineOffset = '2px';
+                            this.style.boxShadow = '0 0 0 6px rgba(251, 191, 36, 0.45)';
+                            this.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'center'});
 
-            for idx, ele in enumerate(valid_elements[:detail_limit]):
+                            setTimeout(() => {
+                                if (this.dataset.selectorTestHighlightToken !== token) return;
+                                this.style.outline = previous.outline;
+                                this.style.outlineOffset = previous.outlineOffset;
+                                this.style.boxShadow = previous.boxShadow;
+                                this.style.transition = previous.transition;
+                                delete this.dataset.selectorTestHighlightToken;
+                            }, 5000);
+                        """)
+                    except Exception as error:
+                        logger.debug(f"高亮失败: {error}")
+
+            remaining = max(0, detail_limit - len(result["elements"]))
+            start_index = len(result["elements"])
+            for offset, ele in enumerate(valid_elements[:remaining]):
                 try:
                     ele_info = {
-                        "index": idx,
+                        "index": start_index + offset,
                         "tag": ele.tag if hasattr(ele, 'tag') else "unknown",
                         "text": "",
                         "candidate_selectors": [],
                         "warnings": [],
+                        "tab_id": tab_summary.get("tab_id", ""),
+                        "tab_index": tab_summary.get("tab_index", 0),
                     }
 
                     snapshot = _collect_selector_test_element_snapshot(ele)
@@ -1183,57 +1264,81 @@ def _run_selector_test(selector: str, timeout: Any = 2, highlight: bool = False)
                         pass
 
                     result["elements"].append(ele_info)
-
-                    if highlight:
-                        try:
-                            ele.run_js("""
-                                const token = `selector-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-                                const previous = {
-                                    outline: this.style.outline,
-                                    outlineOffset: this.style.outlineOffset,
-                                    boxShadow: this.style.boxShadow,
-                                    transition: this.style.transition,
-                                };
-
-                                this.dataset.selectorTestHighlightToken = token;
-                                this.style.transition = 'outline .15s ease, box-shadow .15s ease';
-                                this.style.outline = '3px solid rgba(239, 68, 68, 0.95)';
-                                this.style.outlineOffset = '2px';
-                                this.style.boxShadow = '0 0 0 6px rgba(251, 191, 36, 0.45)';
-                                this.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'center'});
-
-                                setTimeout(() => {
-                                    if (this.dataset.selectorTestHighlightToken !== token) {
-                                        return;
-                                    }
-                                    this.style.outline = previous.outline;
-                                    this.style.outlineOffset = previous.outlineOffset;
-                                    this.style.boxShadow = previous.boxShadow;
-                                    this.style.transition = previous.transition;
-                                    delete this.dataset.selectorTestHighlightToken;
-                                }, 5000);
-                            """)
-                        except Exception as e:
-                            logger.debug(f"高亮失败: {e}")
-
                 except Exception as e:
-                    logger.debug(f"处理元素 {idx} 失败: {e}")
+                    logger.debug(f"处理元素 {start_index + offset} 失败: {e}")
                     continue
 
-            result["top_candidates"] = _build_selector_top_candidates(result["elements"])
-            result["diagnosis"] = _build_selector_test_diagnosis(
-                selector,
-                len(valid_elements),
-                result["top_candidates"],
+        if normalized_domain:
+            pool = browser.tab_pool
+            for candidate in _selector_test_session_candidates(browser):
+                status = str(getattr(getattr(candidate, "status", None), "value", ""))
+                cached_domain = str(getattr(candidate, "current_domain", "") or "")
+                if cached_domain and not route_domain_matches(normalized_domain, cached_domain):
+                    continue
+                if status != "idle":
+                    if cached_domain and route_domain_matches(normalized_domain, cached_domain):
+                        result["skipped_busy_tabs"] += 1
+                    continue
+
+                raw_tab_id = str(getattr(getattr(candidate, "tab", None), "tab_id", "") or "")
+                if not raw_tab_id:
+                    continue
+                task_id = f"selector_test_{time.time_ns()}"
+                acquired = pool.acquire_by_raw_tab_id(
+                    raw_tab_id,
+                    task_id,
+                    timeout=min(max(float(timeout or 2), 0.2), 2.0),
+                    count_request=False,
+                    activate=False,
+                )
+                if acquired is None:
+                    continue
+                try:
+                    inspect_tab(acquired.tab, acquired)
+                finally:
+                    pool.release(
+                        acquired.id,
+                        check_triggers=False,
+                        expected_task_id=task_id,
+                    )
+        else:
+            with browser.get_temporary_tab() as tab:
+                inspect_tab(tab)
+
+        result["tabs_tested"] = len(result["tabs"])
+        result["matched_tabs"] = sum(1 for item in result["tabs"] if item.get("count", 0) > 0)
+        result["inspected_count"] = len(result["elements"])
+        result["truncated"] = result["count"] > len(result["elements"])
+        result["success"] = result["count"] > 0
+        if not result["tabs"]:
+            result["message"] = (
+                f"没有可测试的 {normalized_domain} 空闲页面"
+                if normalized_domain else "没有可测试的页面"
+            )
+            return result
+        if not result["success"]:
+            result["message"] = "已在所有匹配页面测试，元素均未找到"
+            return result
+
+        result["top_candidates"] = _build_selector_top_candidates(result["elements"])
+        per_tab_counts = [int(item.get("count", 0) or 0) for item in result["tabs"]]
+        result["diagnosis"] = _build_selector_test_diagnosis(
+            selector,
+            max(per_tab_counts) if per_tab_counts else result["count"],
+            result["top_candidates"],
+        )
+        if len(set(per_tab_counts)) > 1:
+            result["diagnosis"].setdefault("warnings", []).append(
+                "同一站点的不同页面命中数量不一致，请结合下方逐页结果确认页面状态。"
             )
 
-            if result["elements"]:
-                first = result["elements"][0]
-                result["tag"] = first.get("tag", "unknown")
-                result["text"] = first.get("text", "")
-                result["attributes"] = first.get("attributes", {})
+        if result["elements"]:
+            first = result["elements"][0]
+            result["tag"] = first.get("tag", "unknown")
+            result["text"] = first.get("text", "")
+            result["attributes"] = first.get("attributes", {})
 
-            return result
+        return result
 
     except BrowserConnectionError as e:
         return {"success": False, "count": 0, "message": f"浏览器未连接: {str(e)}"}
@@ -1256,11 +1361,18 @@ async def test_selector(
     selector = data.get("selector", "")
     timeout = data.get("timeout", 2)
     highlight = data.get("highlight", False)
+    route_domain = data.get("route_domain", "")
 
     if not selector:
         raise HTTPException(status_code=400, detail="缺少 selector")
 
-    return await asyncio.to_thread(_run_selector_test, selector, timeout, highlight)
+    return await asyncio.to_thread(
+        _run_selector_test,
+        selector,
+        timeout,
+        highlight,
+        route_domain,
+    )
 
 
 @router.get("/api/debug/request-status")
@@ -1330,12 +1442,15 @@ async def cancel_current(
             detail="存在多个运行中的请求，请指定 tab_id",
         )
 
-    current_id = running_requests[0].request_id
-    success = request_manager.cancel_current("manual_cancel", tab_id=tab_id)
+    request_ids = [ctx.request_id for ctx in running_requests]
+    success = False
+    for request_id in request_ids:
+        success = request_manager.cancel_request(request_id, "manual_cancel") or success
 
     return {
         "cancelled": success,
-        "request_id": current_id,
+        "request_id": request_ids[0],
+        "request_ids": request_ids,
         "tab_id": tab_id or running_requests[0].tab_id,
     }
 

@@ -181,6 +181,8 @@ class CommandEngineRuntimeMixin:
         return runtime
 
     def flush_deferred_workflow_commands(self, session: 'TabSession'):
+        if bool(getattr(self, "_shutdown_requested", False)):
+            return
         with self._lock:
             items = list(getattr(session, "_pending_post_workflow_commands", None) or [])
             setattr(session, "_pending_post_workflow_commands", [])
@@ -213,6 +215,8 @@ class CommandEngineRuntimeMixin:
         *,
         delay_sec: float = 0.25,
     ):
+        if bool(getattr(self, "_shutdown_requested", False)):
+            return False
         delay = max(0.0, float(delay_sec or 0.0))
 
         thread = threading.Thread(
@@ -228,6 +232,7 @@ class CommandEngineRuntimeMixin:
             thread.daemon = True
             thread.name = f"cmd-resume-delay-{getattr(session, 'id', 'tab')}"
         thread.start()
+        return True
 
     def _get_workflow_interrupt_policy(self, command: Dict[str, Any]) -> str:
         trigger = command.get("trigger", {}) or {}

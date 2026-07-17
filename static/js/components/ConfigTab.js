@@ -60,6 +60,9 @@ window.ConfigTab = {
             compareMainDraft: '',
             compareSavingLocal: false,
             advancedConfigSaveSeq: 0,
+            advancedConfigSaveQueue: null,
+            streamConfigSaveSeq: 0,
+            streamConfigSaveQueue: null,
 
             // 默认配置
             defaultImageConfig: {
@@ -588,7 +591,7 @@ window.ConfigTab = {
                 { label: '流式', value: streamMode, compact: true },
                 { label: '图片提取', value: imageEnabled ? '开启' : '关闭' },
                 { label: '文件粘贴', value: filePasteEnabled ? '开启' : '关闭' },
-                { label: '首尾填充', value: promptPaddingEnabled ? '开启' : '关闭' }
+                { label: '开头注入', value: promptPaddingEnabled ? '开启' : '关闭' }
             ];
         },
 
@@ -599,7 +602,7 @@ window.ConfigTab = {
                 stream_config: '流式配置',
                 image_extraction: '图片提取',
                 file_paste: '文件粘贴',
-                prompt_padding: '首尾填充',
+                prompt_padding: '开头注入',
                 advanced: '高级配置',
                 stealth: '低熵模式',
                 extractor_id: '提取器',
@@ -894,25 +897,50 @@ window.ConfigTab = {
             if (!this.currentDomain) return;
             const domain = this.currentDomain;
             const preset = this.selectedPreset;
-            try {
-                const payload = { ...config, preset_name: preset };
-                await this.fetchJson(
-                    '/api/sites/' + encodeURIComponent(domain) + '/stream-config',
-                    {
-                        method: 'PUT',
-                        headers: this.buildAuthHeaders({ 'Content-Type': 'application/json' }),
-                        body: JSON.stringify(payload)
-                    },
-                    { timeoutMs: 12000 }
-                );
+            const nextConfig = this.cloneConfigSection(config || {});
+            const saveSeq = Number(this.streamConfigSaveSeq || 0) + 1;
+            this.streamConfigSaveSeq = saveSeq;
+            const pc = this.presetConfig;
+            if (pc) pc.stream_config = nextConfig;
 
-                if (domain !== this.currentDomain || preset !== this.selectedPreset) return;
-                const pc = this.presetConfig;
-                if (pc) pc.stream_config = config;
+            const previousSave = this.streamConfigSaveQueue || Promise.resolve();
+            const saveRequest = previousSave
+                .catch(() => undefined)
+                .then(() => {
+                    const payload = { ...nextConfig, preset_name: preset };
+                    return this.fetchJson(
+                        '/api/sites/' + encodeURIComponent(domain) + '/stream-config',
+                        {
+                            method: 'PUT',
+                            headers: this.buildAuthHeaders({ 'Content-Type': 'application/json' }),
+                            body: JSON.stringify(payload)
+                        },
+                        { timeoutMs: 12000 }
+                    );
+                });
+            this.streamConfigSaveQueue = saveRequest;
+
+            try {
+                await saveRequest;
+
+                if (
+                    saveSeq !== this.streamConfigSaveSeq
+                    || domain !== this.currentDomain
+                    || preset !== this.selectedPreset
+                ) return;
             } catch (e) {
-                if (domain !== this.currentDomain || preset !== this.selectedPreset) return;
+                if (
+                    saveSeq !== this.streamConfigSaveSeq
+                    || domain !== this.currentDomain
+                    || preset !== this.selectedPreset
+                ) return;
                 console.error('保存流式配置失败:', e);
                 alert('保存失败: ' + e.message);
+                this.$emit('reload-config');
+            } finally {
+                if (this.streamConfigSaveQueue === saveRequest) {
+                    this.streamConfigSaveQueue = null;
+                }
             }
         },
 
@@ -1092,17 +1120,23 @@ window.ConfigTab = {
             const previousTarget = previousAdvanced || {};
             const domain = this.currentDomain;
             const preset = this.selectedPreset;
+            let saveRequest = null;
 
             try {
-                const data = await this.fetchJson(
-                    '/api/sites/' + encodeURIComponent(domain) + '/advanced-config',
-                    {
-                        method: 'PUT',
-                        headers: this.buildAuthHeaders({ 'Content-Type': 'application/json' }),
-                        body: JSON.stringify(nextAdvanced)
-                    },
-                    { timeoutMs: 12000 }
-                );
+                const previousSave = this.advancedConfigSaveQueue || Promise.resolve();
+                saveRequest = previousSave
+                    .catch(() => undefined)
+                    .then(() => this.fetchJson(
+                        '/api/sites/' + encodeURIComponent(domain) + '/advanced-config',
+                        {
+                            method: 'PUT',
+                            headers: this.buildAuthHeaders({ 'Content-Type': 'application/json' }),
+                            body: JSON.stringify(nextAdvanced)
+                        },
+                        { timeoutMs: 12000 }
+                    ));
+                this.advancedConfigSaveQueue = saveRequest;
+                const data = await saveRequest;
                 if (
                     domain !== this.currentDomain
                     || (presetScoped && preset !== this.selectedPreset)
@@ -1134,6 +1168,10 @@ window.ConfigTab = {
                     this.assignCurrentConfigAdvanced(previousTarget);
                 }
                 throw error;
+            } finally {
+                if (saveRequest && this.advancedConfigSaveQueue === saveRequest) {
+                    this.advancedConfigSaveQueue = null;
+                }
             }
         },
 

@@ -97,6 +97,7 @@ class WorkflowExecutor(
         self._workflow_focus_emulation_active = False
         self._workflow_visibility_emulation_active = False
         self._current_result_prompt = ""
+        self._current_step_execution: Dict[str, Any] = {}
         self._result_event_handler = self._create_result_event_handler()
         
         # 检查是否启用网络监听模式
@@ -148,6 +149,7 @@ class WorkflowExecutor(
                     tab=tab,
                     formatter=self.formatter,
                     stream_config=effective_stream_config,
+                    image_config=self._image_config,
                     stop_checker=should_stop_checker,
                     event_handler=self._handle_network_event,
                     result_handler=self._result_event_handler,
@@ -657,7 +659,8 @@ class WorkflowExecutor(
     def execute_step(self, action: str, selector: str,
                      target_key: str, value: Any = None,
                      optional: bool = False,
-                     context: Dict = None) -> Generator[str, None, None]:
+                     context: Dict = None,
+                     execution: Dict = None) -> Generator[str, None, None]:
         """执行单个步骤"""
         
         if self._check_cancelled():
@@ -665,6 +668,8 @@ class WorkflowExecutor(
             return
         
         self._context = context
+        previous_step_execution = self._current_step_execution
+        self._current_step_execution = execution if isinstance(execution, dict) else {}
         if action in ("STREAM_WAIT", "STREAM_OUTPUT"):
             self._last_stream_media_state = {}
         
@@ -704,6 +709,15 @@ class WorkflowExecutor(
             elif action == "READONLY_HINT":
                 logger.debug(f"[WORKFLOW_HINT] {str(value or '')[:160]}")
                 return
+
+            elif action == "SELECT_MODEL":
+                self._execute_select_model(
+                    selector=selector,
+                    target_key=target_key,
+                    value=value,
+                    context=context,
+                    optional=optional,
+                )
 
             elif action == "PAGE_FETCH":
                 self._last_request_transport_sent = False
@@ -746,13 +760,18 @@ class WorkflowExecutor(
                         self._prepare_page_fetch_capture()
                         self._network_monitor.pre_start()
 
-                    self._execute_click_send_reliably(
-                        selector=selector,
-                        target_key=target_key,
-                        optional=optional,
+                    self._execute_click_with_step_policy(
+                        selector,
+                        target_key,
+                        optional,
+                        click_fn=lambda: self._execute_click_send_reliably(
+                            selector=selector,
+                            target_key=target_key,
+                            optional=optional,
+                        ),
                     )
                 else:
-                    self._execute_click(selector, target_key, optional)
+                    self._execute_click_with_step_policy(selector, target_key, optional)
 
             elif action == "COORD_CLICK":
                 self._maybe_warmup_page_for_stealth(action, target_key)
@@ -941,6 +960,8 @@ class WorkflowExecutor(
             if not optional:
                 yield self.formatter.pack_error(f"执行失败: {str(e)}")
                 raise
+        finally:
+            self._current_step_execution = previous_step_execution
     
     def _execute_keypress(self, key: str):
         """执行按键操作（隐身模式人类化时序）"""

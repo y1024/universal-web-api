@@ -6,12 +6,11 @@ import ipaddress
 from typing import Any, Dict
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.core import get_browser
 from app.core.config import get_logger
-from app.api.deps import verify_auth
 from app.utils.browser_profile_identity import resolve_tab_browser_profile
 
 
@@ -117,11 +116,12 @@ def open_url_in_profile(url: str, profile: Dict[str, Any]) -> Dict[str, Any]:
             raise HTTPException(status_code=502, detail="无法在对应用户目录中打开链接") from fallback_error
 
 
+# Link Drawer stores only routing metadata, not the dashboard secret. This
+# endpoint is safe to call without it because remote clients are rejected.
 @router.post("/open-profile-url")
 def open_profile_url(
     payload: OpenProfileUrlRequest,
     request: Request,
-    _authenticated: bool = Depends(verify_auth),
 ):
     client_host = request.client.host if request.client else ""
     if not _is_loopback(client_host):

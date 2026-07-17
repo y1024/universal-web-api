@@ -67,6 +67,10 @@ from app.api.deps import (
     verify_service_auth,
     verify_service_token,
 )
+from app.services.arena_direct_models import (
+    build_openai_model_entries,
+    list_arena_direct_models,
+)
 from app.utils.model_routing import collect_route_domain_models, inspect_model_route
 
 logger = get_logger("API.CHAT")
@@ -86,9 +90,33 @@ class _ToolCallingExecutionCancelled(Exception):
     """Raised when a non-stream tool-calling worker is still running after cancellation."""
 
 
+_MANUAL_TERMINATE_REASONS = frozenset({
+    "manual_terminate",
+    "manual_terminate_from_tab_pool",
+})
+
+
 def _get_tool_calling_cancel_reason(ctx: RequestContext) -> str:
     reason = str(ctx.cancel_reason or "").strip()
     return reason or "tool_calling_cancelled"
+
+
+def _is_manual_terminate(ctx: RequestContext) -> bool:
+    return str(ctx.cancel_reason or "").strip() in _MANUAL_TERMINATE_REASONS
+
+
+def _manual_terminate_response() -> JSONResponse:
+    return JSONResponse(
+        content={
+            "error": {
+                "message": "请求已被手动中断",
+                "type": "request_cancelled",
+                "code": "manual_terminate",
+            }
+        },
+        status_code=499,
+        headers={"x-should-retry": "false"},
+    )
 
 
 def _is_absolute_request_timeout_error(error: Any) -> bool:
@@ -292,8 +320,6 @@ def _validate_image_inputs(messages: list) -> None:
                     if u.startswith("data:image") and "base64," in u and not u.endswith("base64,"):
                         has_any_valid_image = True
                     elif u.startswith("http://") or u.startswith("https://"):
-                        has_any_valid_image = True
-                    elif os.path.exists(u):
                         has_any_valid_image = True
 
         if has_image_declared and not has_any_valid_image:
@@ -2165,6 +2191,7 @@ async def _stream_with_lifecycle(
                     stream=True,
                     task_id=ctx.request_id,
                     stop_checker=ctx.should_stop,
+                    requested_model=body.model,
                 )
 
                 for chunk in gen:
@@ -2415,6 +2442,9 @@ async def _non_stream_with_lifecycle(
             if not _consume_stream_payload(data):
                 break
 
+    if _is_manual_terminate(ctx):
+        return _manual_terminate_response()
+
     if error_data:
         return JSONResponse(content=error_data, status_code=500)
 
@@ -2442,6 +2472,7 @@ def _execute_browser_non_stream_messages(
     messages: List[Dict[str, Any]],
     request_id: str,
     stop_checker=None,
+    requested_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = None
     for chunk in browser.execute_workflow(
@@ -2450,6 +2481,7 @@ def _execute_browser_non_stream_messages(
         task_id=request_id,
         stop_checker=stop_checker,
         allow_media_postprocess=get_tool_calling_allow_media_postprocess(),
+        requested_model=requested_model,
     ):
         payload = chunk
 
@@ -2493,6 +2525,7 @@ async def _run_tool_calling_async(
                 messages=browser_messages,
                 request_id=request_id,
                 stop_checker=stop_checker,
+                requested_model=body.model,
             )
         )
         if isinstance(tracked_worker_state.get("ctx"), RequestContext):
@@ -2549,6 +2582,8 @@ async def _complete_tool_calling_with_lifecycle(
             ctx.should_stop,
             worker_state=worker_state,
         )
+        if _is_manual_terminate(ctx):
+            raise _ToolCallingExecutionCancelled(_get_tool_calling_cancel_reason(ctx))
         request_manager.capture_response_payload(ctx, response)
 
         if not ctx.should_stop() and ctx.status == RequestStatus.RUNNING:
@@ -2564,8 +2599,14 @@ async def _complete_tool_calling_with_lifecycle(
             raise RuntimeError("absolute_request_timeout")
         if not ctx.should_stop():
             ctx.request_cancel(cancel_reason or "tool_calling_cancelled")
+        if _is_manual_terminate(ctx):
+            raise
         raise asyncio.CancelledError()
     except RuntimeError as e:
+        if _is_manual_terminate(ctx):
+            raise _ToolCallingExecutionCancelled(
+                _get_tool_calling_cancel_reason(ctx)
+            ) from e
         if str(e) == "tool_calling_cancelled" and ctx.should_stop():
             raise asyncio.CancelledError()
         logger.error(f"tool_calling_failed: {e}")
@@ -2610,7 +2651,15 @@ async def _non_stream_tool_calling_with_lifecycle(
     try:
         response = await _complete_tool_calling_with_lifecycle(request, body, ctx)
         return JSONResponse(content=response)
+    except _ToolCallingExecutionCancelled:
+        return _manual_terminate_response()
+    except asyncio.CancelledError:
+        if _is_manual_terminate(ctx):
+            return _manual_terminate_response()
+        raise
     except Exception as e:
+        if _is_manual_terminate(ctx):
+            return _manual_terminate_response()
         message, code = _format_tool_calling_error(e)
         ctx.mark_failed(message)
         request_manager.capture_error(ctx, message, code=code)
@@ -2725,6 +2774,15 @@ def _collect_model_entries() -> List[Dict[str, Any]]:
             _append_entry(
                 item.get("id"),
                 owned_by=item.get("route_domain") or "universal-web-api",
+                display_name=item.get("display_name") or item.get("id"),
+            )
+        for item in build_openai_model_entries(
+            list_arena_direct_models(browser),
+            created=MODEL_LIST_CREATED,
+        ):
+            _append_entry(
+                item.get("id"),
+                owned_by=item.get("owned_by") or "arena.ai",
                 display_name=item.get("display_name") or item.get("id"),
             )
     except Exception as e:

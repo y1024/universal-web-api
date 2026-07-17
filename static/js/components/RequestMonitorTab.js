@@ -191,6 +191,7 @@ window.RequestMonitorTab = {
                 source.success ? 1 : 0,
                 source.target_domain,
                 source.route_domain,
+                source.route_group,
                 source.preset_name,
                 source.tab_index,
                 source.tab_id,
@@ -731,6 +732,7 @@ window.RequestMonitorTab = {
                                             <span class="truncate text-sm font-semibold text-slate-900 dark:text-white">{{ record.__domain }}</span>
                                             <span class="text-xs text-slate-400">/</span>
                                             <span class="text-xs text-slate-500 dark:text-slate-400">{{ record.preset_name || '默认预设' }}</span>
+                                            <span v-if="record.route_group" class="rounded-full bg-cyan-50 px-2 py-0.5 text-[11px] text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-200">组 {{ record.route_group }}</span>
                                             <span class="rounded-full bg-white/70 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-950/40 dark:text-slate-400">{{ record.__tabLabel }}</span>
                                             <span v-if="record.is_multimodal" class="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600 dark:bg-blue-500/10 dark:text-blue-200">🖼️ 多模态</span>
                                         </div>
@@ -816,6 +818,7 @@ window.RequestMonitorTab = {
                             </div>
                             <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400 dark:text-slate-500">
                                 <span>{{ selectedRecord.preset_name || '默认预设' }}</span>
+                                <span v-if="selectedRecord.route_group">路由组 {{ selectedRecord.route_group }}</span>
                                 <span>{{ selectedRecord.__tabLabel || tabLabel(selectedRecord) }}</span>
                                 <span>{{ selectedRecord.request_type || '请求' }}</span>
                                 <span v-if="selectedRecord.is_multimodal">🖼️ 包含多模态</span>

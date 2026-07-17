@@ -134,7 +134,7 @@ UPDATE_PRESERVE_OPTIONS: List[Dict[str, Any]] = [
     _option("license", "LICENSE", "LICENSE", "许可证文件", "脚本与文档"),
     _option("requirements", "requirements.txt", "requirements.txt", "Python 依赖清单", "脚本与文档"),
     _option("start_bat", "start.bat", "start.bat", "Windows 启动脚本", "脚本与文档"),
-    _option("updater_py", "updater.py", "updater.py", "更新脚本本体", "脚本与文档", True),
+    _option("updater_py", "updater.py", "updater.py", "更新脚本本体", "脚本与文档"),
     _option("update_preserve_py", "update_preserve.py", "update_preserve.py", "更新白名单定义脚本", "脚本与文档"),
     _option("check_deps", "check_deps.py", "check_deps.py", "依赖检查脚本", "脚本与文档"),
     _option("clean_profile", "clean_profile.py", "clean_profile.py", "用户目录清理脚本", "脚本与文档"),

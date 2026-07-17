@@ -8,13 +8,14 @@ schemas.py - 数据模型和 API Schema 定义
 """
 
 import copy
-from typing import TypedDict, List, Optional, Literal, Dict, Any, Union
+from typing import TypedDict, List, Optional, Literal, Dict, Any, Union, NotRequired
 from pydantic import BaseModel, ConfigDict
 
 # ================= 动作类型 =================
 
 ActionType = Literal[
     "FILL_INPUT",
+    "SELECT_MODEL",
     "CLICK",
     "COORD_CLICK",
     "COORD_SCROLL",
@@ -57,6 +58,7 @@ class WorkflowStep(TypedDict):
     target: str
     optional: bool
     value: Optional[Any]
+    execution: NotRequired[Dict[str, Any]]
 
 
 # ================= 元素定义 =================
@@ -242,21 +244,25 @@ def get_default_file_paste_config() -> 'FilePasteConfig':
 
 class PromptPaddingConfig(TypedDict, total=False):
     """
-    提示词首尾填充配置
+    提示词开头注入配置
 
     用于 sites.json 中的 prompt_padding 字段
     """
     enabled: bool
     marker_text: str
     segments_per_side: int
+    random_insert_enabled: bool
+    random_insert_chars: str
 
 
 def get_default_prompt_padding_config() -> 'PromptPaddingConfig':
-    """获取默认的提示词首尾填充配置"""
+    """获取默认的提示词开头注入配置"""
     return {
         "enabled": False,
         "marker_text": "测试号，无实际意义",
         "segments_per_side": 12,
+        "random_insert_enabled": False,
+        "random_insert_chars": "",
     }
 
 
@@ -1264,6 +1270,10 @@ def validate_site_config(config: Dict[str, Any]) -> bool:
         if "marker_text" in prompt_padding and not isinstance(prompt_padding["marker_text"], str):
             return False
         if "segments_per_side" in prompt_padding and not isinstance(prompt_padding["segments_per_side"], int):
+            return False
+        if "random_insert_enabled" in prompt_padding and not isinstance(prompt_padding["random_insert_enabled"], bool):
+            return False
+        if "random_insert_chars" in prompt_padding and not isinstance(prompt_padding["random_insert_chars"], str):
             return False
 
     return True

@@ -199,10 +199,14 @@ def normalize_exact_tab_url(value: str) -> str:
         return raw
 
     default_port = 80 if scheme == "http" else 443 if scheme == "https" else None
-    port = parsed.port
-    netloc = hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        return raw
+    host_for_netloc = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = host_for_netloc
     if port and port != default_port:
-        netloc = f"{hostname}:{port}"
+        netloc = f"{host_for_netloc}:{port}"
 
     path = parsed.path or "/"
     return urlunparse((

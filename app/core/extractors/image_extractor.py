@@ -103,7 +103,9 @@ class ImageExtractor:
             mode = "all",
             allowContainerFallback = true,
             canvasExportMime = "image/jpeg",
-            canvasExportQuality = 0.88
+            canvasExportQuality = 0.88,
+            requestBaselineToken = "",
+            requestBaselineProperty = ""
         } = opts || {};
 
         // ===== 1. 确定根元素 =====
@@ -187,6 +189,21 @@ class ImageExtractor:
             const s = img.src;
             if (s && s.trim()) return s.trim();
             return "";
+        }
+
+        // A request baseline is attached to every image that existed immediately before
+        // submit. Keep only new nodes or existing nodes whose resolved source changed.
+        if (requestBaselineToken && requestBaselineProperty) {
+            nodes = nodes.filter((img) => {
+                const baseline = img[requestBaselineProperty];
+                if (!baseline || String(baseline.token || "") !== String(requestBaselineToken)) {
+                    return true;
+                }
+                return pickSrc(img) !== String(baseline.reference || "");
+            });
+            if (nodes.length === 0) {
+                return { images: [], warnings: [], scope: scopeUsed, nodeCount: 0 };
+            }
         }
 
         // 判断图片是否加载完成
@@ -507,6 +524,8 @@ class ImageExtractor:
             "allowContainerFallback": bool(final_config.get("allow_container_fallback", True)),
             "canvasExportMime": final_config.get("canvas_export_mime", "image/jpeg"),
             "canvasExportQuality": float(final_config.get("canvas_export_quality", 0.88) or 0.88),
+            "requestBaselineToken": str(final_config.get("request_baseline_token") or ""),
+            "requestBaselineProperty": str(final_config.get("request_baseline_property") or ""),
         }
         
         try:

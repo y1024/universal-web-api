@@ -235,6 +235,7 @@ window.TestDialog = {
                 new_chat_btn: '新建对话按钮',
                 message_wrapper: '消息外层',
                 generating_indicator: '生成中指示器',
+                retry_send_btn: '重试/重新运行按钮',
                 upload_btn: '上传按钮',
                 file_input: '原生文件输入框',
                 drop_zone: '拖拽区域'
@@ -413,6 +414,10 @@ window.TestDialog = {
                                       class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-white/70 dark:bg-slate-800/70 text-slate-700 dark:text-slate-200">
                                     实际查询：{{ result.locator_used }}
                                 </span>
+                                <span v-if="result.tabs_tested"
+                                      class="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-white/70 dark:bg-slate-800/70 text-slate-700 dark:text-slate-200">
+                                    已测试 {{ result.tabs_tested }} 个页面，{{ result.matched_tabs }} 个页面命中
+                                </span>
                             </div>
 
                             <p v-if="diagnosis" class="text-sm leading-6 text-slate-700 dark:text-slate-200">
@@ -436,6 +441,26 @@ window.TestDialog = {
                                      class="rounded-lg bg-white/70 dark:bg-slate-800/70 border border-white/80 dark:border-slate-700 px-3 py-2 text-sm text-slate-700 dark:text-slate-200">
                                     {{ tip }}
                                 </div>
+                            </div>
+
+                            <div v-if="result.tabs && result.tabs.length" class="mt-3 space-y-2">
+                                <div class="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">逐页结果</div>
+                                <div v-for="tab in result.tabs"
+                                     :key="tab.tab_id || tab.session_id || tab.url"
+                                     class="rounded-lg bg-white/70 dark:bg-slate-800/70 border border-white/80 dark:border-slate-700 px-3 py-2 text-sm text-slate-700 dark:text-slate-200">
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <span class="font-medium">{{ tab.tab_index ? '页面 #' + tab.tab_index : '浏览器页面' }}</span>
+                                        <span :class="tab.count > 0 ? 'text-emerald-600 dark:text-emerald-300' : 'text-red-600 dark:text-red-300'">
+                                            {{ tab.count > 0 ? '命中 ' + tab.count + ' 个' : '未命中' }}
+                                        </span>
+                                    </div>
+                                    <div v-if="tab.url" class="mt-1 text-xs text-slate-500 dark:text-slate-400 truncate" :title="tab.url">{{ tab.url }}</div>
+                                </div>
+                            </div>
+
+                            <div v-if="result.skipped_busy_tabs"
+                                 class="mt-3 rounded-lg bg-amber-50/80 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+                                另有 {{ result.skipped_busy_tabs }} 个同站点页面正在执行任务，本次未打断它们。
                             </div>
                         </div>
 

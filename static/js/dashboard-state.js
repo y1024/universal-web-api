@@ -70,6 +70,8 @@ function saveStoredSitesCache(sites, currentDomain) {
             isSaving: false,
             isLoading: false,
             configLoadSeq: 0,
+            imageConfigSaveSeq: 0,
+            imageConfigSaveQueue: null,
             showJsonPreview: false,
             showTokenDialog: false,
             showStepTemplates: false,

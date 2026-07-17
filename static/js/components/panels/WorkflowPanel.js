@@ -39,6 +39,7 @@ window.WorkflowPanel = {
             expandedJsEditors: {},
             customKeyModes: {},
             expandedHintEditors: {},
+            expandedExecutionMenus: {},
             hintToneOptions: [
                 { value: 'info', label: '提示' },
                 { value: 'success', label: '成功' },
@@ -221,6 +222,76 @@ window.WorkflowPanel = {
             return this.keyPresets.some(item => item.value === target) ? target : '__custom__';
         },
 
+        isExecutionExpanded(index) {
+            return !!this.expandedExecutionMenus[index];
+        },
+
+        ensureStepExecution(step) {
+            if (!step.execution || typeof step.execution !== 'object' || Array.isArray(step.execution)) {
+                step.execution = {};
+            }
+            if (!step.execution.retry || typeof step.execution.retry !== 'object') {
+                step.execution.retry = {
+                    enabled: false,
+                    max_attempts: 2,
+                    interval: 0.3
+                };
+            }
+            if (!step.execution.verification || typeof step.execution.verification !== 'object') {
+                step.execution.verification = {
+                    enabled: false,
+                    match: 'any',
+                    timeout: 2,
+                    poll_interval: 0.1,
+                    conditions: []
+                };
+            }
+            if (!Array.isArray(step.execution.verification.conditions)) {
+                step.execution.verification.conditions = [];
+            }
+            if (!step.execution.click_mode) step.execution.click_mode = 'inherit';
+            return step.execution;
+        },
+
+        toggleExecutionMenu(index, step) {
+            this.ensureStepExecution(step);
+            this.expandedExecutionMenus = {
+                ...this.expandedExecutionMenus,
+                [index]: !this.isExecutionExpanded(index)
+            };
+        },
+
+        addVerificationCondition(step) {
+            const execution = this.ensureStepExecution(step);
+            execution.verification.conditions.push({
+                target: step.target || '',
+                state: 'absent'
+            });
+        },
+
+        setVerificationEnabled(step, enabled) {
+            const execution = this.ensureStepExecution(step);
+            execution.verification.enabled = !!enabled;
+            if (enabled && execution.verification.conditions.length === 0) {
+                this.addVerificationCondition(step);
+            }
+        },
+
+        removeVerificationCondition(step, conditionIndex) {
+            const execution = this.ensureStepExecution(step);
+            execution.verification.conditions.splice(conditionIndex, 1);
+        },
+
+        getExecutionSummary(step) {
+            const execution = step.execution && typeof step.execution === 'object' ? step.execution : {};
+            const parts = [];
+            if (execution.click_mode === 'dom_safe') parts.push('后台 DOM');
+            if (execution.click_mode === 'cdp_mouse') parts.push('CDP 鼠标');
+            if (execution.retry?.enabled) parts.push(`最多 ${Number(execution.retry.max_attempts || 2)} 次`);
+            if (execution.verification?.enabled) parts.push('结果验证');
+            return parts.join(' · ') || '默认';
+        },
+
         normalizeHintStepValue(step) {
             const current = (step && step.value && typeof step.value === 'object' && !Array.isArray(step.value))
                 ? step.value
@@ -355,6 +426,7 @@ window.WorkflowPanel = {
                             <select v-model="step.action" @change="$emit('action-change', step)"
                                     class="border dark:border-gray-600 px-2 py-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent w-full text-sm mt-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
                                 <option value="FILL_INPUT">填入内容</option>
+                                <option value="SELECT_MODEL">选择请求模型</option>
                                 <option value="PAGE_FETCH">页面直发</option>
                                 <option value="CLICK">点击元素</option>
                                 <option value="COORD_CLICK">坐标点击</option>
@@ -369,10 +441,10 @@ window.WorkflowPanel = {
 
                         <div class="flex-1 min-w-0">
                             <label v-if="step.action !== 'READONLY_HINT'" class="text-xs font-medium text-gray-500 dark:text-gray-400">
-                                {{ ['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action) ? '目标选择器' : step.action === 'PAGE_FETCH' ? '发送方式' : ['COORD_CLICK', 'COORD_SCROLL'].includes(step.action) ? '坐标参数' : step.action === 'JS_EXEC' ? 'JavaScript' : step.action === 'READONLY_HINT' ? '提示内容' : '参数' }}
+                                {{ step.action === 'SELECT_MODEL' ? '模型选择器' : ['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action) ? '目标选择器' : step.action === 'PAGE_FETCH' ? '发送方式' : ['COORD_CLICK', 'COORD_SCROLL'].includes(step.action) ? '坐标参数' : step.action === 'JS_EXEC' ? 'JavaScript' : step.action === 'READONLY_HINT' ? '提示内容' : '参数' }}
                             </label>
 
-                            <select v-if="['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action)" v-model="step.target"
+                            <select v-if="['FILL_INPUT', 'SELECT_MODEL', 'CLICK', 'STREAM_WAIT'].includes(step.action)" v-model="step.target"
                                     class="border dark:border-gray-600 px-2 py-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent w-full mt-1 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
                                 <option value="" disabled>选择选择器...</option>
                                 <option v-for="(v, k) in selectors" :key="k" :value="k">{{ k }} ({{ v || '未设置' }})</option>
@@ -494,6 +566,7 @@ window.WorkflowPanel = {
                                             <select v-model="step.action" @change="$emit('action-change', step)"
                                                     class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent">
                                                 <option value="FILL_INPUT">填入内容</option>
+                                                <option value="SELECT_MODEL">选择请求模型</option>
                                                 <option value="PAGE_FETCH">页面直发</option>
                                                 <option value="CLICK">点击元素</option>
                                                 <option value="COORD_CLICK">坐标点击</option>
@@ -560,12 +633,130 @@ window.WorkflowPanel = {
                             </label>
                         </div>
 
+                        <div v-if="step.action === 'CLICK'" class="pt-4">
+                            <button @click="toggleExecutionMenu(index, step)"
+                                    type="button"
+                                    :title="isExecutionExpanded(index) ? '收起执行设置' : '展开执行设置'"
+                                    :class="[
+                                        'p-1.5 rounded-md transition-all duration-150',
+                                        isExecutionExpanded(index)
+                                            ? 'text-blue-600 bg-blue-100 dark:text-blue-300 dark:bg-blue-900/40'
+                                            : 'text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40'
+                                    ]">
+                                <span v-html="$icons.cog"></span>
+                            </button>
+                        </div>
+
                         <div class="pt-4">
                             <button @click="$emit('remove-step', index)"
                                     class="p-1.5 rounded-md transition-all duration-150 text-gray-500 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 active:scale-95">
                                 <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
                                 </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="step.action === 'CLICK' && isExecutionExpanded(index)"
+                         class="mt-3 ml-9 border-t border-gray-200 dark:border-gray-700 pt-3 space-y-4">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="text-sm font-medium text-gray-800 dark:text-gray-200">执行设置</div>
+                            <div class="text-xs text-gray-500 dark:text-gray-400">{{ getExecutionSummary(step) }}</div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <label class="block">
+                                <span class="block text-xs text-gray-500 dark:text-gray-400 mb-1">点击方式</span>
+                                <select v-model="step.execution.click_mode"
+                                        class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+                                    <option value="inherit">继承全局策略</option>
+                                    <option value="cdp_mouse">CDP 鼠标点击</option>
+                                    <option value="dom_safe">后台安全 DOM 点击</option>
+                                </select>
+                            </label>
+
+                            <label class="flex items-center gap-2 pt-5 text-sm text-gray-700 dark:text-gray-200">
+                                <input v-model="step.execution.retry.enabled" type="checkbox" class="rounded">
+                                <span>验证失败后重试</span>
+                            </label>
+
+                            <label class="flex items-center gap-2 pt-5 text-sm text-gray-700 dark:text-gray-200">
+                                <input :checked="step.execution.verification.enabled"
+                                       @change="setVerificationEnabled(step, $event.target.checked)"
+                                       type="checkbox" class="rounded">
+                                <span>验证点击结果</span>
+                            </label>
+                        </div>
+
+                        <div v-if="step.execution.retry.enabled" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <label class="block">
+                                <span class="block text-xs text-gray-500 dark:text-gray-400 mb-1">最多尝试次数</span>
+                                <input v-model.number="step.execution.retry.max_attempts" type="number" min="1" max="10" step="1"
+                                       class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+                            </label>
+                            <label class="block">
+                                <span class="block text-xs text-gray-500 dark:text-gray-400 mb-1">重试间隔（秒）</span>
+                                <input v-model.number="step.execution.retry.interval" type="number" min="0" max="30" step="0.1"
+                                       class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+                            </label>
+                        </div>
+
+                        <div v-if="step.execution.verification.enabled" class="space-y-3">
+                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                <label class="block">
+                                    <span class="block text-xs text-gray-500 dark:text-gray-400 mb-1">条件关系</span>
+                                    <select v-model="step.execution.verification.match"
+                                            class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+                                        <option value="any">满足任一条件</option>
+                                        <option value="all">满足全部条件</option>
+                                    </select>
+                                </label>
+                                <label class="block">
+                                    <span class="block text-xs text-gray-500 dark:text-gray-400 mb-1">验证超时（秒）</span>
+                                    <input v-model.number="step.execution.verification.timeout" type="number" min="0" max="60" step="0.1"
+                                           class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+                                </label>
+                                <label class="block">
+                                    <span class="block text-xs text-gray-500 dark:text-gray-400 mb-1">轮询间隔（秒）</span>
+                                    <input v-model.number="step.execution.verification.poll_interval" type="number" min="0.03" max="5" step="0.05"
+                                           class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+                                </label>
+                            </div>
+
+                            <div v-for="(condition, conditionIndex) in step.execution.verification.conditions"
+                                 :key="conditionIndex"
+                                 class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(150px,0.6fr)_36px] gap-2 items-end">
+                                <label class="block min-w-0">
+                                    <span class="block text-xs text-gray-500 dark:text-gray-400 mb-1">验证目标</span>
+                                    <select v-model="condition.target"
+                                            class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+                                        <option value="" disabled>选择选择器...</option>
+                                        <option v-for="(selectorValue, selectorKey) in selectors" :key="selectorKey" :value="selectorKey">
+                                            {{ selectorKey }} ({{ selectorValue || '未设置' }})
+                                        </option>
+                                    </select>
+                                </label>
+                                <label class="block">
+                                    <span class="block text-xs text-gray-500 dark:text-gray-400 mb-1">期望状态</span>
+                                    <select v-model="condition.state"
+                                            class="w-full border dark:border-gray-600 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+                                        <option value="present">存在</option>
+                                        <option value="absent">不存在</option>
+                                        <option value="visible">可见</option>
+                                        <option value="hidden">不可见</option>
+                                    </select>
+                                </label>
+                                <button @click="removeVerificationCondition(step, conditionIndex)"
+                                        type="button" title="删除验证条件"
+                                        class="h-9 w-9 inline-flex items-center justify-center rounded-md text-gray-500 hover:text-red-600 hover:bg-red-100 dark:text-gray-400 dark:hover:text-red-400 dark:hover:bg-red-900/30">
+                                    <span v-html="$icons.trash"></span>
+                                </button>
+                            </div>
+
+                            <button @click="addVerificationCondition(step)" type="button"
+                                    class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">
+                                <span v-html="$icons.plusCircle"></span>
+                                添加验证条件
                             </button>
                         </div>
                     </div>

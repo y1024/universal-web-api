@@ -629,9 +629,15 @@ def _transcode_media(path: Path, fmt: str) -> Path:
 
     cache_dir = path.parent / "_transcoded"
     cache_dir.mkdir(exist_ok=True)
-    out_path = cache_dir / f"{path.stem}{spec['ext']}"
+    # Include the complete source filename in the cache key.  Different input
+    # formats can share a stem (for example voice.wav and voice.ogg).
+    out_path = cache_dir / f"{path.name}{spec['ext']}"
     if out_path.exists() and out_path.stat().st_mtime >= path.stat().st_mtime and out_path.stat().st_size > 0:
         return out_path
+
+    temp_path = cache_dir / (
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}{spec['ext']}"
+    )
 
     cmd = [
         ffmpeg_path,
@@ -642,7 +648,7 @@ def _transcode_media(path: Path, fmt: str) -> Path:
         "-i",
         str(path),
         *spec["args"],
-        str(out_path),
+        str(temp_path),
     ]
     try:
         completed = subprocess.run(
@@ -654,16 +660,20 @@ def _transcode_media(path: Path, fmt: str) -> Path:
             check=False,
         )
     except subprocess.TimeoutExpired:
+        temp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=504, detail="media_transcode_timeout")
     except Exception as e:
+        temp_path.unlink(missing_ok=True)
         logger.warning(f"媒体转码启动失败: {e}")
         raise HTTPException(status_code=500, detail="media_transcode_failed")
 
-    if completed.returncode != 0 or not out_path.exists() or out_path.stat().st_size <= 0:
+    if completed.returncode != 0 or not temp_path.exists() or temp_path.stat().st_size <= 0:
+        temp_path.unlink(missing_ok=True)
         stderr = str(completed.stderr or "").strip()[:240]
         logger.warning(f"媒体转码失败: format={fmt}, file={path.name}, error={stderr}")
         raise HTTPException(status_code=500, detail="media_transcode_failed")
 
+    os.replace(temp_path, out_path)
     return out_path
 
 

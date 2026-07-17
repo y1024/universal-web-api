@@ -2,6 +2,7 @@
 app/api/deps.py - API 共享依赖
 """
 
+import hmac
 from typing import Iterable, Optional
 
 from fastapi import Header, HTTPException
@@ -54,7 +55,7 @@ def _verify_token_candidates(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if expected not in normalized:
+    if not any(hmac.compare_digest(expected, candidate) for candidate in normalized):
         raise HTTPException(
             status_code=401,
             detail="认证令牌无效",

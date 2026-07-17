@@ -815,7 +815,7 @@ async def _iter_openai_stream_chunks(body_iterator: AsyncIterator[Any]) -> Async
         await _close_async_iterator(body_iterator)
 
 
-async def _anthropic_stream_from_openai(
+async def _anthropic_stream_from_openai_inner(
     openai_stream: StreamingResponse,
     request_model: str,
     stop_sequences: Optional[List[str]] = None,
@@ -1509,6 +1509,33 @@ async def _anthropic_stream_from_openai(
         },
     )
     yield _pack_anthropic_sse("message_stop", {"type": "message_stop"})
+
+
+async def _anthropic_stream_from_openai(
+    openai_stream: StreamingResponse,
+    request_model: str,
+    stop_sequences: Optional[List[str]] = None,
+) -> AsyncIterator[str]:
+    """Translate an OpenAI stream and always close its upstream iterator.
+
+    The translator emits ``message_start`` before it begins iterating the
+    upstream response.  A client can disconnect at that first event, so the
+    cleanup must live outside the translator rather than only around its
+    upstream ``async for`` loop.
+    """
+    translated_stream = _anthropic_stream_from_openai_inner(
+        openai_stream,
+        request_model,
+        stop_sequences,
+    )
+    try:
+        async for event in translated_stream:
+            yield event
+    finally:
+        try:
+            await _close_async_iterator(translated_stream)
+        finally:
+            await _close_async_iterator(openai_stream.body_iterator)
 
 
 def _wrap_openai_response_as_anthropic(

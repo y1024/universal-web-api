@@ -269,19 +269,35 @@ class ImagePresetsManager:
         return default
 
     def _find_matching_preset(self, domain: str) -> Optional[tuple[str, Dict[str, Any]]]:
-        domain = str(domain or "").strip()
+        domain = str(domain or "").strip().lower().rstrip(".")
         if not domain:
             return None
 
-        if domain in self.presets and isinstance(self.presets[domain], dict):
-            return domain, self.presets[domain]
-
+        normalized_presets = []
         for preset_domain, preset_data in self.presets.items():
             if preset_domain.startswith("_") or not isinstance(preset_data, dict):
                 continue
-            if domain.endswith(preset_domain) or preset_domain in domain:
-                logger.debug(f"使用模糊匹配预设: {domain} -> {preset_domain}")
+            normalized_preset_domain = str(preset_domain).strip().lower().rstrip(".")
+            if not normalized_preset_domain:
+                continue
+            normalized_presets.append((preset_domain, preset_data, normalized_preset_domain))
+
+        for preset_domain, preset_data, normalized_preset_domain in normalized_presets:
+            if domain == normalized_preset_domain:
                 return preset_domain, preset_data
+
+        suffix_matches = [
+            item
+            for item in normalized_presets
+            if domain.endswith(f".{item[2]}")
+        ]
+        if suffix_matches:
+            preset_domain, preset_data, _ = max(
+                suffix_matches,
+                key=lambda item: len(item[2]),
+            )
+            logger.debug(f"使用模糊匹配预设: {domain} -> {preset_domain}")
+            return preset_domain, preset_data
 
         return None
     

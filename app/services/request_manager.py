@@ -151,6 +151,12 @@ class RequestContext:
             self.started_at_monotonic = time.monotonic()
             self.last_activity_at = time.time()
             logger.debug(f"[{self.request_id}] 重置请求绝对超时计时")
+
+    def mark_activity(self) -> None:
+        """Refresh idle activity without extending the request's hard timeout."""
+        with self._lock:
+            if self.status == RequestStatus.RUNNING:
+                self.last_activity_at = time.time()
     
     def mark_completed(self):
         with self._lock:
@@ -1230,6 +1236,7 @@ class RequestManager:
         *,
         endpoint: str = "",
         route_domain: str = "",
+        route_group: str = "",
         tab_index: Optional[int] = None,
         preset_name: Optional[str] = None,
     ) -> None:
@@ -1264,6 +1271,7 @@ class RequestManager:
                 "endpoint": endpoint,
                 "route_domain": monitor_route_domain,
                 "target_domain": monitor_route_domain,
+                "route_group": str(route_group or "").strip(),
                 "tab_index": tab_index,
                 "preset_name": resolved_preset,
                 "model": model,
@@ -1334,6 +1342,8 @@ class RequestManager:
         capture_limit = self._request_monitor_capture_chars()
         terminal = False
         with ctx._lock:
+            if ctx.status == RequestStatus.RUNNING:
+                ctx.last_activity_at = time.time()
             if text:
                 stored_text = self._sanitize_text_for_storage(
                     text,
@@ -1369,6 +1379,9 @@ class RequestManager:
     def capture_response_chunk(self, ctx: RequestContext, chunk: Any) -> None:
         if ctx is None or not isinstance(chunk, str):
             return
+
+        if chunk:
+            ctx.mark_activity()
 
         payloads = self._iter_sse_payloads_for_context(ctx, chunk)
         if not payloads:
@@ -1437,6 +1450,8 @@ class RequestManager:
     ) -> None:
         if ctx is None:
             return
+
+        ctx.mark_activity()
 
         text = self._extract_response_text(payload)
         media_items = self._extract_media_items(payload)
@@ -1636,6 +1651,7 @@ class RequestManager:
             "generation_ms": generation_ms,
             "target_domain": self._canonical_monitor_domain(monitor.get("target_domain") or monitor.get("route_domain")) or "未知域名",
             "route_domain": self._canonical_monitor_domain(monitor.get("route_domain")),
+            "route_group": str(monitor.get("route_group") or ""),
             "preset_name": str(monitor.get("preset_name") or "默认预设"),
             "tab_index": monitor.get("tab_index"),
             "tab_id": snapshot["tab_id"] or monitor.get("tab_id") or "",
@@ -1754,6 +1770,7 @@ class RequestManager:
             record.get("success"),
             record.get("target_domain"),
             record.get("route_domain"),
+            record.get("route_group"),
             record.get("preset_name"),
             record.get("tab_index"),
             record.get("tab_id"),
@@ -1807,6 +1824,7 @@ class RequestManager:
             record.get("success"),
             record.get("target_domain"),
             record.get("route_domain"),
+            record.get("route_group"),
             record.get("preset_name"),
             record.get("tab_index"),
             record.get("tab_id"),

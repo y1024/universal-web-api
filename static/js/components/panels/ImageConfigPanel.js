@@ -13,7 +13,8 @@ window.ImageConfigPanel = {
             showPresetMenu: false,
             availablePresets: [],
             currentPreset: null,
-            loadingPresets: false
+            loadingPresets: false,
+            imagePresetRequestSeq: 0
         };
     },
     computed: {
@@ -77,6 +78,8 @@ window.ImageConfigPanel = {
     },
     watch: {
         currentDomain(newVal) {
+            this.imagePresetRequestSeq += 1;
+            this.currentPreset = null;
             if (newVal) this.checkCurrentPreset();
         }
     },
@@ -253,9 +256,15 @@ window.ImageConfigPanel = {
         },
 
         async checkCurrentPreset() {
-            if (!this.currentDomain) return;
+            const domain = String(this.currentDomain || '').trim();
+            const requestSeq = Number(this.imagePresetRequestSeq || 0) + 1;
+            this.imagePresetRequestSeq = requestSeq;
+            if (!domain) {
+                this.currentPreset = null;
+                return;
+            }
             try {
-                const response = await fetch('/api/sites/' + encodeURIComponent(this.currentDomain) + '/image-preset', {
+                const response = await fetch('/api/sites/' + encodeURIComponent(domain) + '/image-preset', {
                     headers: this.buildAuthHeaders()
                 });
                 if (!response.ok) {
@@ -263,8 +272,14 @@ window.ImageConfigPanel = {
                     throw new Error(err.detail || ('HTTP ' + response.status));
                 }
                 const data = await response.json();
+                if (requestSeq !== this.imagePresetRequestSeq || String(this.currentDomain || '').trim() !== domain) {
+                    return;
+                }
                 this.currentPreset = data.available ? data : null;
             } catch (e) {
+                if (requestSeq !== this.imagePresetRequestSeq || String(this.currentDomain || '').trim() !== domain) {
+                    return;
+                }
                 console.error('读取当前图片预设失败:', e);
                 this.currentPreset = null;
             }

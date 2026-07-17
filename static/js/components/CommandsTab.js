@@ -53,6 +53,7 @@ window.CommandsTabComponent = {
             commandResults: [],
             commandResultsLoading: false,
             commandResultsTimer: null,
+            commandResultsRequestSeq: 0,
             selectedAdvancedRuleIndex: 0,
 
             // 代理切换默认配置
@@ -166,6 +167,9 @@ window.CommandsTabComponent = {
         showEditor(nextValue) {
             if (!nextValue) {
                 this.advancedEditorMode = 'ui';
+                this.commandResultsRequestSeq += 1;
+                this.commandResults = [];
+                this.commandResultsLoading = false;
             }
         }
     },

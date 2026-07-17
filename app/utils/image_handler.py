@@ -12,6 +12,7 @@ import os
 import re
 import hashlib
 import time
+import warnings
 from app.core.config import get_logger
 import requests
 import base64
@@ -25,16 +26,31 @@ from app.utils.system_clipboard import (
     ClipboardUnsupportedError,
     copy_image_to_native_clipboard,
 )
+from app.utils.remote_resource import get_public_remote_resource
 
 
 logger = get_logger("IMG_HDL")
 
 # ================= 配置常量 =================
 
-IMAGE_DIR = Path("image")
+IMAGE_DIR = Path("temp") / "image_inputs"
 MAX_IMAGE_SIZE_MB = 20  # 单张图片最大 20MB
+MAX_IMAGES_PER_REQUEST = 8
+MAX_IMAGES_TOTAL_MB = 50
+MAX_IMAGE_PIXELS = 40_000_000
+MAX_IMAGE_DIMENSION = 16_384
+MAX_IMAGE_FRAMES = 100
+IMAGE_INPUT_TTL_SECONDS = 60 * 60
 DOWNLOAD_TIMEOUT = 30   # 下载超时 30 秒
 SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
+
+_PIL_FORMAT_EXTENSIONS = {
+    'JPEG': '.jpg',
+    'PNG': '.png',
+    'GIF': '.gif',
+    'WEBP': '.webp',
+    'BMP': '.bmp',
+}
 
 
 # ================= 图片提取 =================
@@ -53,11 +69,15 @@ def extract_images_from_messages(messages: List[Dict]) -> List[str]:
         return []
     
     # 确保 image 目录存在
-    IMAGE_DIR.mkdir(exist_ok=True)
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    _cleanup_expired_image_inputs()
     
     image_paths = []
-    
+    total_bytes = 0
+
     for msg in messages:
+        if not isinstance(msg, dict):
+            continue
         content = msg.get('content')
         
         if not content:
@@ -109,8 +129,23 @@ def extract_images_from_messages(messages: List[Dict]) -> List[str]:
                         url = str(image_url_obj)
                     
                     if url:
+                        if len(image_paths) >= MAX_IMAGES_PER_REQUEST:
+                            logger.warning(f"[IMAGE] 单次请求图片数量超过限制: {MAX_IMAGES_PER_REQUEST}")
+                            return image_paths
                         local_path = _process_single_image(url)
                         if local_path:
+                            try:
+                                image_size = Path(local_path).stat().st_size
+                            except OSError:
+                                image_size = 0
+                            if total_bytes + image_size > MAX_IMAGES_TOTAL_MB * 1024 * 1024:
+                                try:
+                                    Path(local_path).unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                                logger.warning(f"[IMAGE] 单次请求图片累计大小超过限制: {MAX_IMAGES_TOTAL_MB}MB")
+                                return image_paths
+                            total_bytes += image_size
                             image_paths.append(local_path)
     
     if image_paths:
@@ -138,11 +173,6 @@ def _process_single_image(url: str) -> Optional[str]:
         elif url.startswith(("http://", "https://")):
             return _download_image(url)
         
-        # 情况3：本地文件路径（直接返回）
-        elif os.path.exists(url):
-            logger.info(f"[IMAGE] 使用本地文件: {url}")
-            return url
-        
         else:
             logger.warning(f"[IMAGE] 不支持的图片格式: {url[:100]}")
             return None
@@ -150,6 +180,47 @@ def _process_single_image(url: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"[IMAGE] 处理失败: {e}")
         return None
+
+
+def _validate_image_bytes(image_bytes: bytes) -> Optional[str]:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with io.BytesIO(image_bytes) as image_buffer:
+                with Image.open(image_buffer) as img:
+                    width, height = img.size
+                    frames = int(getattr(img, "n_frames", 1) or 1)
+                    detected_ext = _PIL_FORMAT_EXTENSIONS.get(str(img.format or '').upper())
+                    if not detected_ext:
+                        raise ValueError(f"unsupported_image_format:{img.format}")
+                    if width <= 0 or height <= 0:
+                        raise ValueError("invalid_image_dimensions")
+                    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+                        raise ValueError(f"image_dimensions_too_large:{width}x{height}")
+                    if width * height > MAX_IMAGE_PIXELS:
+                        raise ValueError(f"image_pixels_too_large:{width * height}")
+                    if frames > MAX_IMAGE_FRAMES:
+                        raise ValueError(f"image_frames_too_many:{frames}")
+                    img.verify()
+        return detected_ext
+    except Exception as exc:
+        logger.warning(f"[IMAGE] 图片格式或尺寸验证失败: {str(exc)[:120]}")
+        return None
+
+
+def _cleanup_expired_image_inputs(now: Optional[float] = None) -> None:
+    cutoff = float(time.time() if now is None else now) - IMAGE_INPUT_TTL_SECONDS
+    try:
+        for path in IMAGE_DIR.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        return
 
 
 def _save_base64_image(data_uri: str) -> Optional[str]:
@@ -166,6 +237,10 @@ def _save_base64_image(data_uri: str) -> Optional[str]:
             return None
         
         image_format = match.group(1).lower()
+        claimed_ext = f".{image_format}"
+        if claimed_ext not in SUPPORTED_FORMATS:
+            logger.warning(f"[IMAGE] 不支持的 Base64 图片格式: {image_format}")
+            return None
         base64_data = match.group(2)
         # 🆕 空数据直接拒绝（AstrBot 常见：只给前缀 data:image/...;base64,）
         if not base64_data or not base64_data.strip():
@@ -179,7 +254,8 @@ def _save_base64_image(data_uri: str) -> Optional[str]:
             logger.warning(f"[IMAGE] Base64 图片过大: {estimated_size / (1024 * 1024):.2f}MB")
             return None
         # 解码
-        image_bytes = base64.b64decode(compact_base64)
+        padded_base64 = compact_base64 + ("=" * ((4 - len(compact_base64) % 4) % 4))
+        image_bytes = base64.b64decode(padded_base64, validate=True)
         
         # 大小检查
         size_mb = len(image_bytes) / (1024 * 1024)
@@ -187,10 +263,14 @@ def _save_base64_image(data_uri: str) -> Optional[str]:
             logger.warning(f"[IMAGE] Base64 图片过大: {size_mb:.2f}MB")
             return None
         
+        detected_ext = _validate_image_bytes(image_bytes)
+        if not detected_ext:
+            return None
+
         # 生成文件名
         timestamp = int(time.time() * 1000)
-        file_hash = hashlib.md5(image_bytes).hexdigest()[:8]
-        filename = f"{timestamp}_{file_hash}.{image_format}"
+        file_hash = hashlib.sha256(image_bytes).hexdigest()[:12]
+        filename = f"{timestamp}_{file_hash}{detected_ext}"
         filepath = IMAGE_DIR / filename
         
         # 保存文件
@@ -214,9 +294,9 @@ def _download_image(url: str) -> Optional[str]:
         logger.debug(f"[IMAGE] 开始下载: {url[:100]}")
         
         # 下载
-        response = requests.get(
+        response = get_public_remote_resource(
             url,
-            timeout=DOWNLOAD_TIMEOUT,
+            timeout=(8, DOWNLOAD_TIMEOUT),
             headers={'User-Agent': 'Mozilla/5.0'},
             stream=True
         )
@@ -257,18 +337,14 @@ def _download_image(url: str) -> Optional[str]:
         # 尝试从 URL 或 Content-Type 推断格式
         ext = _guess_extension(url, content_type)
 
-        # 验证图片格式
-        try:
-            with io.BytesIO(image_bytes) as image_buffer:
-                with Image.open(image_buffer) as img:
-                    img.verify()
-                    ext = f".{img.format.lower()}" if img.format else ext
-        except Exception:
-            logger.warning("[IMAGE] 图片格式验证失败")
+        detected_ext = _validate_image_bytes(image_bytes)
+        if not detected_ext:
+            return None
+        ext = detected_ext
         
         # 生成文件名
         timestamp = int(time.time() * 1000)
-        file_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+        file_hash = hashlib.sha256(image_bytes).hexdigest()[:12]
         filename = f"{timestamp}_{file_hash}{ext}"
         filepath = IMAGE_DIR / filename
         

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arena.ai Native Stop Repair
 // @namespace    local.codex.arena-hard-stop
-// @version      2.10.0
+// @version      2.10.1
 // @description  Repairs Arena.ai's lost active stream state and hard-aborts active stream fetches.
 // @match        https://arena.ai/*
 // @run-at       document-start
@@ -13,11 +13,12 @@
 (function () {
   'use strict';
 
-  const VERSION = '2.10.0';
+  const VERSION = '2.10.1';
   const ENABLE_STORE_CONTROLLER_REPAIR = false;
   const ENABLE_STALE_CONTROLLER_CLEANUP = true;
   const ENABLE_SYNTHETIC_CONTROLLER_REPAIR = false;
   const ENABLE_FAILED_RERUN_HEAL = false;
+  const REPAIR_INTERVAL_MS = 1000;
   const LOG_PREFIX = '[Arena Hard Stop]';
   const ID_RE = /\b019[a-z0-9-]{20,}\b/ig;
   const STREAM_RE = /\/nextjs-api\/stream\/(create-evaluation|post-to-evaluation|retry-evaluation-session-message|rerun|resample|resume-webdev|resume-video-workflow|skip-direct-battle)\b/;
@@ -1553,7 +1554,7 @@
     if (repairTimer) {
       clearInterval(repairTimer);
     }
-    repairTimer = setInterval(scheduleStateRepair, 300);
+    repairTimer = setInterval(scheduleStateRepair, REPAIR_INTERVAL_MS);
     log('installed');
   }
 

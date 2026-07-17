@@ -761,9 +761,8 @@ class _GlobalNetworkInterceptionManager:
         if not session_id:
             return True
 
-        worker = None
         with self._lock:
-            worker = self._workers.pop(session_id, None)
+            worker = self._workers.get(session_id)
         if not worker:
             return True
 
@@ -784,6 +783,9 @@ class _GlobalNetworkInterceptionManager:
                     f"requested_join={join})"
                 )
                 return False
+
+        if not worker.thread.is_alive():
+            self._forget_worker_if_current(worker)
 
         if reason:
             logger.debug(f"[GlobalNet] 停止监听: {session_id} ({reason})")

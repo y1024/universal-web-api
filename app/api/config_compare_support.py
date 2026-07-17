@@ -122,7 +122,7 @@ _PRESET_COMPARE_FIELD_LABELS = {
     "stream_config": "流式配置",
     "image_extraction": "图片提取",
     "file_paste": "文件粘贴",
-    "prompt_padding": "首尾填充",
+    "prompt_padding": "开头注入",
     "stealth": "低熵模式",
     "extractor_id": "提取器",
     "extractor_verified": "提取器验证",

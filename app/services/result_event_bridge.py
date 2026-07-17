@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -22,7 +23,8 @@ from app.core.parsers.lmarena_parser import _CP1252_TO_LATIN1
 
 logger = get_logger("RESULT.EVENT.BRIDGE")
 _WRITE_LOCK = threading.Lock()
-_LAST_DIGEST_BY_KEY: Dict[str, str] = {}
+_DEDUPE_LOCK = threading.Lock()
+_LAST_DIGEST_BY_KEY: "OrderedDict[str, str]" = OrderedDict()
 _MODEL_MAP_LOCK = threading.Lock()
 _MODEL_ID_MAP: Dict[str, str] = {}
 _MODEL_MAP_PATH: Optional[Path] = None
@@ -366,17 +368,30 @@ def _event_digest(event: Dict[str, Any]) -> str:
     return hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:24]
 
 
+def _get_dedupe_max_entries() -> int:
+    return max(1, _env_int("ARENA_EVENT_BRIDGE_DEDUPE_MAX_ENTRIES", 4096))
+
+
 def _dedupe_and_append(event: Dict[str, Any]) -> bool:
     digest = str(event.get("event_id") or "")
     dedupe_key = (
         f"{event.get('session_id')}:{event.get('completion_id')}:"
         f"{event.get('conversation_id')}:{event.get('parser_id')}"
     )
-    if digest and _LAST_DIGEST_BY_KEY.get(dedupe_key) == digest:
-        return False
-    if digest:
-        _LAST_DIGEST_BY_KEY[dedupe_key] = digest
-    _append_event(event)
+    with _DEDUPE_LOCK:
+        if digest and _LAST_DIGEST_BY_KEY.get(dedupe_key) == digest:
+            _LAST_DIGEST_BY_KEY.move_to_end(dedupe_key)
+            return False
+
+        # Keep the check, write, and cache update atomic so concurrent parser
+        # callbacks cannot append the same event more than once.
+        _append_event(event)
+        if digest:
+            _LAST_DIGEST_BY_KEY[dedupe_key] = digest
+            _LAST_DIGEST_BY_KEY.move_to_end(dedupe_key)
+            max_entries = _get_dedupe_max_entries()
+            while len(_LAST_DIGEST_BY_KEY) > max_entries:
+                _LAST_DIGEST_BY_KEY.popitem(last=False)
     return True
 
 

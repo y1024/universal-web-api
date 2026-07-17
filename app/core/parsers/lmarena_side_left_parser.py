@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 
 from app.core.config import logger
 from .base import ResponseParser
-from .lmarena_parser import _CP1252_TO_LATIN1, _extract_arena_image_items
+from .lmarena_parser import LmarenaParser, _CP1252_TO_LATIN1, _extract_arena_image_items
 
 
 class LmarenaSideLeftParser(ResponseParser):
@@ -88,14 +88,16 @@ class LmarenaSideLeftParser(ResponseParser):
 
             new_content = "".join(content_parts)
             if new_content:
-                if self._accumulated and new_content == self._accumulated:
+                delta, next_accumulated = LmarenaParser._content_delta(
+                    self._accumulated,
+                    new_content,
+                    append_disjoint=True,
+                )
+                if self._accumulated and not delta:
                     logger.debug("[LmarenaSideLeftParser] duplicate full response ignored")
-                elif self._accumulated and new_content.startswith(self._accumulated):
-                    result["content"] = new_content[len(self._accumulated):]
-                    self._accumulated = new_content
                 else:
-                    result["content"] = new_content
-                    self._accumulated = new_content
+                    result["content"] = delta
+                self._accumulated = next_accumulated
 
             if images:
                 result["images"] = images

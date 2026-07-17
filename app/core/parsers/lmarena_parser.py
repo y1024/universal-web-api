@@ -155,7 +155,12 @@ class LmarenaParser(ResponseParser):
         self._last_debug_raw_signature = ""
 
     @staticmethod
-    def _content_delta(accumulated: str, candidate: str) -> tuple[str, str]:
+    def _content_delta(
+        accumulated: str,
+        candidate: str,
+        *,
+        append_disjoint: bool = False,
+    ) -> tuple[str, str]:
         """Return unseen text and the new accumulated value for repeated SSE bodies."""
         if not candidate:
             return "", accumulated
@@ -171,6 +176,9 @@ class LmarenaParser(ResponseParser):
             if accumulated.endswith(candidate[:overlap]):
                 delta = candidate[overlap:]
                 return delta, accumulated + delta
+
+        if append_disjoint:
+            return candidate, accumulated + candidate
 
         # A parser instance belongs to one response stream. A body that neither
         # extends nor overlaps the emitted text is a stale/non-monotonic replay;

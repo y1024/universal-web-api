@@ -116,7 +116,8 @@ class NetworkMonitor:
                  stop_checker: Optional[Callable[[], bool]] = None,
                  stream_config: Optional[Dict] = None,
                  event_handler: Optional[Callable[[Dict[str, Any]], bool]] = None,
-                 result_handler: Optional[Callable[[Dict[str, Any]], bool]] = None):
+                 result_handler: Optional[Callable[[Dict[str, Any]], bool]] = None,
+                 image_config: Optional[Dict] = None):
         """
         初始化网络监听器
         
@@ -136,6 +137,7 @@ class NetworkMonitor:
         
         # 从配置中加载参数
         self._stream_config = stream_config or {}
+        self._image_config = image_config or {}
         network_config = self._stream_config.get("network", {})
         top_level_hard_timeout = self._stream_config.get(
             "hard_timeout",
@@ -271,6 +273,25 @@ class NetworkMonitor:
             return bool(self.parser.should_fallback_to_dom_when_no_visible_content())
         except Exception:
             return False
+
+    def _should_wait_for_followup_stream(self) -> bool:
+        checker = getattr(self.parser, "should_wait_for_followup_stream", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    def _prepare_parser_for_followup_stream(self) -> None:
+        prepare = getattr(self.parser, "prepare_for_followup_stream", None)
+        if callable(prepare):
+            try:
+                prepare()
+                return
+            except Exception as e:
+                logger.debug(f"[NetworkMonitor] 准备后续流解析器失败，回退普通重置: {e}")
+        self._reset_parser_state()
 
     @staticmethod
     def _parse_result_has_unclosed_render_output(parse_result: Dict[str, Any]) -> bool:
@@ -1576,6 +1597,7 @@ class NetworkMonitor:
         active_stream_body = ""
         active_stream_body_source = ""
         completed_by_done = False
+        waiting_for_followup_stream = False
         completion_reason = "unknown"
 
         while True:
@@ -1706,6 +1728,16 @@ class NetworkMonitor:
                             yield self.formatter.pack_chunk(content, completion_id=completion_id)
 
                         if done:
+                            if self._should_wait_for_followup_stream():
+                                waiting_for_followup_stream = True
+                                active_stream_response = None
+                                active_stream_event = {}
+                                active_stream_body = ""
+                                active_stream_body_source = ""
+                                self._prepare_parser_for_followup_stream()
+                                last_activity_time = time.time()
+                                logger.info("[NetworkMonitor] GLM 中间流已结束，继续等待自动确认后的后续流")
+                                continue
                             if self._should_fallback_on_empty_done(parse_result):
                                 logger.warning(
                                     "[NetworkMonitor] 目标流返回完成标志但未产出有效正文，回退到 DOM 监听 "
@@ -1720,6 +1752,16 @@ class NetworkMonitor:
                         continue
 
                     if self._stream_capture_complete(active_stream_response):
+                        if self._should_wait_for_followup_stream():
+                            waiting_for_followup_stream = True
+                            active_stream_response = None
+                            active_stream_event = {}
+                            active_stream_body = ""
+                            active_stream_body_source = ""
+                            self._prepare_parser_for_followup_stream()
+                            last_activity_time = time.time()
+                            logger.info("[NetworkMonitor] GLM 中间流已完成，继续等待自动确认后的后续流")
+                            continue
                         if self._total_chunks == 0 and self._should_fallback_to_dom_on_empty_stream():
                             logger.warning(
                                 "[NetworkMonitor] 流响应已结束但仍无有效正文，回退到 DOM 监听 "
@@ -1743,6 +1785,11 @@ class NetworkMonitor:
 
                 silence_duration = time.time() - last_activity_time
                 effective_silence_threshold = float(self._silence_threshold)
+                if waiting_for_followup_stream:
+                    effective_silence_threshold = max(
+                        float(self._first_content_timeout),
+                        effective_silence_threshold,
+                    )
                 if (
                     active_stream_response is not None
                     and self._total_chunks == 0
@@ -1761,6 +1808,14 @@ class NetworkMonitor:
                     )
 
                 if silence_duration > effective_silence_threshold:
+                    if waiting_for_followup_stream:
+                        logger.warning(
+                            "[NetworkMonitor] 等待 GLM 自动确认后的后续流超时，回退到 DOM 监听 "
+                            f"(idle={silence_duration:.1f}s, limit={effective_silence_threshold:.1f}s)"
+                        )
+                        raise NetworkMonitorTimeout(
+                            f"GLM 后续流未在宽限期内到达（{silence_duration:.1f}s）"
+                        )
                     if (
                         self._total_chunks > 0
                         and self._parse_result_has_unclosed_render_output(
@@ -1958,6 +2013,12 @@ class NetworkMonitor:
                     f"(targets={stream_target_hits}, source={raw_body_source}, 长度={len(raw_body)} 字符)",
                     interval_sec=5.0,
                 )
+            if waiting_for_followup_stream:
+                waiting_for_followup_stream = False
+                logger.info(
+                    "[NetworkMonitor] 已捕获 GLM 自动确认后的后续流正文 "
+                    f"(target={stream_target_hits}, body_len={len(raw_body)})"
+                )
 
             # 解析响应
             try:
@@ -2032,6 +2093,16 @@ class NetworkMonitor:
                 yield self.formatter.pack_chunk(content, completion_id=completion_id)
 
             if done:
+                if self._should_wait_for_followup_stream():
+                    waiting_for_followup_stream = True
+                    active_stream_response = None
+                    active_stream_event = {}
+                    active_stream_body = ""
+                    active_stream_body_source = ""
+                    self._prepare_parser_for_followup_stream()
+                    last_activity_time = time.time()
+                    logger.info("[NetworkMonitor] GLM 中间流已结束，继续等待自动确认后的后续流")
+                    continue
                 if self._should_fallback_on_empty_done(parse_result):
                     logger.warning(
                         "[NetworkMonitor] 目标流返回完成标志但未产出有效正文，回退到 DOM 监听 "
@@ -2079,6 +2150,10 @@ class NetworkMonitor:
             normalized,
             cookies=cookies_dict,
             headers=headers,
+            max_bytes=max(
+                1,
+                int(self._image_config.get("max_size_mb") or 10),
+            ) * 1024 * 1024,
         )
         if result:
             self._prefetched_image_urls.add(normalized)
@@ -2209,7 +2284,8 @@ def create_network_monitor(tab, formatter: SSEFormatter,
                            stream_config: Dict,
                            stop_checker: Optional[Callable[[], bool]] = None,
                            event_handler: Optional[Callable[[Dict[str, Any]], bool]] = None,
-                           result_handler: Optional[Callable[[Dict[str, Any]], bool]] = None) -> NetworkMonitor:
+                           result_handler: Optional[Callable[[Dict[str, Any]], bool]] = None,
+                           image_config: Optional[Dict] = None) -> NetworkMonitor:
     """
     创建网络监听器（工厂函数）
     
@@ -2248,6 +2324,7 @@ def create_network_monitor(tab, formatter: SSEFormatter,
         parser=parser,
         stop_checker=stop_checker,
         stream_config=stream_config,
+        image_config=image_config,
         event_handler=event_handler,
         result_handler=result_handler,
     )

@@ -379,37 +379,67 @@ window.CommandsTabMethods = {
 
         async loadCommandResults(silent = false) {
             if (!this.editingCommand?.id || this.isNew || !this.advancedUiResultsEnabled) {
+                this.commandResultsRequestSeq += 1;
                 this.commandResults = [];
                 return;
             }
+            if (silent && this.commandResultsLoading) return;
+            const commandId = String(this.editingCommand.id);
+            const requestSeq = (this.commandResultsRequestSeq || 0) + 1;
+            this.commandResultsRequestSeq = requestSeq;
             if (!silent) this.commandResultsLoading = true;
             try {
-                const data = await this.apiRequest('/api/commands/' + encodeURIComponent(this.editingCommand.id) + '/results');
+                const data = await this.apiRequest('/api/commands/' + encodeURIComponent(commandId) + '/results');
+                if (
+                    requestSeq !== this.commandResultsRequestSeq
+                    || String(this.editingCommand?.id || '') !== commandId
+                    || !this.showEditor
+                ) {
+                    return;
+                }
                 this.commandResults = Array.isArray(data.records) ? data.records : [];
             } catch (e) {
-                if (!silent) this.$emit('notify', { type: 'error', message: '加载结果失败: ' + e.message });
+                if (!silent && requestSeq === this.commandResultsRequestSeq) {
+                    this.$emit('notify', { type: 'error', message: '加载结果失败: ' + e.message });
+                }
             } finally {
-                if (!silent) this.commandResultsLoading = false;
+                if (!silent && requestSeq === this.commandResultsRequestSeq) {
+                    this.commandResultsLoading = false;
+                }
             }
         },
 
         async clearCommandResults() {
             if (!this.editingCommand?.id || !window.confirm('确定清空这个命令的全部持久化结果吗？')) return;
-            await this.apiRequest('/api/commands/' + encodeURIComponent(this.editingCommand.id) + '/results', { method: 'DELETE' });
-            this.commandResults = [];
-            this.$emit('notify', { type: 'success', message: '结果已清空' });
+            const commandId = String(this.editingCommand.id);
+            try {
+                await this.apiRequest('/api/commands/' + encodeURIComponent(commandId) + '/results', { method: 'DELETE' });
+                if (String(this.editingCommand?.id || '') !== commandId || !this.showEditor) return;
+                this.commandResultsRequestSeq += 1;
+                this.commandResults = [];
+                this.$emit('notify', { type: 'success', message: '结果已清空' });
+            } catch (error) {
+                this.$emit('notify', { type: 'error', message: '清空结果失败: ' + error.message });
+            }
         },
 
         async clearSelectedRuleResults(field) {
             const rule = this.getSelectedAdvancedRule(field);
             if (!this.editingCommand?.id || !rule?.id) return;
             if (!window.confirm('确定清空当前模板的持久化结果吗？')) return;
-            const url = '/api/commands/' + encodeURIComponent(this.editingCommand.id)
-                + '/results?rule_id=' + encodeURIComponent(rule.id);
-            await this.apiRequest(url, { method: 'DELETE' });
+            const commandId = String(this.editingCommand.id);
             const ruleId = String(rule.id);
-            this.commandResults = this.commandResults.filter(item => String(item.rule_id) !== ruleId);
-            this.$emit('notify', { type: 'success', message: '当前模板结果已清空' });
+            const url = '/api/commands/' + encodeURIComponent(commandId)
+                + '/results?rule_id=' + encodeURIComponent(rule.id);
+            try {
+                await this.apiRequest(url, { method: 'DELETE' });
+                if (String(this.editingCommand?.id || '') !== commandId || !this.showEditor) return;
+                this.commandResultsRequestSeq += 1;
+                this.commandResults = this.commandResults.filter(item => String(item.rule_id) !== ruleId);
+                this.$emit('notify', { type: 'success', message: '当前模板结果已清空' });
+            } catch (error) {
+                this.$emit('notify', { type: 'error', message: '清空当前模板结果失败: ' + error.message });
+            }
         },
 
         formatCommandResultTime(value) {
@@ -1018,6 +1048,10 @@ window.CommandsTabMethods = {
         },
 
         openNewCommand() {
+            this.commandResultsRequestSeq += 1;
+            this.commandResults = [];
+            this.commandResultsLoading = false;
+            this.selectedAdvancedRuleIndex = 0;
             this.editingCommand = this.normalizeCommand({
                 name: '新命令',
                 enabled: true,
@@ -1075,6 +1109,10 @@ window.CommandsTabMethods = {
         },
 
         openEditCommand(cmd) {
+            this.commandResultsRequestSeq += 1;
+            this.commandResults = [];
+            this.commandResultsLoading = false;
+            this.selectedAdvancedRuleIndex = 0;
             this.editingCommand = this.normalizeCommand(cmd);
             if (['command_check', 'command_result_match', 'command_result_event'].includes(this.editingCommand?.trigger?.type)) {
                 this.handleResultSourceChange();
@@ -1090,8 +1128,6 @@ window.CommandsTabMethods = {
                 .then(() => this.loadPresetOptions())
                 .finally(() => this.resetEditorViewport());
             this.resetEditorViewport();
-            this.commandResults = [];
-            this.selectedAdvancedRuleIndex = 0;
             this.loadCommandResults();
         },
 

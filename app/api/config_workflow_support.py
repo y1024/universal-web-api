@@ -112,6 +112,7 @@ def _execute_workflow_editor_test_payload(
 
     action_labels = {
         "CLICK": "点击元素",
+        "SELECT_MODEL": "选择请求模型",
         "COORD_CLICK": "坐标点击",
         "COORD_SCROLL": "模拟滑动",
         "FILL_INPUT": "填入内容",
@@ -246,6 +247,7 @@ def _execute_workflow_editor_test_payload(
                 target_key = str(step.get("target") or "")
                 optional = bool(step.get("optional", False))
                 value = step.get("value")
+                execution_policy = step.get("execution")
                 selector = selectors.get(target_key, "")
                 current_index = step_index + 1
 
@@ -273,7 +275,8 @@ def _execute_workflow_editor_test_payload(
                     target_key=target_key,
                     value=value,
                     optional=optional,
-                    context=context
+                    context=context,
+                    execution=execution_policy,
                 ):
                     pass
 

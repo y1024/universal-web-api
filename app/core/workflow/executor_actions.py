@@ -16,6 +16,10 @@ from urllib.parse import unquote, urlparse
 
 from app.core.config import BrowserConstants, ElementNotFoundError, WorkflowError, logger
 from app.core.page_lifecycle import BACKGROUND_WAKE_CDP_TIMEOUT
+from app.services.arena_direct_models import (
+    is_arena_direct_model_id,
+    resolve_arena_direct_model,
+)
 from app.utils.human_mouse import cdp_precise_click, human_scroll_path, idle_drift, smooth_move_mouse
 
 
@@ -399,6 +403,224 @@ class WorkflowExecutorActionMixin:
         if not self._should_keep_workflow_awake():
             return False
         return target in self._get_stealth_dom_click_targets()
+
+    def _get_step_click_mode(self) -> str:
+        execution = getattr(self, "_current_step_execution", {})
+        raw = str((execution or {}).get("click_mode") or "inherit").strip().lower()
+        aliases = {
+            "auto": "inherit",
+            "default": "inherit",
+            "dom": "dom_safe",
+            "background_dom": "dom_safe",
+            "cdp": "cdp_mouse",
+            "mouse": "cdp_mouse",
+        }
+        normalized = aliases.get(raw, raw)
+        return normalized if normalized in {"inherit", "dom_safe", "cdp_mouse"} else "inherit"
+
+    def _click_element_with_configured_mode(self, ele, target_key: str, selector: str) -> None:
+        click_mode = self._get_step_click_mode()
+        if click_mode == "dom_safe":
+            if not self._stealth_dom_click_element(
+                ele,
+                target_key=target_key,
+                selector=selector,
+                log_label="STEP_DOM_CLICK",
+            ):
+                raise WorkflowError("step_dom_click_failed")
+            return
+
+        if click_mode == "cdp_mouse":
+            self._stealth_click_element(ele, target_key=target_key, selector=selector)
+            return
+
+        if self.stealth_mode:
+            if self._should_use_background_safe_dom_click(target_key):
+                if not self._stealth_dom_click_element(
+                    ele,
+                    target_key=target_key,
+                    selector=selector,
+                    log_label="STEALTH_CLICK",
+                ):
+                    raise WorkflowError("stealth_dom_click_failed")
+            else:
+                self._stealth_click_element(ele, target_key=target_key, selector=selector)
+            return
+
+        if self._check_cancelled():
+            return
+        if self._should_use_background_safe_dom_click(target_key):
+            if not self._background_cdp_click_element(
+                ele,
+                target_key=target_key,
+                selector=selector,
+                log_label="INTERACT_CLICK",
+            ):
+                if not self._stealth_dom_click_element(
+                    ele,
+                    target_key=target_key,
+                    selector=selector,
+                    log_label="INTERACT_DOM_FALLBACK",
+                    timeout=1.2,
+                ):
+                    ele.click()
+        else:
+            ele.click()
+
+    def _normalize_click_verification(self) -> dict:
+        execution = getattr(self, "_current_step_execution", {})
+        verification = (execution or {}).get("verification")
+        if not isinstance(verification, dict) or not bool(verification.get("enabled", False)):
+            return {}
+
+        conditions = []
+        for item in verification.get("conditions") or []:
+            if not isinstance(item, dict):
+                continue
+            target = str(item.get("target") or "").strip()
+            state = str(item.get("state") or "present").strip().lower()
+            if target and state in {"present", "absent", "visible", "hidden"}:
+                conditions.append({"target": target, "state": state})
+
+        if not conditions:
+            return {"invalid": True}
+
+        return {
+            "match": "all" if str(verification.get("match") or "any").lower() == "all" else "any",
+            "timeout": self._coerce_float(verification.get("timeout"), 2.0, minimum=0.0),
+            "poll_interval": self._coerce_float(
+                verification.get("poll_interval"),
+                0.1,
+                minimum=0.03,
+            ),
+            "conditions": conditions,
+        }
+
+    def _probe_click_verification_conditions(self, conditions: list) -> list:
+        probes = []
+        selectors = getattr(self, "_selectors", {}) or {}
+        for condition in conditions:
+            target = condition["target"]
+            selector = str(selectors.get(target) or "").strip() if target in selectors else target
+            probes.append({
+                "target": target,
+                "selector": selector,
+                "state": condition["state"],
+            })
+
+        try:
+            result = self.tab.run_js(
+                """
+                const payload = arguments[0] || {};
+                const probes = Array.isArray(payload.probes) ? payload.probes : [];
+                return probes.map((probe) => {
+                    if (!String(probe.selector || '').trim()) {
+                        return {
+                            target: probe.target,
+                            state: String(probe.state || 'present'),
+                            present: false,
+                            visible: false,
+                            matched: false,
+                            reason: 'missing_selector'
+                        };
+                    }
+                    let element = null;
+                    try { element = document.querySelector(String(probe.selector || '')); } catch (error) {}
+                    const present = !!element;
+                    let visible = false;
+                    if (element) {
+                        try {
+                            const style = window.getComputedStyle(element);
+                            const rect = element.getBoundingClientRect();
+                            visible = style.display !== 'none'
+                                && style.visibility !== 'hidden'
+                                && Number(style.opacity || 1) > 0
+                                && rect.width > 0
+                                && rect.height > 0;
+                        } catch (error) {}
+                    }
+                    const state = String(probe.state || 'present');
+                    const matched = state === 'absent' ? !present
+                        : state === 'visible' ? visible
+                        : state === 'hidden' ? (!present || !visible)
+                        : present;
+                    return { target: probe.target, state, present, visible, matched };
+                });
+                """,
+                {"probes": probes},
+                timeout=1.0,
+            )
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            logger.debug(f"[CLICK_VERIFY] DOM 状态探测失败: {self._compact_log_value(e, 160)}")
+            return []
+
+    def _wait_for_click_verification(self, verification: dict) -> bool:
+        if not verification:
+            return True
+        if verification.get("invalid"):
+            raise WorkflowError("click_verification_config_invalid")
+
+        deadline = time.perf_counter() + verification["timeout"]
+        last_result = []
+        while True:
+            if self._check_cancelled():
+                return False
+            last_result = self._probe_click_verification_conditions(verification["conditions"])
+            matches = [bool(item.get("matched")) for item in last_result if isinstance(item, dict)]
+            confirmed = len(matches) == len(verification["conditions"]) and bool(matches) and (
+                all(matches) if verification["match"] == "all" else any(matches)
+            )
+            if confirmed:
+                logger.debug(
+                    "[CLICK_VERIFY] 点击结果已确认: "
+                    f"match={verification['match']}, result={self._compact_log_value(last_result, 240)}"
+                )
+                return True
+            if time.perf_counter() >= deadline:
+                logger.warning(
+                    "[CLICK_VERIFY] 点击结果未确认: "
+                    f"timeout={verification['timeout']:.2f}s, match={verification['match']}, "
+                    f"result={self._compact_log_value(last_result, 240)}"
+                )
+                return False
+            time.sleep(min(verification["poll_interval"], max(0.0, deadline - time.perf_counter())))
+
+    def _execute_click_with_step_policy(
+        self,
+        selector: str,
+        target_key: str,
+        optional: bool,
+        click_fn=None,
+    ):
+        execution = getattr(self, "_current_step_execution", {}) or {}
+        retry = execution.get("retry") if isinstance(execution.get("retry"), dict) else {}
+        retry_enabled = bool(retry.get("enabled", False))
+        max_attempts = self._coerce_int(retry.get("max_attempts"), 2, minimum=1)
+        max_attempts = min(max_attempts, 10) if retry_enabled else 1
+        retry_interval = self._coerce_float(retry.get("interval"), 0.3, minimum=0.0)
+        verification = self._normalize_click_verification()
+
+        for attempt in range(1, max_attempts + 1):
+            if click_fn is None:
+                self._execute_click(selector, target_key, optional)
+            else:
+                click_fn()
+            if self._wait_for_click_verification(verification):
+                return
+            if attempt < max_attempts:
+                logger.warning(
+                    "[CLICK_RETRY] 验证失败，准备重试: "
+                    f"target={target_key or '-'}, attempt={attempt + 1}/{max_attempts}, "
+                    f"interval={retry_interval:.2f}s"
+                )
+                deadline = time.perf_counter() + retry_interval
+                while time.perf_counter() < deadline:
+                    if self._check_cancelled():
+                        return
+                    time.sleep(min(0.05, deadline - time.perf_counter()))
+
+        raise WorkflowError("click_verification_failed")
 
     def _smart_delay(self, min_sec: float = None, max_sec: float = None):
         """
@@ -949,6 +1171,233 @@ class WorkflowExecutorActionMixin:
 
         return " ".join(parts) if parts else f"type={type(ele).__name__}"
 
+    @staticmethod
+    def _element_is_displayed(ele) -> bool:
+        try:
+            return bool(ele and ele.states.is_displayed)
+        except Exception:
+            return False
+
+    def _find_visible_elements(self, selector: str) -> list:
+        raw_selector = str(selector or "").strip()
+        if not raw_selector:
+            return []
+        locator = raw_selector if raw_selector.startswith(("css:", "xpath:")) else f"css:{raw_selector}"
+        try:
+            return [ele for ele in self.tab.eles(locator) if self._element_is_displayed(ele)]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _model_label_matches(label: Any, model: dict) -> bool:
+        normalized = str(label or "").strip().casefold()
+        if not normalized:
+            return False
+        expected = {
+            str(model.get(key) or "").strip().casefold()
+            for key in ("display_name", "public_name", "name")
+            if str(model.get(key) or "").strip()
+        }
+        return normalized in expected
+
+    def _close_arena_model_dialog(self) -> None:
+        try:
+            self.tab.run_cdp(
+                "Input.dispatchKeyEvent",
+                type="keyDown",
+                key="Escape",
+                code="Escape",
+                windowsVirtualKeyCode=27,
+            )
+            self.tab.run_cdp(
+                "Input.dispatchKeyEvent",
+                type="keyUp",
+                key="Escape",
+                code="Escape",
+                windowsVirtualKeyCode=27,
+            )
+        except Exception:
+            pass
+
+    def _execute_select_model(
+        self,
+        selector: str,
+        target_key: str,
+        value: Any,
+        context: Optional[dict],
+        optional: bool,
+    ) -> None:
+        requested_model = str((context or {}).get("model") or "").strip()
+        if not is_arena_direct_model_id(requested_model):
+            logger.debug(
+                "[SELECT_MODEL] 请求未指定 Arena Direct 模型，保持页面当前选择: "
+                f"model={self._compact_log_value(requested_model, 100)}"
+            )
+            return
+
+        model = resolve_arena_direct_model(self.tab, requested_model)
+        if not model:
+            if optional:
+                logger.warning(
+                    "[SELECT_MODEL] Arena Direct 模型已不在当前页面目录，跳过可选步骤: "
+                    f"model={self._compact_log_value(requested_model, 100)}"
+                )
+                return
+            raise WorkflowError("arena_direct_model_not_available")
+
+        settings = value if isinstance(value, dict) else {}
+        timeout = self._coerce_float(settings.get("timeout"), 3.0, minimum=0.5)
+        trigger_selector = str(
+            selector
+            or 'button[aria-haspopup="dialog"]:has(span.flex-1.truncate.text-left)'
+        ).strip()
+        dialog_opened = False
+
+        try:
+            with self._page_interaction_slot("SELECT_MODEL", target_key or "model_select_btn") as acquired:
+                if not acquired or self._check_cancelled():
+                    return
+
+                triggers = self._find_visible_elements(trigger_selector)
+                trigger = next((ele for ele in triggers if str(getattr(ele, "text", "") or "").strip()), None)
+                if trigger is None:
+                    mode_buttons = self._find_visible_elements('button[role="combobox"]')
+                    mode_button = next(
+                        (
+                            ele for ele in mode_buttons
+                            if str(getattr(ele, "text", "") or "").strip()
+                        ),
+                        None,
+                    )
+                    if mode_button is None:
+                        raise ElementNotFoundError("Arena 模式选择按钮未找到")
+
+                    current_mode = str(getattr(mode_button, "text", "") or "").strip()
+                    if not current_mode.casefold().startswith("direct"):
+                        self._stealth_click_element(
+                            mode_button,
+                            target_key="arena_mode_select_btn",
+                            selector='button[role="combobox"]',
+                        )
+                        dialog_opened = True
+
+                        direct_option = None
+                        mode_deadline = time.time() + timeout
+                        while time.time() < mode_deadline and not self._check_cancelled():
+                            for candidate in self._find_visible_elements('[role="option"]'):
+                                label = str(getattr(candidate, "text", "") or "").strip()
+                                if label.casefold().startswith("direct"):
+                                    direct_option = candidate
+                                    break
+                            if direct_option is not None:
+                                break
+                            time.sleep(0.05)
+                        if direct_option is None:
+                            raise ElementNotFoundError("Arena Direct 模式选项未找到")
+
+                        self._stealth_click_element(
+                            direct_option,
+                            target_key="arena_direct_mode_option",
+                            selector='[role="option"]',
+                        )
+                        dialog_opened = False
+
+                    trigger_deadline = time.time() + timeout
+                    while time.time() < trigger_deadline and not self._check_cancelled():
+                        triggers = self._find_visible_elements(trigger_selector)
+                        trigger = next(
+                            (
+                                ele for ele in triggers
+                                if str(getattr(ele, "text", "") or "").strip()
+                            ),
+                            None,
+                        )
+                        if trigger is not None:
+                            break
+                        time.sleep(0.05)
+                if trigger is None:
+                    raise ElementNotFoundError("Arena Direct 模型选择按钮未找到")
+
+                current_label = str(getattr(trigger, "text", "") or "").strip()
+                if self._model_label_matches(current_label, model):
+                    logger.info(
+                        "[SELECT_MODEL] 页面已是目标模型，跳过切换: "
+                        f"model={model['display_name']}"
+                    )
+                    return
+
+                self._stealth_click_element(
+                    trigger,
+                    target_key=target_key or "model_select_btn",
+                    selector=trigger_selector,
+                )
+                dialog_opened = True
+
+                deadline = time.time() + timeout
+                search_input = None
+                while time.time() < deadline and not self._check_cancelled():
+                    inputs = self._find_visible_elements('input[placeholder="Search models"]')
+                    if inputs:
+                        search_input = inputs[0]
+                        break
+                    time.sleep(0.05)
+                if search_input is None:
+                    raise ElementNotFoundError("Arena Direct 模型搜索框未出现")
+
+                self._text_handler.fill_via_clipboard_no_click(search_input, model["name"])
+
+                option = None
+                while time.time() < deadline and not self._check_cancelled():
+                    for candidate in self._find_visible_elements('[role="option"][data-value]'):
+                        try:
+                            data_value = str(candidate.attr("data-value") or "").strip()
+                        except Exception:
+                            data_value = ""
+                        if data_value.casefold() == model["name"].casefold():
+                            option = candidate
+                            break
+                    if option is not None:
+                        break
+                    time.sleep(0.05)
+                if option is None:
+                    raise ElementNotFoundError(
+                        f"Arena Direct 模型选项未找到: {model['display_name']}"
+                    )
+
+                self._stealth_click_element(
+                    option,
+                    target_key="arena_model_option",
+                    selector=f'[role="option"][data-value="{model["name"]}"]',
+                )
+                dialog_opened = False
+
+                verify_deadline = time.time() + min(timeout, 2.0)
+                while time.time() < verify_deadline and not self._check_cancelled():
+                    selected_triggers = self._find_visible_elements(trigger_selector)
+                    selected = next(
+                        (
+                            ele for ele in selected_triggers
+                            if self._model_label_matches(getattr(ele, "text", ""), model)
+                        ),
+                        None,
+                    )
+                    if selected is not None:
+                        logger.info(
+                            "[SELECT_MODEL] Arena Direct 模型切换完成: "
+                            f"{current_label or '-'} -> {model['display_name']}"
+                        )
+                        return
+                    time.sleep(0.08)
+                raise WorkflowError("arena_direct_model_switch_unconfirmed")
+        except Exception as exc:
+            if optional:
+                logger.warning(f"[SELECT_MODEL] 可选模型切换失败，已跳过: {exc}")
+                return
+            raise
+        finally:
+            if dialog_opened:
+                self._close_arena_model_dialog()
+
     def _execute_click(self, selector: str, target_key: str, optional: bool):
         """执行点击操作（v5.7 隐身模式人类化点击）"""
         if self._check_cancelled():
@@ -1007,37 +1456,7 @@ class WorkflowExecutorActionMixin:
                                     f"expected_len={expected_len}, settle_wait={settle_wait:.2f}s"
                                 )
 
-                    if self.stealth_mode:
-                        if self._should_use_background_safe_dom_click(target_key):
-                            if not self._stealth_dom_click_element(
-                                ele,
-                                target_key=target_key,
-                                selector=selector,
-                                log_label="STEALTH_CLICK",
-                            ):
-                                raise WorkflowError("stealth_dom_click_failed")
-                        else:
-                            self._stealth_click_element(ele, target_key=target_key, selector=selector)
-                    else:
-                        if self._check_cancelled():
-                            return
-                        if self._should_use_background_safe_dom_click(target_key):
-                            if not self._background_cdp_click_element(
-                                ele,
-                                target_key=target_key,
-                                selector=selector,
-                                log_label="INTERACT_CLICK",
-                            ):
-                                if not self._stealth_dom_click_element(
-                                    ele,
-                                    target_key=target_key,
-                                    selector=selector,
-                                    log_label="INTERACT_DOM_FALLBACK",
-                                    timeout=1.2,
-                                ):
-                                    ele.click()
-                        else:
-                            ele.click()
+                    self._click_element_with_configured_mode(ele, target_key, selector)
 
                 if target_key == "send_btn":
                     self._capture_dom_send_baseline("click")
@@ -1082,7 +1501,9 @@ class WorkflowExecutorActionMixin:
             if target_key == "send_btn":
                 logger.warning(f"[CLICK] 发送按钮点击失败，降级到 Enter 键: {last_error}")
                 self._execute_keypress("Enter")
-            elif self.stealth_mode and last_error is not None:
+            elif last_error is not None and (
+                self.stealth_mode or self._get_step_click_mode() != "inherit"
+            ):
                 raise last_error
         elif target_key == "send_btn":
             if bool(getattr(self.finder, "_last_send_btn_blocked_by_stop", False)):

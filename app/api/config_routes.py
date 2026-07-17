@@ -160,10 +160,17 @@ async def save_config(
                 )
 
                 # 过滤掉前端可能误传的内部键
-                new_sites = {
-                    k: v for k, v in request.config.items()
-                    if not k.startswith('_')
-                }
+                new_sites = {}
+                for raw_domain, raw_site in request.config.items():
+                    domain = str(raw_domain or "").strip()
+                    if not domain or domain.startswith('_'):
+                        continue
+                    if not isinstance(raw_site, dict) or isinstance(raw_site, list):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"站点配置必须是对象: {domain}",
+                        )
+                    new_sites[domain] = copy.deepcopy(raw_site)
 
                 existing_local_sites = {
                     domain: copy.deepcopy(site)
@@ -714,7 +721,10 @@ async def reload_image_presets(authenticated: bool = Depends(verify_auth)):
 # ================= 工作流编辑器 API =================
 
 @router.post("/api/workflow-editor/inject")
-async def inject_workflow_editor(request: Request):
+async def inject_workflow_editor(
+    request: Request,
+    authenticated: bool = Depends(verify_auth),
+):
     """向当前活动标签页注入可视化工作流编辑器"""
     from app.core.workflow_editor import workflow_editor_injector
     from app.core.browser import get_browser
@@ -1028,7 +1038,7 @@ async def update_site_workflow(
 
 
 @router.post("/api/workflow-editor/clear-cache")
-async def clear_editor_cache():
+async def clear_editor_cache(authenticated: bool = Depends(verify_auth)):
     """清除编辑器脚本缓存（开发调试用）"""
     from app.core.workflow_editor import workflow_editor_injector
     workflow_editor_injector.clear_cache()

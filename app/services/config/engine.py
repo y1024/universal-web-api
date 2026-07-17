@@ -956,10 +956,11 @@ class ConfigEngine:
 
     def _get_site_data_readonly(self, domain: str, preset_name: str = None) -> Optional[Dict]:
         """获取预设配置的深拷贝（只读用途）"""
-        data = self._get_site_data(domain, preset_name)
-        if data is None:
-            return None
-        return copy.deepcopy(data)
+        with self._io_lock:
+            data = self._get_site_data(domain, preset_name)
+            if data is None:
+                return None
+            return copy.deepcopy(data)
 
     def _get_preset_data_exact(self, domain: str, preset_name: str = None) -> Optional[Dict]:
         """获取预设配置引用；显式预设不存在时不回退到默认预设。"""
@@ -1716,11 +1717,12 @@ class ConfigEngine:
         """获取所有站点配置（过滤内部键）"""
         self.refresh_if_changed()
 
-        return {
-            domain: config
-            for domain, config in self.sites.items()
-            if not domain.startswith('_')
-        }
+        with self._io_lock:
+            return copy.deepcopy({
+                domain: config
+                for domain, config in self.sites.items()
+                if not domain.startswith('_')
+            })
 
     def get_site_config(self, domain: str, html_content: str,
                         preset_name: str = None) -> Optional[SiteConfig]:
@@ -2448,7 +2450,7 @@ class ConfigEngine:
         return result
 
     def get_site_prompt_padding_config(self, domain: str, preset_name: str = None) -> Dict[str, Any]:
-        """获取站点的提示词首尾填充配置"""
+        """获取站点的提示词开头注入配置"""
         self.refresh_if_changed()
 
         data = self._get_site_data(domain, preset_name)
@@ -2463,7 +2465,7 @@ class ConfigEngine:
         config: Dict[str, Any],
         preset_name: str = None,
     ) -> bool:
-        """设置站点的提示词首尾填充配置"""
+        """设置站点的提示词开头注入配置"""
         self.refresh_if_changed()
 
         data = self._get_site_data(domain, preset_name)
@@ -2477,7 +2479,7 @@ class ConfigEngine:
         if not self._assign_preset_field_and_save(data, "prompt_padding", validated):
             return False
 
-        logger.info(f"站点 {domain} [{preset_name or DEFAULT_PRESET_NAME}] 提示词首尾填充配置已更新")
+        logger.info(f"站点 {domain} [{preset_name or DEFAULT_PRESET_NAME}] 提示词开头注入配置已更新")
         return True
 
     def _validate_file_paste_config(
@@ -2598,7 +2600,7 @@ class ConfigEngine:
         return result
 
     def _validate_prompt_padding_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """验证并规范化提示词首尾填充配置。"""
+        """验证并规范化提示词开头注入配置。"""
         result = copy.deepcopy(get_default_prompt_padding_config())
 
         if not isinstance(config, dict):
@@ -2609,14 +2611,24 @@ class ConfigEngine:
 
         if "marker_text" in config:
             marker_text = str(config.get("marker_text") or "").strip()
-            result["marker_text"] = marker_text[:80]
+            result["marker_text"] = marker_text
 
         if "segments_per_side" in config:
             try:
                 segments_per_side = int(config.get("segments_per_side"))
             except (TypeError, ValueError):
                 segments_per_side = int(result["segments_per_side"])
-            result["segments_per_side"] = max(1, min(segments_per_side, 64))
+            result["segments_per_side"] = max(0, min(segments_per_side, 64))
+
+        if "random_insert_enabled" in config:
+            result["random_insert_enabled"] = _coerce_bool(
+                config.get("random_insert_enabled"), False
+            )
+
+        if "random_insert_chars" in config:
+            result["random_insert_chars"] = str(
+                config.get("random_insert_chars") or ""
+            )
 
         return result
 

@@ -88,28 +88,33 @@ class BrowserCore(
 
     def close(self):
         """关闭浏览器连接"""
-        logger.info("关闭浏览器连接")
-        self._watchdog_stop.set()
-        watchdog_thread = self._watchdog_thread
-        if (
-            watchdog_thread
-            and watchdog_thread.is_alive()
-            and watchdog_thread is not threading.current_thread()
-        ):
-            watchdog_thread.join(timeout=1.0)
-        self._watchdog_thread = None
-        
-        if self._tab_pool:
-            self._tab_pool.shutdown()
-            self._tab_pool = None
-        
-        self._connected = False
-        self.browser_handle = None
-        self.page = None
-        
-        with self._lock:
-            BrowserCore._instance = None
-            self._initialized = False
+        global _browser_instance
+        with _browser_lock:
+            logger.info("关闭浏览器连接")
+            self._watchdog_stop.set()
+            watchdog_thread = self._watchdog_thread
+            if (
+                watchdog_thread
+                and watchdog_thread.is_alive()
+                and watchdog_thread is not threading.current_thread()
+            ):
+                watchdog_thread.join(timeout=1.0)
+            self._watchdog_thread = None
+
+            if self._tab_pool:
+                self._tab_pool.shutdown()
+                self._tab_pool = None
+
+            self._connected = False
+            self.browser_handle = None
+            self.page = None
+
+            with self._lock:
+                if BrowserCore._instance is self:
+                    BrowserCore._instance = None
+                if _browser_instance is self:
+                    _browser_instance = None
+                self._initialized = False
 
 
 # ================= 工厂函数 =================

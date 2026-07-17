@@ -7,6 +7,9 @@ Universal Web-to-API 自动更新模块 v2.1
 import os
 import sys
 import json
+import fnmatch
+import hashlib
+import hmac
 import shutil
 import zipfile
 import tempfile
@@ -15,10 +18,13 @@ import urllib.error
 import time
 import re
 import ssl
+import stat
 from pathlib import Path
+from pathlib import PurePosixPath
 from datetime import datetime
 from typing import Optional, Tuple
 from http.client import IncompleteRead
+from urllib.parse import urlparse
 from update_preserve import (
     build_effective_preserve_patterns,
     get_default_update_preserve_patterns,
@@ -36,6 +42,10 @@ RETRY_DELAY = 3
 CHUNK_SIZE = 8192
 API_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = 300
+MAX_UPDATE_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_UPDATE_MEMBER_COUNT = 20_000
+MAX_UPDATE_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+MAX_UPDATE_COMPRESSION_RATIO = 200
 
 # 更新时保留的文件/目录
 DEFAULT_PRESERVE = get_default_update_preserve_patterns()
@@ -205,48 +215,58 @@ def fetch_latest_release(repo: str) -> Optional[dict]:
     
     return None
 
-def get_download_url_from_release(release: dict, repo: str) -> Tuple[Optional[str], str]:
-    """从 release 信息中获取下载 URL"""
-    tag_name = release.get('tag_name', '')
-    
-    # 优先从 Assets 中查找
-    assets = release.get('assets', [])
+def get_release_zip_asset(release: dict, repo: str) -> Optional[dict]:
+    """Return the exact release ZIP asset with a GitHub-provided digest."""
+    tag_name = str(release.get('tag_name') or '').strip()
+    expected_name = f"universal-web-api-release-{tag_name}.zip"
+    expected_path_prefix = f"/{str(repo or '').strip('/')}/releases/download/"
+    assets = release.get('assets', []) or []
     log_info(f"Release 包含 {len(assets)} 个 Assets")
-    
-    for asset in assets:
-        name = asset.get('name', '')
-        download_url = asset.get('browser_download_url', '')
-        size = asset.get('size', 0)
-        
-        log_debug(f"  Asset: {name} ({size} bytes)")
-        
-        if name.endswith('.zip'):
-            log_success(f"找到 Release Asset: {name}")
-            return (download_url, 'asset')
-    
-    for asset in assets:
-        name = asset.get('name', '')
-        download_url = asset.get('browser_download_url', '')
-        
-        if name.endswith('.tar.gz') or name.endswith('.tgz'):
-            log_success(f"找到 Release Asset (tar.gz): {name}")
-            return (download_url, 'asset')
-    
-    # 使用 zipball_url
-    zipball_url = release.get('zipball_url')
-    if zipball_url:
-        log_warning("未找到 Release Assets，使用源代码压缩包")
-        return (zipball_url, 'zipball')
-    
-    # 构造 tag 下载链接
-    if tag_name:
-        fallback_url = f"{GITHUB_DOWNLOAD_BASE}/{repo}/archive/refs/tags/{tag_name}.zip"
-        log_warning(f"使用 tag 下载链接")
-        return (fallback_url, 'tag')
-    
-    return (None, 'none')
 
-def download_file_robust(url: str, dest_path: Path) -> bool:
+    for asset in assets:
+        if not isinstance(asset, dict) or str(asset.get('name') or '') != expected_name:
+            continue
+        download_url = str(asset.get('browser_download_url') or '').strip()
+        parsed = urlparse(download_url)
+        if parsed.scheme != 'https' or parsed.hostname != 'github.com':
+            log_error(f"Release Asset 下载地址不可信: {download_url}")
+            return None
+        if not parsed.path.startswith(expected_path_prefix):
+            log_error(f"Release Asset 不属于目标仓库: {parsed.path}")
+            return None
+        digest = str(asset.get('digest') or '').strip().lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            log_error(f"Release Asset 缺少有效 SHA-256 摘要: {expected_name}")
+            return None
+        try:
+            size = int(asset.get('size') or 0)
+        except Exception:
+            size = 0
+        if size <= 0 or size > MAX_UPDATE_ARCHIVE_BYTES:
+            log_error(f"Release Asset 大小异常: {size}")
+            return None
+        return asset
+
+    log_error(f"未找到精确匹配的 Release Asset: {expected_name}")
+    return None
+
+
+def get_download_url_from_release(release: dict, repo: str) -> Tuple[Optional[str], str]:
+    """从 release 信息中获取经过元数据校验的下载 URL"""
+    asset = get_release_zip_asset(release, repo)
+    if not asset:
+        return (None, 'none')
+    name = str(asset.get('name') or '')
+    log_success(f"找到已校验元数据的 Release Asset: {name}")
+    return (str(asset.get('browser_download_url') or ''), 'asset')
+
+def download_file_robust(
+    url: str,
+    dest_path: Path,
+    *,
+    expected_sha256: str = "",
+    max_bytes: int = MAX_UPDATE_ARCHIVE_BYTES,
+) -> bool:
     """
     健壮的文件下载函数
     修复：临时文件处理 + GitHub 重定向
@@ -281,6 +301,10 @@ def download_file_robust(url: str, dest_path: Path) -> bool:
             # 获取文件信息
             total_size = int(response.headers.get('content-length', 0))
             content_type = response.headers.get('content-type', 'unknown')
+            if total_size > max_bytes:
+                response.close()
+                log_error(f"更新包超过大小限制: {total_size:,} bytes")
+                return False
             
             log_debug(f"Content-Type: {content_type}")
             log_debug(f"Content-Length: {total_size}")
@@ -293,6 +317,7 @@ def download_file_robust(url: str, dest_path: Path) -> bool:
             # 使用临时文件下载
             temp_path = dest_path.parent / f".downloading_{dest_path.name}"
             downloaded = 0
+            digest = hashlib.sha256()
             
             try:
                 with open(temp_path, 'wb') as f:
@@ -302,7 +327,10 @@ def download_file_robust(url: str, dest_path: Path) -> bool:
                             if not chunk:
                                 break
                             f.write(chunk)
+                            digest.update(chunk)
                             downloaded += len(chunk)
+                            if downloaded > max_bytes:
+                                raise ValueError(f"更新包超过大小限制: {downloaded:,} bytes")
                             
                             # 显示进度
                             if total_size > 0:
@@ -320,6 +348,7 @@ def download_file_robust(url: str, dest_path: Path) -> bool:
                         except IncompleteRead as e:
                             if e.partial:
                                 f.write(e.partial)
+                                digest.update(e.partial)
                                 downloaded += len(e.partial)
                             log_warning(f"\n读取中断，已下载 {downloaded} bytes")
                             break
@@ -340,6 +369,20 @@ def download_file_robust(url: str, dest_path: Path) -> bool:
             
             actual_size = temp_path.stat().st_size
             log_info(f"下载完成: {actual_size:,} bytes")
+
+            expected_digest = str(expected_sha256 or '').strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+                log_error("缺少可信的更新包 SHA-256，拒绝安装")
+                temp_path.unlink()
+                return False
+            actual_digest = digest.hexdigest()
+            if not hmac.compare_digest(actual_digest, expected_digest):
+                log_error(
+                    f"更新包 SHA-256 校验失败: expected={expected_digest}, actual={actual_digest}"
+                )
+                temp_path.unlink()
+                return False
+            log_success(f"更新包 SHA-256 校验通过: {actual_digest}")
             
             # 检查文件大小
             if actual_size < 1000:
@@ -496,7 +539,15 @@ def backup_current(project_dir: Path) -> Optional[Path]:
             return None
     except Exception as e:
         log_warning(f"备份失败: {e}")
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
         return None
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 def restore_from_backup(project_dir: Path, backup_dir: Optional[Path]) -> bool:
     """从备份目录恢复项目快照。"""
@@ -506,6 +557,15 @@ def restore_from_backup(project_dir: Path, backup_dir: Optional[Path]) -> bool:
 
     try:
         restore_items = [item for item in backup_dir.iterdir()]
+        restore_names = {item.name for item in restore_items}
+
+        # A failed update may have created new top-level files or directories.
+        # Remove them before restoring the snapshot, while retaining runtime
+        # directories that are deliberately excluded from backups.
+        for current in _iter_project_backup_items(project_dir, backup_dir):
+            if current.name not in restore_names:
+                _remove_path(current)
+
         restored = 0
         for src in restore_items:
             if not src.exists():
@@ -513,10 +573,7 @@ def restore_from_backup(project_dir: Path, backup_dir: Optional[Path]) -> bool:
 
             dst = project_dir / src.name
             if dst.exists():
-                if dst.is_dir():
-                    shutil.rmtree(dst)
-                else:
-                    dst.unlink()
+                _remove_path(dst)
 
             dst.parent.mkdir(parents=True, exist_ok=True)
             if src.is_dir():
@@ -537,17 +594,18 @@ def restore_from_backup(project_dir: Path, backup_dir: Optional[Path]) -> bool:
 
 def should_preserve(path: Path, preserve_patterns: list) -> bool:
     """检查是否应保留"""
-    path_str = str(path).replace("\\", "/")
-    name = path.name
-    
-    for pattern in preserve_patterns:
-        if pattern.startswith('*'):
-            if name.endswith(pattern[1:]):
+    path_str = str(path).replace("\\", "/").strip("/")
+    name = Path(path_str).name
+
+    for raw_pattern in preserve_patterns:
+        pattern = str(raw_pattern or "").replace("\\", "/").strip().strip("/")
+        if not pattern:
+            continue
+        if any(char in pattern for char in "*?["):
+            if fnmatch.fnmatchcase(path_str, pattern) or fnmatch.fnmatchcase(name, pattern):
                 return True
-        elif pattern.endswith('*'):
-            if name.startswith(pattern[:-1]):
-                return True
-        elif pattern in path_str or name == pattern:
+            continue
+        if path_str == pattern or path_str.startswith(pattern + "/"):
             return True
     
     return False
@@ -746,6 +804,54 @@ def merge_command_file(src_path: Path, dst_path: Path):
     else:
         log_info(f"命令配置已写入: {len(merged)} 条")
 
+def _safe_extract_zip(zf: zipfile.ZipFile, destination: Path) -> None:
+    """Extract a ZIP without allowing members to escape *destination*."""
+    root = destination.resolve()
+
+    members = zf.infolist()
+    if len(members) > MAX_UPDATE_MEMBER_COUNT:
+        raise ValueError(f"更新包文件数量超过限制: {len(members)}")
+    total_uncompressed = sum(max(0, int(member.file_size or 0)) for member in members)
+    if total_uncompressed > MAX_UPDATE_UNCOMPRESSED_BYTES:
+        raise ValueError(f"更新包展开大小超过限制: {total_uncompressed}")
+
+    for member in members:
+        raw_name = member.filename.replace("\\", "/")
+        archive_path = PurePosixPath(raw_name)
+        parts = tuple(part for part in archive_path.parts if part not in ("", "."))
+
+        if (
+            not parts
+            or archive_path.is_absolute()
+            or ".." in parts
+            or any(":" in part for part in parts)
+        ):
+            raise ValueError(f"更新包包含不安全路径: {member.filename!r}")
+
+        unix_mode = member.external_attr >> 16
+        if stat.S_ISLNK(unix_mode):
+            raise ValueError(f"更新包包含不支持的符号链接: {member.filename!r}")
+        compressed_size = max(1, int(member.compress_size or 0))
+        if (
+            member.file_size > 1024 * 1024
+            and member.file_size / compressed_size > MAX_UPDATE_COMPRESSION_RATIO
+        ):
+            raise ValueError(f"更新包成员压缩比异常: {member.filename!r}")
+
+        target = (root / Path(*parts)).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"更新包路径越界: {member.filename!r}") from exc
+
+        if member.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(member, "r") as source, open(target, "wb") as output:
+            shutil.copyfileobj(source, output)
+
 def extract_and_update(zip_path: Path, project_dir: Path, preserve: list) -> bool:
     """解压并更新"""
     try:
@@ -754,7 +860,7 @@ def extract_and_update(zip_path: Path, project_dir: Path, preserve: list) -> boo
             
             log_info("解压更新包...")
             with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(temp_path)
+                _safe_extract_zip(zf, temp_path)
             
             # 找根目录
             extracted = list(temp_path.iterdir())
@@ -865,10 +971,13 @@ def check_and_update(repo: str = None, force: bool = False, preserve: list = Non
             print(f"    {line}")
         print()
     
-    # 获取下载链接
-    download_url, source_type = get_download_url_from_release(release, repo)
-    
-    if not download_url:
+    # 获取带可信摘要的精确 Release Asset
+    asset = get_release_zip_asset(release, repo)
+    download_url = str((asset or {}).get('browser_download_url') or '')
+    source_type = 'asset' if asset else 'none'
+    expected_sha256 = str((asset or {}).get('digest') or '').split(':', 1)[-1]
+
+    if not download_url or not expected_sha256:
         log_error("无法获取下载链接")
         return False
     
@@ -885,7 +994,11 @@ def check_and_update(repo: str = None, force: bool = False, preserve: list = Non
     
     backup_dir = None
     try:
-        if not download_file_robust(download_url, zip_path):
+        if not download_file_robust(
+            download_url,
+            zip_path,
+            expected_sha256=expected_sha256,
+        ):
             log_error("下载失败")
             return False
         
@@ -988,8 +1101,11 @@ def update_to_version(tag: str, repo: str = None, preserve: list = None) -> bool
         log_error(f"无法获取版本 {tag} 的 Release 信息")
         return False
 
-    download_url, source_type = get_download_url_from_release(release, repo)
-    if not download_url:
+    asset = get_release_zip_asset(release, repo)
+    download_url = str((asset or {}).get('browser_download_url') or '')
+    source_type = 'asset' if asset else 'none'
+    expected_sha256 = str((asset or {}).get('digest') or '').split(':', 1)[-1]
+    if not download_url or not expected_sha256:
         log_error("无法获取下载链接")
         return False
 
@@ -1003,7 +1119,11 @@ def update_to_version(tag: str, repo: str = None, preserve: list = None) -> bool
 
     backup_dir = None
     try:
-        if not download_file_robust(download_url, zip_path):
+        if not download_file_robust(
+            download_url,
+            zip_path,
+            expected_sha256=expected_sha256,
+        ):
             log_error("下载失败")
             return False
 

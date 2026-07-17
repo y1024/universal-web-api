@@ -4,7 +4,7 @@ glm_parser.py - ChatGLM SSE response parser.
 Observed stream traits:
 - content-type: text/event-stream
 - each SSE block is carried in a data: line with a JSON payload
-- think/tool_calls/text are all emitted through parts[*].content[*]
+- think/tool_calls/text/system_error are all emitted through parts[*].content[*]
 - text payloads are full rendered text snapshots, not pure deltas
 - stream ends when a text part status becomes finish or top-level status becomes finish
 """
@@ -23,6 +23,8 @@ class GLMParser(ResponseParser):
     """Parse ChatGLM SSE streams while ignoring think/tool-call noise."""
 
     _TERMINAL_STATUSES = {"finish", "finished", "intervene", "intervened"}
+    _PPT_FOLLOWUP_COMMANDS = {"change_mode_to_engine_ppt"}
+    _PPT_TEMPLATE_MARKERS = ('"theme"', '"background"', '"palette"')
     _HIDDEN_REPAIR_TEXT_PATTERNS = (
         "xml-style tool call",
         "could not be parsed into a valid declared tool",
@@ -48,6 +50,9 @@ class GLMParser(ResponseParser):
         self._has_seen_visible_text = False
         self._saw_hidden_repair_flow = False
         self._saw_only_think_payloads = False
+        self._awaiting_ppt_followup = False
+        self._deferred_followup_text = ""
+        self._ppt_followup_command = ""
 
     def reset(self) -> None:
         self._last_raw_length = 0
@@ -58,6 +63,16 @@ class GLMParser(ResponseParser):
         self._has_seen_visible_text = False
         self._saw_hidden_repair_flow = False
         self._saw_only_think_payloads = False
+        self._awaiting_ppt_followup = False
+        self._deferred_followup_text = ""
+        self._ppt_followup_command = ""
+
+    def prepare_for_followup_stream(self) -> None:
+        awaiting_ppt_followup = self._awaiting_ppt_followup
+        ppt_followup_command = self._ppt_followup_command
+        self.reset()
+        self._awaiting_ppt_followup = awaiting_ppt_followup
+        self._ppt_followup_command = ppt_followup_command
 
     def parse_chunk(self, raw_response: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -144,6 +159,14 @@ class GLMParser(ResponseParser):
             intervene_text = ""
         parts = data.get("parts")
         if not isinstance(parts, list) or not parts:
+            if self._awaiting_ppt_followup and top_status in self._TERMINAL_STATUSES:
+                snapshot = self._resolve_deferred_followup_text()
+                if snapshot:
+                    delta = self._compute_delta(self._rendered_text, snapshot)
+                    self._rendered_text = snapshot
+                    self._has_seen_visible_text = True
+                    return delta, True
+                return "", False
             if intervene_text and top_status in self._TERMINAL_STATUSES:
                 delta = self._compute_delta(self._rendered_text, intervene_text)
                 self._rendered_text = intervene_text
@@ -171,10 +194,16 @@ class GLMParser(ResponseParser):
                 if not isinstance(item, dict):
                     continue
                 item_type = str(item.get("type") or "").strip().lower()
+                if item_type == "system_error":
+                    self._handle_system_error_item(item, part)
+                    continue
                 if item_type == "think":
                     think_text = str(item.get("think") or self._think_text)
                     self._think_text = think_text
                     saw_think_in_payload = True
+                    if self._awaiting_ppt_followup and think_text.strip():
+                        self._awaiting_ppt_followup = False
+                        self._deferred_followup_text = ""
                     embedded_snapshot = self._extract_embedded_visible_snapshot(think_text)
                     if embedded_snapshot:
                         visible_snapshot = embedded_snapshot
@@ -189,6 +218,17 @@ class GLMParser(ResponseParser):
                     continue
 
                 snapshot = str(item.get("text") or "")
+                if self._awaiting_ppt_followup:
+                    if snapshot:
+                        self._deferred_followup_text = snapshot
+                    if part_status in self._TERMINAL_STATUSES:
+                        snapshot = self._resolve_deferred_followup_text()
+                        if snapshot:
+                            visible_snapshot = snapshot
+                            saw_visible_text_in_payload = True
+                            self._has_seen_visible_text = True
+                            done = True
+                    continue
                 if snapshot:
                     visible_snapshot = snapshot
                     saw_visible_text_in_payload = True
@@ -211,6 +251,9 @@ class GLMParser(ResponseParser):
             not self._has_seen_visible_text
             and (self._saw_hidden_repair_flow or self._saw_only_think_payloads)
         )
+
+    def should_wait_for_followup_stream(self) -> bool:
+        return bool(self._awaiting_ppt_followup)
 
     @classmethod
     def _looks_like_hidden_repair_text(cls, text: Any) -> bool:
@@ -237,7 +280,43 @@ class GLMParser(ResponseParser):
             "think_text_len": len(self._think_text or ""),
             "saw_hidden_repair_flow": bool(self._saw_hidden_repair_flow),
             "saw_only_think_payloads": bool(self._saw_only_think_payloads),
+            "awaiting_ppt_followup": bool(self._awaiting_ppt_followup),
+            "ppt_followup_command": self._ppt_followup_command,
+            "deferred_followup_text_len": len(self._deferred_followup_text or ""),
         }
+
+    def _handle_system_error_item(self, item: Dict[str, Any], part: Dict[str, Any]) -> None:
+        metadata = part.get("meta_data")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        command = str(
+            metadata.get("failedCommand") or item.get("failedCommand") or ""
+        ).strip()
+        if command not in self._PPT_FOLLOWUP_COMMANDS:
+            return
+
+        self._awaiting_ppt_followup = True
+        self._deferred_followup_text = ""
+        self._ppt_followup_command = command
+
+    def _resolve_deferred_followup_text(self) -> str:
+        snapshot = self._deferred_followup_text
+        self._deferred_followup_text = ""
+        if not snapshot or self._looks_like_ppt_template(snapshot):
+            return ""
+        self._awaiting_ppt_followup = False
+        return snapshot
+
+    @classmethod
+    def _looks_like_ppt_template(cls, text: Any) -> bool:
+        normalized = str(text or "").strip().lower()
+        if normalized.startswith("```json"):
+            normalized = normalized[7:].lstrip()
+        elif normalized.startswith("```"):
+            normalized = normalized[3:].lstrip()
+        if not normalized.startswith("{"):
+            return False
+        return sum(marker in normalized for marker in cls._PPT_TEMPLATE_MARKERS) >= 2
 
     @classmethod
     def _extract_embedded_visible_snapshot(cls, text: Any) -> str:

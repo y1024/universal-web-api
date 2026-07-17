@@ -17,6 +17,7 @@
         COORD_CLICK: { color: 'rgba(249, 115, 22, 0.18)', border: '#F97316', name: '坐标点击' },
         COORD_SCROLL: { color: 'rgba(14, 165, 233, 0.18)', border: '#0EA5E9', name: '模拟滑动' },
         CLICK: { color: 'rgba(59, 130, 246, 0.15)', border: '#3B82F6', name: '点击' },
+        MODEL: { color: 'rgba(20, 184, 166, 0.18)', border: '#14B8A6', name: '模型' },
         INPUT: { color: 'rgba(16, 185, 129, 0.15)', border: '#10B981', name: '输入' },
         READ: { color: 'rgba(139, 92, 246, 0.15)', border: '#8B5CF6', name: '读取' },
         WAIT: { color: 'rgba(245, 158, 11, 0.18)', border: '#F59E0B', name: '等待' },
@@ -28,6 +29,7 @@
         { ballType: 'COORD_CLICK', workflowAction: 'COORD_CLICK', toolbarAction: 'add-coord-click', toolbarLabel: '+ 坐标点击', menuLabel: '坐标点击' },
         { ballType: 'COORD_SCROLL', workflowAction: 'COORD_SCROLL', toolbarAction: 'add-coord-scroll', toolbarLabel: '+ 滑动', menuLabel: '滑动' },
         { ballType: 'CLICK', workflowAction: 'CLICK', toolbarAction: 'add-click', toolbarLabel: '+ 点击', menuLabel: '点击' },
+        { ballType: 'MODEL', workflowAction: 'SELECT_MODEL', toolbarAction: 'add-model', toolbarLabel: '+ 模型', menuLabel: '选择请求模型' },
         { ballType: 'INPUT', workflowAction: 'FILL_INPUT', toolbarAction: 'add-input', toolbarLabel: '+ 输入', menuLabel: '输入' },
         { ballType: 'READ', workflowAction: 'STREAM_WAIT', toolbarAction: 'add-read', toolbarLabel: '+ 读取', menuLabel: '读取' },
         { ballType: 'WAIT', workflowAction: 'WAIT', toolbarAction: 'add-wait', toolbarLabel: '+ 等待', menuLabel: '等待' },
@@ -683,7 +685,7 @@
 
     steps.forEach((ball) => {
       const delayMs = ball.config.delay_ms || 0;
-      const targetKey = ball.type === 'CLICK'
+      const targetKey = ['CLICK', 'MODEL'].includes(ball.type)
         ? normalizeKey(ball.config.targetKey || '')
         : ['INPUT', 'READ'].includes(ball.type)
           ? ensureBallTargetKey(ball, selectors)
@@ -713,7 +715,20 @@
           action: 'CLICK',
           target: targetKey || '',
           optional: !!ball.config.optional,
-          value: null
+          value: null,
+          ...(ball.config.execution && Object.keys(ball.config.execution).length
+            ? { execution: ball.config.execution }
+            : {})
+        });
+      } else if (ball.type === 'MODEL') {
+        if (ball.config.selector && targetKey) {
+          selectors[targetKey] = ball.config.selector;
+        }
+        newWorkflow.push({
+          action: 'SELECT_MODEL',
+          target: targetKey || 'model_select_btn',
+          optional: !!ball.config.optional,
+          value: { timeout: Number(ball.config.timeout || 3) }
         });
       } else if (ball.type === 'COORD_CLICK') {
         newWorkflow.push({
@@ -1078,6 +1093,7 @@
                 targetKey: '',
                 description: '使用当前预设的 request_transport 页面直发配置发送 prompt',
                 optional: false,
+                execution: null,
                 ...opts.config
             };
             if (this.type === 'WAIT' && opts.config?.delay_ms == null) {
@@ -1433,7 +1449,7 @@
     body.appendChild(el('div', { className: 'wfe-divider' }));
     
     // 类型特定
-    if (['CLICK', 'INPUT', 'READ'].includes(ball.type)) {
+    if (['CLICK', 'MODEL', 'INPUT', 'READ'].includes(ball.type)) {
       const keyInput = el('input', {
         type: 'text',
         className: 'wfe-menu-input wide',
@@ -1852,6 +1868,18 @@
                     random_radius: 10,
                     selector: selector,
                     targetKey: targetKey,
+                    optional: !!step.optional,
+                    execution: step.execution && typeof step.execution === 'object'
+                        ? JSON.parse(JSON.stringify(step.execution))
+                        : null
+                };
+            } else if (action === 'SELECT_MODEL') {
+                type = 'MODEL';
+                stepConfig = {
+                    delay_ms: 0,
+                    selector: selector,
+                    targetKey: targetKey || 'model_select_btn',
+                    timeout: Number(step.value?.timeout || 3),
                     optional: !!step.optional
                 };
             } else if (action === 'COORD_CLICK') {
@@ -2276,6 +2304,7 @@
   
   window.WorkflowEditor = {
     addClick: () => addBall('CLICK'),
+    addModel: () => addBall('MODEL'),
     addCoordClick: () => addBall('COORD_CLICK'),
     addCoordScroll: () => addBall('COORD_SCROLL'),
     addInput: () => addBall('INPUT'),

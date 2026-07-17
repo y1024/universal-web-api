@@ -236,13 +236,13 @@
                 return;
             }
             grid.innerHTML = sites.map(site => `
-                <button type="button" class="site-card site-card-button" data-site-url="${site.url}">
+                <button type="button" class="site-card site-card-button" data-site-url="${escapeDocsHtml(site.url)}">
                     <span class="site-card-main">
                         <span class="site-card-icon" aria-hidden="true">📋</span>
-                        <span class="site-card-name">${site.name}</span>
-                        <span class="model-id">${site.id}</span>
+                        <span class="site-card-name">${escapeDocsHtml(site.name)}</span>
+                        <span class="model-id">${escapeDocsHtml(site.id)}</span>
                     </span>
-                    <span class="site-card-hint">${texts.hint}</span>
+                    <span class="site-card-hint">${escapeDocsHtml(texts.hint)}</span>
                 </button>
             `).join('');
 

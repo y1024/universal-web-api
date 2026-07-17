@@ -174,18 +174,16 @@ class BrowserPromptMixin:
             segment_count = int(segments_per_side)
         except (TypeError, ValueError):
             segment_count = 12
-        segment_count = max(1, min(segment_count, 64))
+        segment_count = max(0, min(segment_count, 64))
 
-        fragments = []
-        for _ in range(segment_count):
-            if random.random() < 0.5:
-                fragments.append(random.choice("abcdefghijklmnopq"))
-            else:
-                fragments.append(str(random.randint(1, 999999)))
-
-        padding_text = "".join(fragments)
+        padding_text = "".join(
+            random.choice("abcdefghijklmnopq0123456789")
+            for _ in range(segment_count)
+        )
         if not marker_text:
             return padding_text
+        if not padding_text:
+            return marker_text
         if marker_text.endswith((':', '：')):
             return f"{marker_text}{padding_text}"
         return f"{marker_text}:{padding_text}"
@@ -193,12 +191,22 @@ class BrowserPromptMixin:
     def _apply_prompt_padding(self, prompt: str, config: Dict[str, Any]) -> str:
         if not prompt:
             return prompt
-        if not isinstance(config, dict) or not bool(config.get("enabled")):
+        if not isinstance(config, dict):
             return prompt
 
-        prefix = self._build_prompt_padding_line(config)
-        suffix = self._build_prompt_padding_line(config)
-        return f"{prefix}\n{prompt}\n{suffix}"
+        result = prompt
+        if bool(config.get("random_insert_enabled")):
+            candidates = str(config.get("random_insert_chars") or "")
+            if candidates:
+                character = random.choice(candidates)
+                position = random.randint(0, len(result))
+                result = f"{result[:position]}{character}{result[position:]}"
+
+        if bool(config.get("enabled")):
+            prefix = self._build_prompt_padding_line(config)
+            if prefix:
+                result = f"{prefix}\n{result}"
+        return result
 
     def _get_upload_history_images_flag(self, default: bool = True) -> bool:
         """

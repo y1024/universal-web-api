@@ -10,11 +10,18 @@ from typing import Any, Dict, List, Optional
 
 from app.core.config import BrowserConstants, logger
 from app.utils.site_url import (
+    encode_tab_url_route_token,
     extract_remote_site_domain,
     normalize_exact_tab_url,
     normalize_route_domain,
     route_domain_matches,
     tab_url_matches,
+)
+from app.utils.tab_route_groups import (
+    normalize_route_group_id,
+    normalize_route_groups,
+    route_group_member_key,
+    route_groups_by_id,
 )
 
 from ._utils import _looks_like_transient_local_debug_error, _should_skip_pool_url
@@ -52,6 +59,7 @@ class TabPoolManager:
     GET_TABS_WARNING_INTERVAL_SEC = 10.0
     ROUTE_CURSOR_LIMIT = 1000
     MAINTENANCE_WORKER_LIMIT = 4
+    TERMINATION_RELEASE_WAIT_SEC = 5.0
 
     @staticmethod
     def _to_bool(value: Any, default: bool = False) -> bool:
@@ -87,6 +95,7 @@ class TabPoolManager:
         excluded_urls: Optional[List[str]] = None,
         preserve_error_tabs: bool = False,
         model_name_overrides: Optional[Dict[str, Any]] = None,
+        route_groups: Optional[List[Dict[str, Any]]] = None,
     ):
         self.page = browser_page
         self.max_tabs = max(1, int(max_tabs))
@@ -98,6 +107,7 @@ class TabPoolManager:
         self.excluded_urls = self._normalize_excluded_urls(excluded_urls)
         self.preserve_error_tabs = self._to_bool(preserve_error_tabs, False)
         self.model_name_overrides = self._normalize_model_name_overrides(model_name_overrides)
+        self.route_groups = normalize_route_groups(route_groups)
 
         self._tabs: Dict[str, TabSession] = {}
         self._lock = threading.RLock()
@@ -123,6 +133,8 @@ class TabPoolManager:
         self._acquire_waiters: deque[str] = deque()
         self._index_waiters: Dict[int, deque[str]] = {}
         self._route_waiters: Dict[str, deque[str]] = {}
+        self._group_waiters: Dict[str, deque[str]] = {}
+        self._route_group_bindings: Dict[str, Dict[str, str]] = {}
         self._waiter_counter = 0
 
         # 🆕 持久化编号系统
@@ -291,6 +303,7 @@ class TabPoolManager:
         excluded_urls: Optional[List[str]] = None,
         preserve_error_tabs: Optional[bool] = None,
         model_name_overrides: Optional[Dict[str, Any]] = None,
+        route_groups: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """同步更新运行中的标签页池参数。"""
         with self._lock:
@@ -316,6 +329,15 @@ class TabPoolManager:
                 self.preserve_error_tabs = self._to_bool(preserve_error_tabs, False)
             if model_name_overrides is not None:
                 self.model_name_overrides = self._normalize_model_name_overrides(model_name_overrides)
+            if route_groups is not None:
+                self.route_groups = normalize_route_groups(route_groups)
+                valid_groups = route_groups_by_id(self.route_groups)
+                self._route_group_bindings = {
+                    group_id: bindings
+                    for group_id, bindings in self._route_group_bindings.items()
+                    if group_id in valid_groups
+                }
+                self._condition.notify_all()
 
             updated = {
                 "max_tabs": self.max_tabs,
@@ -330,6 +352,7 @@ class TabPoolManager:
                     "sites": dict(getattr(self, "model_name_overrides", {}).get("sites", {})),
                     "urls": dict(getattr(self, "model_name_overrides", {}).get("urls", {})),
                 },
+                "route_groups": normalize_route_groups(self.route_groups),
             }
 
             logger.info(
@@ -342,6 +365,7 @@ class TabPoolManager:
                 f"model_name_overrides="
                 f"{len(updated['model_name_overrides']['sites'])}/"
                 f"{len(updated['model_name_overrides']['urls'])}"
+                f", route_groups={len(updated['route_groups'])}"
             )
             return updated
 
@@ -2088,7 +2112,39 @@ class TabPoolManager:
 
 
     async def acquire_async(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
-        return await asyncio.to_thread(self.acquire, task_id, timeout)
+        return await self._run_cancellable_acquire(
+            lambda: self.acquire(task_id, timeout),
+            task_id,
+        )
+
+    async def _run_cancellable_acquire(self, acquire_fn, task_id: str) -> Optional[TabSession]:
+        """Release a session acquired after the awaiting task was cancelled."""
+        acquire_task = asyncio.create_task(asyncio.to_thread(acquire_fn))
+        try:
+            return await asyncio.shield(acquire_task)
+        except asyncio.CancelledError:
+            def _release_late_session(completed_task) -> None:
+                try:
+                    session = completed_task.result()
+                except BaseException:
+                    return
+                if session is None:
+                    return
+                try:
+                    self.release(
+                        session.id,
+                        check_triggers=False,
+                        rollback_request_count=True,
+                        expected_task_id=task_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Cancelled acquire cleanup failed (task={task_id}, "
+                        f"tab={getattr(session, 'id', '-')}, error={exc})"
+                    )
+
+            acquire_task.add_done_callback(_release_late_session)
+            raise
 
     def release(
         self,
@@ -2236,7 +2292,8 @@ class TabPoolManager:
         raw_tab_id: str,
         task_id: str,
         timeout: float = None,
-        count_request: bool = True
+        count_request: bool = True,
+        activate: Optional[bool] = None,
     ) -> Optional[TabSession]:
         """
         根据底层浏览器标签页 ID 获取指定标签页会话。
@@ -2301,7 +2358,11 @@ class TabPoolManager:
                             "acquire_by_raw_tab_id",
                             task_id,
                             rollback_request_count=count_request,
-                            activate=self._auto_activate_on_acquire and session.id != self._active_session_id,
+                            activate=(
+                                self._auto_activate_on_acquire and session.id != self._active_session_id
+                                if activate is None
+                                else bool(activate)
+                            ),
                         ):
                             continue
                         logger.debug(
@@ -2330,7 +2391,10 @@ class TabPoolManager:
 
     async def acquire_by_index_async(self, persistent_index: int, task_id: str, timeout: float = None) -> Optional[TabSession]:
         """异步版本的按编号获取"""
-        return await asyncio.to_thread(self.acquire_by_index, persistent_index, task_id, timeout)
+        return await self._run_cancellable_acquire(
+            lambda: self.acquire_by_index(persistent_index, task_id, timeout),
+            task_id,
+        )
 
     def _get_sessions_for_route_domain(self, route_domain: str) -> List[TabSession]:
         target = normalize_route_domain(route_domain)
@@ -2346,6 +2410,96 @@ class TabPoolManager:
                 matches.append(session)
 
         return matches
+
+    def _get_route_group_config(self, group_id: str) -> Optional[Dict[str, Any]]:
+        normalized_id = normalize_route_group_id(group_id)
+        if not normalized_id:
+            return None
+        return route_groups_by_id(getattr(self, "route_groups", [])).get(normalized_id)
+
+    @staticmethod
+    def _session_matches_route_group_member(
+        session: TabSession,
+        member: Dict[str, Any],
+    ) -> bool:
+        current_url, _actual_domain = session.get_cached_route_snapshot()
+        member_url = str(member.get("url") or "").strip()
+        member_token = str(member.get("url_token") or "").strip().lower()
+        if member_url and tab_url_matches(member_url, current_url):
+            return True
+        if member_token and encode_tab_url_route_token(current_url) == member_token:
+            return True
+        return False
+
+    def _get_sessions_for_route_group(self, group_id: str) -> List[TabSession]:
+        group = self._get_route_group_config(group_id)
+        if not group:
+            return []
+
+        normalized_id = group["id"]
+        members = group.get("members") or []
+        valid_member_keys = {route_group_member_key(member) for member in members}
+        bindings = self._route_group_bindings.setdefault(normalized_id, {})
+        for member_key in list(bindings):
+            session_id = bindings.get(member_key)
+            if member_key not in valid_member_keys or session_id not in self._tabs:
+                bindings.pop(member_key, None)
+
+        sessions: List[TabSession] = []
+        used_session_ids = set()
+        ordered_sessions = sorted(self._tabs.values(), key=self._session_allocation_key)
+        for member in members:
+            member_key = route_group_member_key(member)
+            bound_session = self._tabs.get(bindings.get(member_key, ""))
+            if bound_session is not None and bound_session.id not in used_session_ids:
+                sessions.append(bound_session)
+                used_session_ids.add(bound_session.id)
+                continue
+
+            matching = [
+                session
+                for session in ordered_sessions
+                if session.id not in used_session_ids
+                and self._session_matches_route_group_member(session, member)
+            ]
+            try:
+                preferred_index = int(member.get("tab_index") or 0)
+            except (TypeError, ValueError):
+                preferred_index = 0
+            if preferred_index > 0:
+                matching.sort(
+                    key=lambda session: (
+                        int(session.persistent_index or 0) != preferred_index,
+                        self._session_allocation_key(session),
+                    )
+                )
+            if not matching:
+                bindings.pop(member_key, None)
+                continue
+
+            selected = matching[0]
+            bindings[member_key] = selected.id
+            sessions.append(selected)
+            used_session_ids.add(selected.id)
+
+        return sessions
+
+    def get_route_groups_snapshot(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            groups = normalize_route_groups(getattr(self, "route_groups", []))
+            result = []
+            for group in groups:
+                sessions = self._get_sessions_for_route_group(group["id"])
+                item = dict(group)
+                item["live_member_count"] = len(sessions)
+                item["idle_member_count"] = sum(
+                    1 for session in sessions if session.status == TabStatus.IDLE
+                )
+                item["live_tab_indices"] = [
+                    int(session.persistent_index or 0) for session in sessions
+                ]
+                result.append(item)
+            return result
 
     def _refresh_route_snapshots_for_sessions(self, sessions: List[TabSession]) -> None:
         """Refresh live tab URL/domain snapshots; callers must not hold self._condition."""
@@ -2375,12 +2529,31 @@ class TabPoolManager:
         allocation_mode: Optional[str] = None,
     ) -> Optional[TabSession]:
         """异步版本的按域名路由获取。"""
-        return await asyncio.to_thread(
-            self.acquire_by_route_domain,
-            route_domain,
+        return await self._run_cancellable_acquire(
+            lambda: self.acquire_by_route_domain(
+                route_domain,
+                task_id,
+                timeout,
+                allocation_mode,
+            ),
             task_id,
-            timeout,
-            allocation_mode,
+        )
+
+    async def acquire_by_route_group_async(
+        self,
+        group_id: str,
+        task_id: str,
+        timeout: float = None,
+        allocation_mode: Optional[str] = None,
+    ) -> Optional[TabSession]:
+        return await self._run_cancellable_acquire(
+            lambda: self.acquire_by_route_group(
+                group_id,
+                task_id,
+                timeout,
+                allocation_mode,
+            ),
+            task_id,
         )
 
 
@@ -2836,25 +3009,138 @@ class TabPoolManager:
                     owner_key=target,
                 )
 
+    def acquire_by_route_group(
+        self,
+        group_id: str,
+        task_id: str,
+        timeout: float = None,
+        allocation_mode: Optional[str] = None,
+    ) -> Optional[TabSession]:
+        target = normalize_route_group_id(group_id)
+        if not target:
+            logger.warning("Route group ID is invalid")
+            return None
+
+        timeout = self.acquire_timeout if timeout is None else max(0.1, float(timeout))
+        deadline = time.time() + timeout
+        first_iteration = True
+
+        with self._condition:
+            group = self._get_route_group_config(target)
+            if not group:
+                logger.warning(f"Route group '{target}' does not exist")
+                return None
+
+            waiters = self._group_waiters.setdefault(target, deque())
+            waiter_token = self._next_waiter_token(task_id)
+            waiters.append(waiter_token)
+            try:
+                while True:
+                    if self._shutdown:
+                        return None
+
+                    if first_iteration or self._should_scan():
+                        self._scan_new_tabs()
+                        first_iteration = False
+
+                    self._check_stuck_tabs()
+                    self._cleanup_unhealthy_tabs()
+
+                    if not self._is_waiter_turn(waiters, waiter_token):
+                        remaining = deadline - time.time()
+                        if remaining <= 0:
+                            logger.warning(
+                                f"Timed out waiting in route group '{target}' (task={task_id})"
+                            )
+                            return None
+                        logger.debug_throttled(
+                            f"tab_pool.wait_group.{target}",
+                            f"Waiting in route group '{target}' queue...",
+                            interval_sec=5.0,
+                        )
+                        self._condition.wait(timeout=min(remaining, 1.0))
+                        continue
+
+                    matching_sessions = self._get_sessions_for_route_group(target)
+                    mode = allocation_mode or group.get("allocation_mode") or self.allocation_mode
+                    session = self._try_acquire_session_for_request(
+                        matching_sessions,
+                        task_id,
+                        route_domain=f"group::{target}",
+                        allocation_mode=mode,
+                        defer_context=f"route-group {target} acquire",
+                    )
+                    if session is not None:
+                        self._unregister_waiter(
+                            waiters,
+                            waiter_token,
+                            owner_map=self._group_waiters,
+                            owner_key=target,
+                        )
+                        if not self._complete_acquired_session_for_return(
+                            session,
+                            "acquire_by_route_group",
+                            task_id,
+                            activate=self._auto_activate_on_acquire and session.id != self._active_session_id,
+                        ):
+                            continue
+                        self._mark_allocation_cursor(session, route_domain=f"group::{target}")
+                        logger.debug(
+                            f"TabPool -> {session.id} "
+                            f"(task={task_id}, route_group={target}, "
+                            f"idx=#{session.persistent_index}, snapshot={self._describe_session(session)})"
+                        )
+                        return session
+
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        member_state = ", ".join(
+                            f"{session.id}(#{session.persistent_index}:{session.status.value})"
+                            for session in matching_sessions
+                        ) or "no live members"
+                        logger.warning(
+                            f"Timed out waiting for route group '{target}' "
+                            f"(task={task_id}, members: {member_state})"
+                        )
+                        return None
+
+                    logger.debug_throttled(
+                        f"tab_pool.wait_group.{target}",
+                        f"Waiting for route group '{target}' member release...",
+                        interval_sec=5.0,
+                    )
+                    self._condition.wait(timeout=min(remaining, 1.0))
+            finally:
+                self._unregister_waiter(
+                    waiters,
+                    waiter_token,
+                    owner_map=self._group_waiters,
+                    owner_key=target,
+                )
+
     def terminate_by_index(
         self,
         persistent_index: int,
         reason: str = "manual_terminate",
         clear_page: bool = True,
         scope: str = "task",
+        expected_session_id: str = "",
+        expected_task_id: str = "",
     ) -> Dict[str, Any]:
         """
-        按标签页编号终止当前任务并释放占用。
+        按标签页编号终止当前任务，并在旧所有者退出前隔离该成员。
 
         行为：
-        1) 尝试取消该标签页 current_task 对应的请求；
-        2) 若标签页忙碌，执行 force_release()；
-        3) 若标签页空闲且 clear_page=True，重置到 about:blank；
-        4) 成功空闲后恢复全局网络监听。
+        1) 校验调用方看到的 session/task 所有权快照；
+        2) 设置终止隔离闸门，阻止组/域名/编号路由重新分配；
+        3) 取消该成员关联请求并中断页面活动；
+        4) 等待旧工作线程完成正常释放，超时则继续保持隔离。
         """
         normalized_scope = str(scope or "task").strip().lower()
         if normalized_scope not in {"task", "loop"}:
             normalized_scope = "task"
+        expected_session = str(expected_session_id or "").strip()
+        expected_task = str(expected_task_id or "").strip()
 
         with self._condition:
             session_id = self._persistent_to_session_id.get(persistent_index)
@@ -2864,6 +3150,25 @@ class TabPoolManager:
             session = self._tabs.get(session_id)
             if not session:
                 return {"ok": False, "error": "tab_not_found", "tab_index": persistent_index}
+            if expected_session and session.id != expected_session:
+                return {
+                    "ok": False,
+                    "error": "session_ownership_changed",
+                    "tab_index": persistent_index,
+                    "expected_session_id": expected_session,
+                    "current_session_id": session.id,
+                }
+
+            current_task = str(session.current_task_id or "").strip()
+            if expected_task and current_task != expected_task:
+                return {
+                    "ok": False,
+                    "error": "task_ownership_changed",
+                    "tab_index": persistent_index,
+                    "tab_id": session.id,
+                    "expected_task_id": expected_task,
+                    "current_task_id": current_task,
+                }
 
             if normalized_scope == "loop":
                 loop_cancelled = session.request_command_loop_cancel(reason)
@@ -2898,25 +3203,24 @@ class TabPoolManager:
                 }
 
             before_snapshot = self._describe_session(session)
-            task_id = str(session.current_task_id or "").strip()
-            command_request_id = str(getattr(session, "_command_request_id", "") or "").strip()
-            command_loop_request_id = str(getattr(session, "_command_loop_request_id", "") or "").strip()
             was_busy = session.status == TabStatus.BUSY
-            use_force_release = bool(was_busy or clear_page)
-            release_state = session._begin_release_state(
-                clear_page=clear_page,
-                force=use_force_release,
-            )
-            if release_state is None:
-                self._condition.notify_all()
+            termination_state = session.begin_termination(expected_task)
+            if not termination_state.get("ok"):
                 return {
                     "ok": False,
-                    "error": "release_in_progress",
+                    **termination_state,
                     "tab_index": persistent_index,
                     "tab_id": session.id,
                     "status": session.status.value,
                     "reason": reason,
                 }
+            task_id = str(termination_state.get("task_id") or "").strip()
+            command_request_id = str(
+                termination_state.get("command_request_id") or ""
+            ).strip()
+            command_loop_request_id = str(
+                termination_state.get("command_loop_request_id") or ""
+            ).strip()
 
         cancelled = False
         cancel_error = ""
@@ -2936,24 +3240,24 @@ class TabPoolManager:
                 logger.debug(f"[{session.id}] 取消任务失败（忽略）: {e}")
 
         self._stop_global_monitor_for_session(session.id, reason=f"terminate:{reason}", wait=True)
-
-        if use_force_release:
-            session._run_force_release_from_state(
-                release_state,
-                clear_page=clear_page,
-                check_triggers=False,
-            )
-        else:
-            session._run_release_from_state(
-                release_state,
-                clear_page=False,
-                check_triggers=False,
-                rollback_request_count=False,
-            )
+        interrupt_success = session.interrupt_for_termination(clear_page=clear_page)
 
         with self._condition:
-            # 尽量恢复可用状态的全局监听
-            if self._tabs.get(session.id) is session and session.status == TabStatus.IDLE:
+            wait_deadline = time.monotonic() + self.TERMINATION_RELEASE_WAIT_SEC
+            while (
+                self._tabs.get(session.id) is session
+                and session.is_termination_in_progress()
+            ):
+                remaining = wait_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(timeout=min(remaining, 0.1))
+
+            pending = bool(
+                self._tabs.get(session.id) is session
+                and session.is_termination_in_progress()
+            )
+            if not pending and self._tabs.get(session.id) is session and session.status == TabStatus.IDLE:
                 self._start_global_monitor_for_session(session)
 
             self._condition.notify_all()
@@ -2961,6 +3265,7 @@ class TabPoolManager:
             logger.warning(
                 f"[{session.id}] 手动终止: idx=#{persistent_index}, "
                 f"task={task_id or '-'}, cancelled={cancelled}, "
+                f"pending={pending}, interrupt_success={interrupt_success}, "
                 f"status={session.status.value}, reason={reason}, "
                 f"before={before_snapshot}, after={self._describe_session(session)}"
             )
@@ -2973,6 +3278,9 @@ class TabPoolManager:
                 "task_id": task_id,
                 "cancelled": cancelled,
                 "status": session.status.value,
+                "pending": pending,
+                "released": not pending and session.status == TabStatus.IDLE,
+                "interrupt_success": interrupt_success,
                 "reason": reason,
                 "scope": normalized_scope,
             }
@@ -2987,6 +3295,10 @@ class TabPoolManager:
                 self._scan_new_tabs()
 
             sessions = list(self._tabs.values())
+            groups_by_session: Dict[str, List[str]] = {}
+            for group in normalize_route_groups(getattr(self, "route_groups", [])):
+                for member_session in self._get_sessions_for_route_group(group["id"]):
+                    groups_by_session.setdefault(member_session.id, []).append(group["id"])
 
         result = []
         for session in sessions:
@@ -3003,6 +3315,7 @@ class TabPoolManager:
             info["preset_domain_route_prefix"] = f"/url/{preset_route_domain}" if preset_route_domain else ""
             info["exact_url_route_prefix"] = exact_url_route_prefix
             info["route_prefix"] = domain_route_prefix or tab_route_prefix
+            info["route_groups"] = groups_by_session.get(session.id, [])
             self._apply_exposed_model_name(info)
             result.append(info)
 
@@ -3109,6 +3422,7 @@ class TabPoolManager:
             allocation_mode = self.allocation_mode
             excluded_urls = list(self.excluded_urls)
             preserve_error_tabs = self.preserve_error_tabs
+            route_groups = normalize_route_groups(getattr(self, "route_groups", []))
             global_network_enabled = self._global_network_enabled
             known_raw_tabs = len(self._known_tab_ids)
             last_scan = round(time.time() - self._last_scan_time, 1)
@@ -3127,6 +3441,7 @@ class TabPoolManager:
             "allocation_mode": allocation_mode,
             "excluded_urls": excluded_urls,
             "preserve_error_tabs": preserve_error_tabs,
+            "route_groups": route_groups,
             "global_network_enabled": global_network_enabled,
             "known_raw_tabs": known_raw_tabs,
             "last_scan": last_scan,

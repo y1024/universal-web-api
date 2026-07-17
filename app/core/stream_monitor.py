@@ -363,7 +363,11 @@ class StreamMonitor:
         )
 
     def _should_probe_dom_images(self) -> bool:
-        return bool(self._expect_image_output)
+        modalities = self._image_config.get("modalities") or {}
+        return bool(
+            self._image_extraction_enabled
+            and is_modality_enabled(modalities, "image")
+        )
 
     def _sanitize_stream_text(self, text: str) -> str:
         if not text:
@@ -766,23 +770,23 @@ class StreamMonitor:
     def _extract_image_info(self, element) -> Dict[str, Any]:
         script = """
         const nodes = Array.from(this.querySelectorAll('img') || []);
+        const sources = new Set();
         const urls = [];
-        const seen = new Set();
         for (const img of nodes) {
             try {
                 const src = String(img.currentSrc || img.getAttribute('src') || img.src || '').trim();
-                if (!src || seen.has(src)) continue;
-                if (!/^https?:\\/\\//i.test(src)) continue;
-                seen.add(src);
-                urls.push(src);
+                if (!src || sources.has(src)) continue;
+                if (!/^(?:https?:\\/\\/|blob:|data:image\\/)/i.test(src)) continue;
+                sources.add(src);
+                if (/^https?:\\/\\//i.test(src)) urls.push(src);
             } catch {}
         }
-        return { count: urls.length, urls };
+        return { count: sources.size, urls };
         """
         info = element.run_js(script) or {}
         urls = _normalize_snapshot_image_urls(info.get("urls") or [])
         return {
-            "count": len(urls),
+            "count": max(int(info.get("count", 0) or 0), len(urls)),
             "urls": urls,
         }
 
@@ -803,6 +807,10 @@ class StreamMonitor:
                 url,
                 cookies=cookies_dict,
                 headers=headers,
+                max_bytes=max(
+                    1,
+                    int(self._image_config.get("max_size_mb") or 10),
+                ) * 1024 * 1024,
             )
             if result:
                 self._prefetched_image_urls.add(url)

@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 
 from app.core.config import logger
 from .base import ResponseParser
-from .lmarena_parser import _CP1252_TO_LATIN1, _extract_arena_image_items
+from .lmarena_parser import LmarenaParser, _CP1252_TO_LATIN1, _extract_arena_image_items
 
 
 class _LmarenaBattleSideParser(ResponseParser):
@@ -93,16 +93,18 @@ class _LmarenaBattleSideParser(ResponseParser):
 
             new_content = "".join(content_parts)
             if new_content:
-                if self._accumulated and new_content == self._accumulated:
+                delta, next_accumulated = LmarenaParser._content_delta(
+                    self._accumulated,
+                    new_content,
+                    append_disjoint=True,
+                )
+                if self._accumulated and not delta:
                     logger.debug(
                         f"[LmarenaBattleSideParser] duplicate {self.SIDE_LABEL} response ignored"
                     )
-                elif self._accumulated and new_content.startswith(self._accumulated):
-                    result["content"] = new_content[len(self._accumulated):]
-                    self._accumulated = new_content
                 else:
-                    result["content"] = new_content
-                    self._accumulated = new_content
+                    result["content"] = delta
+                self._accumulated = next_accumulated
 
             if images:
                 result["images"] = images
@@ -285,10 +287,12 @@ class LmarenaBattleWinnerParser(ResponseParser):
             return
 
         current = self._buffers[side]
-        if not current or text.startswith(current):
-            self._buffers[side] = text
-        elif text != current and text not in current:
-            self._buffers[side] = current + text
+        _delta, next_accumulated = LmarenaParser._content_delta(
+            current,
+            text,
+            append_disjoint=True,
+        )
+        self._buffers[side] = next_accumulated
 
     def reset(self):
         self._buffers = {"left": "", "right": ""}

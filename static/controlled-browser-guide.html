@@ -507,6 +507,17 @@
                 .replaceAll("'", '&#39;');
         }
 
+        function normalizeHttpUrl(value) {
+            const raw = String(value || '').trim();
+            if (!raw) return '';
+            try {
+                const parsed = new URL(raw);
+                return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
+            } catch (error) {
+                return '';
+            }
+        }
+
         function setRevealVisible(element) {
             if (!element || element.classList.contains('visible')) return;
             element.classList.add('visible');
@@ -537,7 +548,9 @@
 
         function renderSites() {
             const texts = bundle();
-            const sites = Array.isArray(state.sites) ? state.sites : [];
+            const sites = (Array.isArray(state.sites) ? state.sites : [])
+                .map(site => ({ ...site, url: normalizeHttpUrl(site && site.url) }))
+                .filter(site => site.url);
             els.siteSummary.textContent = sites.length ? texts.siteSummaryLoaded(sites.length) : texts.siteSummaryEmpty;
 
             if (!sites.length) {

@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -108,6 +109,33 @@ class CommandResultStoreTests(unittest.TestCase):
         self.assertEqual(second["matched"], 0)
         self.assertEqual(len(command_result_store.list_command_results("cmd")), 1)
 
+    def test_existing_hit_skips_detector_and_profile_resolution(self):
+        values = {
+            "rules": [{
+                "id": "rule",
+                "required_all": "match",
+                "detector_keyword": "gpt",
+            }],
+        }
+        info = {"url": "https://arena.ai/c/one", "response_sides": ["match"]}
+        with mock.patch.object(
+            command_result_store, "_detector_accepts", return_value=(True, {})
+        ) as detector:
+            command_result_store.record_arena_rule_candidates(
+                "cmd", values, info, profile_resolver=lambda: {"name": "han"}
+            )
+            detector.reset_mock()
+            resolver = mock.Mock(return_value={})
+
+            outcome = command_result_store.record_arena_rule_candidates(
+                "cmd", values, info, profile_resolver=resolver
+            )
+
+        self.assertEqual(outcome["matched"], 0)
+        self.assertFalse(outcome["identity_unresolved"])
+        detector.assert_not_called()
+        resolver.assert_not_called()
+
     def test_clear_results_can_target_one_rule(self):
         values = {
             "rules": [
@@ -171,6 +199,43 @@ class CommandResultStoreTests(unittest.TestCase):
         self.assertEqual(outcome["matched"], 0)
         self.assertTrue(outcome["identity_unresolved"])
         self.assertEqual(command_result_store.list_command_results("cmd"), [])
+
+    def test_slow_detector_does_not_block_result_reads(self):
+        values = {
+            "rules": [{
+                "id": "rule",
+                "required_all": "match",
+                "detector_keyword": "gpt",
+            }],
+        }
+        detector_started = threading.Event()
+        release_detector = threading.Event()
+
+        def slow_detector(*_args, **_kwargs):
+            detector_started.set()
+            release_detector.wait(timeout=2)
+            return True, {"models": ["gpt"]}
+
+        with mock.patch.object(command_result_store, "_detector_accepts", side_effect=slow_detector):
+            worker = threading.Thread(
+                target=command_result_store.record_arena_rule_candidates,
+                args=("cmd", values, {"url": "https://arena.ai/c/slow", "response_sides": ["match"]}),
+                kwargs={"profile_resolver": lambda: {"name": "han"}},
+            )
+            worker.start()
+            self.assertTrue(detector_started.wait(timeout=1))
+
+            reader_finished = threading.Event()
+            reader = threading.Thread(
+                target=lambda: (command_result_store.list_command_results("cmd"), reader_finished.set())
+            )
+            reader.start()
+            try:
+                self.assertTrue(reader_finished.wait(timeout=0.5))
+            finally:
+                release_detector.set()
+                worker.join(timeout=2)
+                reader.join(timeout=2)
 
 
 if __name__ == "__main__":

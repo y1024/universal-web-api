@@ -58,11 +58,15 @@ class TabSession:
     _health_cache_url: str = field(default="", repr=False)
     _health_cache_domain: str = field(default="", repr=False)
     _release_in_progress: bool = field(default=False, repr=False)
+    _termination_in_progress: bool = field(default=False, repr=False)
+    _termination_task_id: Optional[str] = field(default=None, repr=False)
+    _termination_interrupt_done: bool = field(default=False, repr=False)
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def is_available(self) -> bool:
-        return self.status == TabStatus.IDLE
+        with self._lock:
+            return self.status == TabStatus.IDLE and not self._termination_in_progress
 
     def is_in_transient_disconnect(self) -> bool:
         return self.transient_disconnect_until > time.time()
@@ -238,7 +242,7 @@ class TabSession:
 
     def acquire(self, task_id: str) -> bool:
         with self._lock:
-            if self.status != TabStatus.IDLE:
+            if self.status != TabStatus.IDLE or self._termination_in_progress:
                 return False
 
             prev_status = self.status.value
@@ -263,7 +267,7 @@ class TabSession:
     def acquire_for_command(self, task_id: str) -> bool:
         """Acquire tab for command execution without incrementing request counter."""
         with self._lock:
-            if self.status != TabStatus.IDLE:
+            if self.status != TabStatus.IDLE or self._termination_in_progress:
                 return False
             prev_status = self.status.value
             prev_task = str(self.current_task_id or "").strip()
@@ -370,7 +374,90 @@ class TabSession:
             elif self.status != TabStatus.CLOSED:
                 self.status = TabStatus.ERROR
                 self.error_count += 1
+            termination_task = str(self._termination_task_id or "").strip()
+            released_task = str(state.get("prev_task") or "").strip()
+            if self._termination_in_progress and self._termination_interrupt_done and (
+                not termination_task or termination_task == released_task
+            ):
+                self._termination_in_progress = False
+                self._termination_task_id = None
+                self._termination_interrupt_done = False
             self._release_in_progress = False
+
+    def begin_termination(self, expected_task_id: str = "") -> Dict[str, Any]:
+        """Quarantine this session until its current owner finishes releasing it."""
+        with self._lock:
+            expected_task = str(expected_task_id or "").strip()
+            current_task = str(self.current_task_id or "").strip()
+            if expected_task and current_task != expected_task:
+                return {
+                    "ok": False,
+                    "error": "task_ownership_changed",
+                    "expected_task_id": expected_task,
+                    "current_task_id": current_task,
+                }
+            if self._release_in_progress:
+                return {"ok": False, "error": "release_in_progress"}
+            if self._termination_in_progress:
+                return {
+                    "ok": False,
+                    "error": "termination_in_progress",
+                    "current_task_id": current_task,
+                }
+
+            self._termination_in_progress = True
+            self._termination_task_id = current_task or expected_task or None
+            self._termination_interrupt_done = False
+            return {
+                "ok": True,
+                "task_id": current_task,
+                "status": self.status.value,
+                "command_request_id": str(
+                    getattr(self, "_command_request_id", "") or ""
+                ).strip(),
+                "command_loop_request_id": str(
+                    getattr(self, "_command_loop_request_id", "") or ""
+                ).strip(),
+            }
+
+    def finish_ownerless_termination(self) -> None:
+        """Release the quarantine for a session that had no active owner."""
+        with self._lock:
+            if self.current_task_id or self._release_in_progress:
+                return
+            self._termination_in_progress = False
+            self._termination_task_id = None
+            self._termination_interrupt_done = False
+
+    def is_termination_in_progress(self) -> bool:
+        with self._lock:
+            return bool(self._termination_in_progress)
+
+    def interrupt_for_termination(self, clear_page: bool = False) -> bool:
+        """Interrupt page activity without making the session available for reuse."""
+        self.clear_visibility_emulation("terminate")
+        success = True
+        try:
+            if hasattr(self.tab, "stop_loading"):
+                self.tab.stop_loading()
+            self.tab.run_js("if (window.stop) { window.stop(); }")
+        except Exception:
+            pass
+
+        if clear_page:
+            try:
+                self.tab.refresh()
+                self.reset_conversation_state()
+            except Exception as e:
+                logger.warning(f"[{self.id}] terminate refresh failed: {e}")
+                success = False
+        with self._lock:
+            self._termination_interrupt_done = True
+            if not self.current_task_id and not self._release_in_progress:
+                self._termination_in_progress = False
+                self._termination_task_id = None
+                self._termination_interrupt_done = False
+        return success
 
     def _run_release_from_state(
         self,
@@ -537,6 +624,9 @@ class TabSession:
             self.status = TabStatus.CLOSED
             self.current_task_id = None
             self._release_in_progress = False
+            self._termination_in_progress = False
+            self._termination_task_id = None
+            self._termination_interrupt_done = False
             self.transient_disconnect_until = 0.0
             self.transient_disconnect_reason = None
             self._clear_health_cache_unlocked()
@@ -659,6 +749,7 @@ class TabSession:
             last_conversation_domain = self.last_conversation_domain
             last_conversation_preset_name = self.last_conversation_preset_name
             command_loop = self._command_loop_info_unlocked()
+            termination_in_progress = self._termination_in_progress
         busy_duration = None
         if status == TabStatus.BUSY:
             try:
@@ -704,6 +795,7 @@ class TabSession:
             "last_conversation_domain": last_conversation_domain,
             "last_conversation_preset_name": last_conversation_preset_name,
             "command_loop": command_loop,
+            "terminating": termination_in_progress,
         }
 
     def _refresh_current_domain(self, url: str = "") -> str:

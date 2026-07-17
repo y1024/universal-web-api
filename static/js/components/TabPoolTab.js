@@ -23,12 +23,36 @@ window.TabPoolTabComponent = {
             allocationModeUpdating: false,
             routeMethodOptions: [
                 { value: 'domain', label: '站点域名路由' },
+                { value: 'route_group', label: '标签页路由组' },
                 { value: 'fixed_tab', label: '固定标签页路由' },
                 { value: 'exact_url', label: '标签页 URL 路由' },
                 { value: 'exact_url_preset', label: 'URL 绑定预设路由' }
             ],
-            enabledRouteMethods: ['domain', 'fixed_tab', 'exact_url', 'exact_url_preset'],
+            enabledRouteMethods: ['domain', 'route_group', 'fixed_tab', 'exact_url', 'exact_url_preset'],
             routeMethodUpdating: false,
+            routeGroups: [],
+            routeGroupsExpanded: false,
+            selectedRouteGroupId: 'all',
+            tabSearchQuery: '',
+            helpExpanded: false,
+            mobileGroupNavOpen: false,
+            groupNavWidth: 268,
+            groupNavCollapsed: true,
+            groupNavResizing: false,
+            groupNavResizeStartX: 0,
+            groupNavResizeStartWidth: 268,
+            editorCollapsed: true,
+            routeGroupModal: {
+                visible: false,
+                saving: false,
+                editIndex: -1,
+                id: '',
+                name: '',
+                route_domain: '',
+                preset_name: '',
+                allocation_mode: 'round_robin',
+                members: []
+            },
             excludedUrls: [],
             excludedUrlsDraft: '',
             excludedUrlsDraftDirty: false,
@@ -86,6 +110,66 @@ window.TabPoolTabComponent = {
         routeMethodSet() {
             return new Set(this.enabledRouteMethods || []);
         },
+        routeGroupLiveCount() {
+            return (this.routeGroups || []).reduce((sum, group) => sum + Number(group.live_member_count || 0), 0);
+        },
+        routeGroupIdleCount() {
+            return (this.routeGroups || []).reduce((sum, group) => sum + Number(group.idle_member_count || 0), 0);
+        },
+        idleTabCount() {
+            return (this.tabs || []).filter(tab => tab.status === 'idle').length;
+        },
+        selectedRouteGroup() {
+            if (this.selectedRouteGroupId === 'all') return null;
+            return (this.routeGroups || []).find(group => String(group.id || '') === this.selectedRouteGroupId) || null;
+        },
+        selectedRouteGroupIndex() {
+            if (!this.selectedRouteGroup) return -1;
+            return (this.routeGroups || []).findIndex(group => String(group.id || '') === this.selectedRouteGroupId);
+        },
+        visibleTabs() {
+            const group = this.selectedRouteGroup;
+            if (!group) return this.tabs || [];
+            return (this.tabs || []).filter(tab => (group.members || []).some(
+                member => this.routeGroupMemberMatchesTab(member, tab)
+            ));
+        },
+        displayedTabs() {
+            const query = String(this.tabSearchQuery || '').trim().toLowerCase();
+            if (!query) return this.visibleTabs;
+            return (this.visibleTabs || []).filter(tab => {
+                const searchable = [
+                    tab.persistent_index,
+                    tab.current_domain,
+                    tab.url,
+                    tab.id,
+                    tab.session_id,
+                    tab.status,
+                    this.getExposedModelName(tab),
+                    this.getDisplayedPreset(tab),
+                    ...this.getTabRouteGroupIds(tab)
+                ].join(' ').toLowerCase();
+                return searchable.includes(query);
+            });
+        },
+        visibleIdleCount() {
+            return (this.visibleTabs || []).filter(tab => tab.status === 'idle').length;
+        },
+        displayedIdleCount() {
+            return (this.displayedTabs || []).filter(tab => tab.status === 'idle').length;
+        },
+        selectedViewTitle() {
+            return this.selectedRouteGroup
+                ? (this.selectedRouteGroup.name || this.selectedRouteGroup.id)
+                : '全部标签页';
+        },
+        groupNavStyle() {
+            const width = this.groupNavCollapsed ? 64 : this.groupNavWidth;
+            return { '--tp-group-nav-width': width + 'px' };
+        },
+        groupNavCompact() {
+            return !this.groupNavCollapsed && this.groupNavWidth < 244;
+        },
         modelNameTooltipStyle() {
             return {
                 left: this.modelNameTooltip.left + 'px',
@@ -106,6 +190,92 @@ window.TabPoolTabComponent = {
         }
     },
     methods: {
+        loadTabPoolLayout() {
+            try {
+                const storedWidth = Number(localStorage.getItem('tab_pool_group_nav_width'));
+                if (Number.isFinite(storedWidth) && storedWidth >= 220 && storedWidth <= 340) {
+                    this.groupNavWidth = storedWidth;
+                }
+                const storedCollapsedState = localStorage.getItem('tab_pool_group_nav_collapsed');
+                this.groupNavCollapsed = storedCollapsedState === null
+                    ? true
+                    : storedCollapsedState === '1';
+                const storedEditorState = localStorage.getItem('tab_pool_group_editor_collapsed');
+                this.editorCollapsed = storedEditorState === null ? true : storedEditorState === '1';
+            } catch (e) {
+                // Storage is optional; keep the default layout when unavailable.
+            }
+        },
+
+        persistTabPoolLayout() {
+            try {
+                localStorage.setItem('tab_pool_group_nav_width', String(Math.round(this.groupNavWidth)));
+                localStorage.setItem('tab_pool_group_nav_collapsed', this.groupNavCollapsed ? '1' : '0');
+                localStorage.setItem('tab_pool_group_editor_collapsed', this.editorCollapsed ? '1' : '0');
+            } catch (e) {
+                // Ignore storage failures without blocking the controls.
+            }
+        },
+
+        toggleGroupNavCollapsed() {
+            this.groupNavCollapsed = !this.groupNavCollapsed;
+            this.persistTabPoolLayout();
+        },
+
+        startGroupNavResize(event) {
+            if (this.groupNavCollapsed || !event) return;
+            this.groupNavResizing = true;
+            this.groupNavResizeStartX = Number(event.clientX || 0);
+            this.groupNavResizeStartWidth = this.groupNavWidth;
+            document.body.classList.add('tab-pool-is-resizing');
+            document.addEventListener('pointermove', this.handleGroupNavResize);
+            document.addEventListener('pointerup', this.stopGroupNavResize);
+            if (event.preventDefault) event.preventDefault();
+        },
+
+        handleGroupNavResize(event) {
+            if (!this.groupNavResizing || !event) return;
+            const delta = Number(event.clientX || 0) - this.groupNavResizeStartX;
+            this.groupNavWidth = Math.min(340, Math.max(220, this.groupNavResizeStartWidth + delta));
+        },
+
+        stopGroupNavResize() {
+            if (!this.groupNavResizing) return;
+            this.groupNavResizing = false;
+            document.body.classList.remove('tab-pool-is-resizing');
+            document.removeEventListener('pointermove', this.handleGroupNavResize);
+            document.removeEventListener('pointerup', this.stopGroupNavResize);
+            this.persistTabPoolLayout();
+        },
+
+        handleGroupNavResizeKeydown(event) {
+            if (this.groupNavCollapsed || !event) return;
+            const step = event.shiftKey ? 24 : 8;
+            if (event.key === 'ArrowLeft') {
+                this.groupNavWidth = Math.max(220, this.groupNavWidth - step);
+            } else if (event.key === 'ArrowRight') {
+                this.groupNavWidth = Math.min(340, this.groupNavWidth + step);
+            } else if (event.key === 'Home') {
+                this.groupNavWidth = 220;
+            } else if (event.key === 'End') {
+                this.groupNavWidth = 340;
+            } else {
+                return;
+            }
+            event.preventDefault();
+            this.persistTabPoolLayout();
+        },
+
+        resetGroupNavWidth() {
+            this.groupNavWidth = 268;
+            this.persistTabPoolLayout();
+        },
+
+        toggleGroupEditor() {
+            this.editorCollapsed = !this.editorCollapsed;
+            this.persistTabPoolLayout();
+        },
+
         handleDocumentClick(event) {
             if (!this.showRouteSettings) return;
             const panel = this.$el && this.$el.querySelector('[data-route-settings-panel]');
@@ -154,6 +324,7 @@ window.TabPoolTabComponent = {
                     allocation_mode_options: data && data.allocation_mode_options || [],
                     enabled_route_methods: data && data.enabled_route_methods || [],
                     route_method_options: data && data.route_method_options || [],
+                    route_groups: data && data.route_groups || [],
                     excluded_urls: data && data.excluded_urls || [],
                     preserve_error_tabs: !!(data && data.preserve_error_tabs)
                 });
@@ -236,6 +407,7 @@ window.TabPoolTabComponent = {
                     this.allocationModeOptions = data.allocation_mode_options || this.allocationModeOptions;
                     this.enabledRouteMethods = data.enabled_route_methods || this.enabledRouteMethods;
                     this.routeMethodOptions = data.route_method_options || this.routeMethodOptions;
+                    this.routeGroups = Array.isArray(data.route_groups) ? data.route_groups : [];
                     this.applyExcludedUrlsFromServer(data.excluded_urls || []);
                     this.preserveErrorTabs = !!data.preserve_error_tabs;
                     this.tabsResponseSignature = signature;
@@ -497,6 +669,253 @@ window.TabPoolTabComponent = {
             document.addEventListener('visibilitychange', this.visibilityChangeHandler);
         },
 
+        routeGroupMemberKey(value) {
+            const token = String(value && value.url_token || '').trim().toLowerCase();
+            const url = String(value && value.url || '').trim();
+            const tabIndex = Number(value && (value.tab_index || value.persistent_index) || 0);
+            return `${token || url}::#${tabIndex > 0 ? tabIndex : '*'}`;
+        },
+
+        routeGroupMemberMatchesTab(member, tab) {
+            const memberToken = String(member && member.url_token || '').trim().toLowerCase();
+            const tabToken = String(tab && tab.url_route_token || '').trim().toLowerCase();
+            if (memberToken && tabToken && memberToken === tabToken) return true;
+            const memberUrl = String(member && member.url || '').trim();
+            const tabUrl = String(tab && tab.url || '').trim();
+            return !!memberUrl && memberUrl === tabUrl;
+        },
+
+        getRouteGroupStats(group) {
+            const memberTabs = (this.tabs || []).filter(tab => (group && group.members || []).some(
+                member => this.routeGroupMemberMatchesTab(member, tab)
+            ));
+            const liveCount = Number(group && group.live_member_count);
+            const idleCount = Number(group && group.idle_member_count);
+            return {
+                total: Number.isFinite(liveCount) ? liveCount : memberTabs.length,
+                idle: Number.isFinite(idleCount)
+                    ? idleCount
+                    : memberTabs.filter(tab => tab.status === 'idle').length
+            };
+        },
+
+        getAllocationModeLabel(value) {
+            const option = (this.allocationModeOptions || []).find(item => item.value === value);
+            return option ? option.label : (value || '未设置');
+        },
+
+        getTabRouteGroupIds(tab) {
+            const direct = Array.isArray(tab && tab.route_groups) ? tab.route_groups : [];
+            if (direct.length) return direct;
+            return (this.routeGroups || [])
+                .filter(group => (group.members || []).some(member => this.routeGroupMemberMatchesTab(member, tab)))
+                .map(group => group.id);
+        },
+
+        selectAllTabs() {
+            this.selectedRouteGroupId = 'all';
+            this.mobileGroupNavOpen = false;
+            this.closeRouteGroupModal(true);
+        },
+
+        selectRouteGroup(group, editIndex) {
+            if (!group) return;
+            this.selectedRouteGroupId = String(group.id || '');
+            this.mobileGroupNavOpen = false;
+            this.openRouteGroupModal(group, editIndex);
+        },
+
+        createRouteGroup() {
+            this.selectedRouteGroupId = '__new__';
+            this.mobileGroupNavOpen = false;
+            this.editorCollapsed = false;
+            this.persistTabPoolLayout();
+            this.openRouteGroupModal();
+        },
+
+        getRouteGroupPrefix(group) {
+            const groupId = String(group && group.id || '').trim().toLowerCase();
+            return groupId ? `/group/${groupId}` : '';
+        },
+
+        getRouteGroupPresetOptions(group) {
+            const names = new Set();
+            const configured = String(group && group.preset_name || '').trim();
+            if (configured) names.add(configured);
+            const routeDomain = String(group && group.route_domain || '').trim().toLowerCase();
+            (this.tabs || []).forEach(tab => {
+                const isMember = (group && group.members || []).some(
+                    member => this.routeGroupMemberMatchesTab(member, tab)
+                );
+                const tabDomains = [tab.preset_route_domain, tab.route_domain, tab.current_domain]
+                    .map(value => String(value || '').trim().toLowerCase());
+                if (!isMember && (!routeDomain || !tabDomains.includes(routeDomain))) return;
+                (tab.available_presets || []).forEach(name => names.add(String(name || '').trim()));
+            });
+            return Array.from(names).filter(Boolean);
+        },
+
+        getRouteGroupOfflineMembers(group) {
+            return (group && group.members || []).filter(member => !(this.tabs || []).some(
+                tab => this.routeGroupMemberMatchesTab(member, tab)
+            ));
+        },
+
+        getRouteGroupOnlineMemberCount(group) {
+            return (this.tabs || []).filter(tab => (group && group.members || []).some(
+                member => this.routeGroupMemberMatchesTab(member, tab)
+            )).length;
+        },
+
+        openRouteGroupModal(group = null, editIndex = -1) {
+            const source = group || {};
+            this.routeGroupsExpanded = true;
+            this.routeGroupModal = {
+                visible: true,
+                saving: false,
+                editIndex,
+                id: String(source.id || ''),
+                name: String(source.name || ''),
+                route_domain: String(source.route_domain || ''),
+                preset_name: String(source.preset_name || ''),
+                allocation_mode: String(source.allocation_mode || 'round_robin'),
+                members: (source.members || []).map(member => ({ ...member }))
+            };
+        },
+
+        closeRouteGroupModal(force = false) {
+            if (this.routeGroupModal.saving && !force) return;
+            this.routeGroupModal.visible = false;
+        },
+
+        isRouteGroupMemberSelected(tab) {
+            return (this.routeGroupModal.members || []).some(
+                member => this.routeGroupMemberMatchesTab(member, tab)
+            );
+        },
+
+        toggleRouteGroupMember(tab) {
+            const members = (this.routeGroupModal.members || []).filter(
+                member => !this.routeGroupMemberMatchesTab(member, tab)
+            );
+            if (members.length === (this.routeGroupModal.members || []).length) {
+                members.push({
+                    url: String(tab.url || ''),
+                    url_token: String(tab.url_route_token || ''),
+                    tab_index: Number(tab.persistent_index || 0)
+                });
+                if (!this.routeGroupModal.route_domain) {
+                    this.routeGroupModal.route_domain = String(tab.route_domain || tab.current_domain || '');
+                }
+            }
+            this.routeGroupModal.members = members;
+        },
+
+        removeRouteGroupMember(member) {
+            const memberKey = this.routeGroupMemberKey(member);
+            this.routeGroupModal.members = (this.routeGroupModal.members || []).filter(
+                item => this.routeGroupMemberKey(item) !== memberKey
+            );
+        },
+
+        removeRouteGroupTab(tab) {
+            this.routeGroupModal.members = (this.routeGroupModal.members || []).filter(
+                member => !this.routeGroupMemberMatchesTab(member, tab)
+            );
+        },
+
+        removeOfflineRouteGroupMembers() {
+            const offlineKeys = new Set(
+                this.getRouteGroupOfflineMembers(this.routeGroupModal).map(member => this.routeGroupMemberKey(member))
+            );
+            this.routeGroupModal.members = (this.routeGroupModal.members || []).filter(
+                member => !offlineKeys.has(this.routeGroupMemberKey(member))
+            );
+        },
+
+        async persistRouteGroups(nextGroups, successMessage) {
+            const token = window.getDashboardAuthToken ? window.getDashboardAuthToken() : '';
+            const headers = { 'Content-Type': 'application/json' };
+            if (token) headers.Authorization = `Bearer ${token}`;
+            const response = await fetch('/api/tab-pool/config', {
+                method: 'PUT',
+                headers,
+                body: JSON.stringify({
+                    allocation_mode: this.allocationMode,
+                    enabled_route_methods: this.enabledRouteMethods,
+                    preserve_error_tabs: this.preserveErrorTabs,
+                    route_groups: nextGroups
+                })
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            this.routeGroups = Array.isArray(data.route_groups) ? data.route_groups : nextGroups;
+            this.$emit('notify', { type: 'success', message: successMessage });
+            await this.fetchTabs({ force: true });
+        },
+
+        async saveRouteGroup() {
+            const modal = this.routeGroupModal;
+            const groupId = String(modal.id || '').trim().toLowerCase();
+            if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(groupId)) {
+                this.$emit('notify', { type: 'error', message: '组 ID 只能使用小写字母、数字、点、下划线和连字符' });
+                return;
+            }
+            if (modal.preset_name && !modal.route_domain) {
+                this.$emit('notify', { type: 'error', message: '固定预设前需要设置站点域名' });
+                return;
+            }
+            const duplicateIndex = (this.routeGroups || []).findIndex(
+                (item, index) => String(item.id || '').toLowerCase() === groupId && index !== modal.editIndex
+            );
+            if (duplicateIndex >= 0) {
+                this.$emit('notify', { type: 'error', message: '路由组 ID 已存在' });
+                return;
+            }
+
+            const nextGroup = {
+                id: groupId,
+                name: String(modal.name || groupId).trim() || groupId,
+                route_domain: String(modal.route_domain || '').trim(),
+                preset_name: String(modal.preset_name || '').trim(),
+                allocation_mode: String(modal.allocation_mode || 'round_robin'),
+                members: (modal.members || []).map(member => ({ ...member }))
+            };
+            const nextGroups = (this.routeGroups || []).map(group => ({ ...group }));
+            if (modal.editIndex >= 0) nextGroups.splice(modal.editIndex, 1, nextGroup);
+            else nextGroups.push(nextGroup);
+
+            this.routeGroupModal.saving = true;
+            try {
+                await this.persistRouteGroups(nextGroups, '标签页路由组已保存');
+                this.selectedRouteGroupId = groupId;
+                const savedIndex = (this.routeGroups || []).findIndex(group => String(group.id || '') === groupId);
+                if (savedIndex >= 0) {
+                    this.openRouteGroupModal(this.routeGroups[savedIndex], savedIndex);
+                } else {
+                    this.closeRouteGroupModal(true);
+                }
+            } catch (e) {
+                this.$emit('notify', { type: 'error', message: '保存路由组失败: ' + e.message });
+            } finally {
+                this.routeGroupModal.saving = false;
+            }
+        },
+
+        async deleteRouteGroup(group, index) {
+            if (!window.confirm(`删除路由组 ${group.name || group.id}？`)) return;
+            try {
+                const nextGroups = (this.routeGroups || []).filter((_, itemIndex) => itemIndex !== index);
+                await this.persistRouteGroups(nextGroups, '标签页路由组已删除');
+                this.selectedRouteGroupId = 'all';
+                if (this.routeGroupModal.editIndex === index) {
+                    this.closeRouteGroupModal(true);
+                }
+            } catch (e) {
+                this.$emit('notify', { type: 'error', message: '删除路由组失败: ' + e.message });
+            }
+        },
+
         copyEndpoint(routePrefix, successMessage = '已复制端点地址') {
             const endpoint = `${this.baseUrl}${routePrefix}/v1/chat/completions`;
             navigator.clipboard.writeText(endpoint).then(() => {
@@ -663,6 +1082,17 @@ window.TabPoolTabComponent = {
             return parts.join(' · ');
         },
 
+        formatExecutionDuration(tab) {
+            if (!tab || tab.status !== 'busy') return '未在执行';
+            const totalSeconds = Math.max(0, Math.floor(Number(tab.busy_duration) || 0));
+            const hours = Math.floor(totalSeconds / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = totalSeconds % 60;
+            return [hours, minutes, seconds]
+                .map(value => String(value).padStart(2, '0'))
+                .join(':');
+        },
+
         openTerminateModal(tab) {
             this.terminateModal = {
                 visible: true,
@@ -730,17 +1160,23 @@ window.TabPoolTabComponent = {
                             ? 'manual_cancel_command_loop_from_tab_pool'
                             : 'manual_terminate_from_tab_pool',
                         clear_page: normalizedScope !== 'loop',
-                        scope: normalizedScope
+                        scope: normalizedScope,
+                        expected_session_id: String(tab.id || tab.session_id || ''),
+                        expected_task_id: String(tab.current_task || tab.command_task || '')
                     })
                 });
 
-                if (!response.ok) throw new Error('HTTP ' + response.status);
-                const data = await response.json();
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.detail || ('HTTP ' + response.status));
+                }
                 const msg = normalizedScope === 'loop'
                     ? `标签页 #${tabIndex} 已请求终止本次循环`
+                    : (data.pending
+                        ? `标签页 #${tabIndex} 正在终止，旧任务退出前不会重新分配`
                     : (data.cancelled
                         ? `标签页 #${tabIndex} 已终止并解除占用`
-                        : `标签页 #${tabIndex} 已解除占用（无可取消请求）`);
+                        : `标签页 #${tabIndex} 已解除占用（无可取消请求）`));
                 this.$emit('notify', { type: 'success', message: msg });
                 this.terminateModal = {
                     visible: false,
@@ -762,543 +1198,350 @@ window.TabPoolTabComponent = {
     },
     mounted() {
         this.baseUrl = window.location.origin;
+        this.loadTabPoolLayout();
         this.fetchTabs();
         this.startAutoRefresh();
         document.addEventListener('click', this.handleDocumentClick);
     },
     beforeUnmount() {
         this.stopAutoRefresh();
+        this.stopGroupNavResize();
         this.fetchRequestSeq += 1;
         if (this.fetchAbortController) {
             this.fetchAbortController.abort();
             this.fetchAbortController = null;
         }
+        document.body.classList.remove('tab-pool-is-resizing');
+        document.removeEventListener('pointermove', this.handleGroupNavResize);
+        document.removeEventListener('pointerup', this.stopGroupNavResize);
         document.removeEventListener('click', this.handleDocumentClick);
     },
     template: `
-        <div class="p-6">
-            <!-- 标题栏 -->
-            <div class="flex items-center justify-between mb-6">
-                <div>
-                    <div class="flex items-center gap-3 flex-wrap">
-                        <h2 class="text-xl font-bold dark:text-white">🗂️ 标签页池</h2>
-                        <div class="flex items-center gap-2">
-                            <span class="text-xs text-gray-500 dark:text-gray-400">分配模式</span>
-                            <select
-                                :value="allocationMode"
-                                @change="updateAllocationMode($event.target.value)"
-                                :disabled="allocationModeUpdating"
-                                class="text-xs border dark:border-gray-600 px-2 py-1 rounded bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-blue-400 focus:border-transparent disabled:opacity-50"
-                            >
-                                <option v-for="mode in allocationModeOptions" :key="mode.value" :value="mode.value">
-                                    {{ mode.label }}
-                                </option>
-                            </select>
-                        </div>
-                    </div>
-                    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                        管理浏览器中的标签页，每个标签页有独立的路由前缀
-                    </p>
-                </div>
-                <div class="flex items-center gap-4">
-                    <div class="relative">
-                        <button
-                            @click="showRouteSettings = !showRouteSettings"
-                            data-route-settings-trigger
-                            class="w-9 h-9 rounded-full border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-300 dark:hover:border-blue-600 transition-colors"
-                            title="标签页池设置"
-                        >
-                            ⚙
-                        </button>
-                        <div
-                            v-if="showRouteSettings"
-                            data-route-settings-panel
-                            class="absolute right-0 top-11 z-20 w-[28rem] max-w-[calc(100vw-2rem)] rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl p-4"
-                        >
-                            <div class="flex items-start justify-between gap-3 mb-3">
-                                <div>
-                                    <div class="text-sm font-semibold text-gray-900 dark:text-white">标签页池设置</div>
-                                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">关闭后前端会隐藏对应路由；URL 路由只会匹配已打开标签页，相同 URL 会自动轮询。</p>
-                                </div>
-                                <button @click="showRouteSettings = false" class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">关闭</button>
-                            </div>
-                            <div class="space-y-2">
-                                <label
-                                    v-for="method in routeMethodOptions"
-                                    :key="method.value"
-                                    class="flex items-center justify-between gap-3 text-sm text-gray-700 dark:text-gray-200"
-                                >
-                                    <span>{{ method.label }}</span>
-                                    <input
-                                        type="checkbox"
-                                        :checked="isRouteMethodEnabled(method.value)"
-                                        :disabled="routeMethodUpdating"
-                                        @change="toggleRouteMethod(method.value)"
-                                        class="rounded"
-                                    >
-                                </label>
-                            </div>
-                            <div class="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
-                                <div class="flex items-center justify-between gap-3 mb-2">
-                                    <div class="text-sm font-semibold text-gray-900 dark:text-white">域名路由排除 URL</div>
-                                    <span class="text-xs text-gray-400 dark:text-gray-500">{{ excludedUrls.length }} 条</span>
-                                </div>
-                                <textarea
-                                    :value="excludedUrlsDraft"
-                                    @input="handleExcludedUrlsDraftInput"
-                                    :disabled="excludedUrlsUpdating"
-                                    rows="5"
-                                    class="w-full rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-2 py-2 font-mono text-xs text-gray-700 dark:text-gray-200 focus:ring-2 focus:ring-blue-400 focus:border-transparent disabled:opacity-60"
-                                    placeholder="https://chatgpt.com/c/..."
-                                ></textarea>
-                                <div class="mt-2 flex items-center justify-between gap-2">
-                                    <button
-                                        @click="resetExcludedUrlsDraft"
-                                        :disabled="excludedUrlsUpdating || !excludedUrlsDraftDirty"
-                                        class="px-2 py-1 rounded border border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-300 disabled:opacity-50"
-                                    >
-                                        重置
-                                    </button>
-                                    <button
-                                        @click="saveExcludedUrls()"
-                                        :disabled="excludedUrlsUpdating"
-                                        class="px-3 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700 disabled:opacity-50"
-                                    >
-                                        {{ excludedUrlsUpdating ? '保存中...' : '保存排除列表' }}
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
-                                <label class="flex items-start justify-between gap-3 text-sm text-gray-700 dark:text-gray-200">
-                                    <span>
-                                        <span class="block font-semibold text-gray-900 dark:text-white">错误/超时保留标签页</span>
-                                        <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">
-                                            工作流错误、HTTP 异常或卡死超时时，只记录并标记错误，不自动关闭浏览器标签页。
-                                        </span>
-                                    </span>
-                                    <input
-                                        type="checkbox"
-                                        :checked="preserveErrorTabs"
-                                        :disabled="preserveErrorTabsUpdating"
-                                        @change="updatePreserveErrorTabs($event.target.checked)"
-                                        class="mt-1 rounded"
-                                    >
-                                </label>
-                            </div>
-                        </div>
-                    </div>
-                    <label class="flex items-center gap-2 text-sm dark:text-gray-300">
-                        <input type="checkbox" v-model="autoRefresh" class="rounded">
-                        自动刷新
-                    </label>
-                    <button @click="fetchTabs" 
-                            :disabled="loading"
-                            class="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50">
-                        {{ loading ? '刷新中...' : '立即刷新' }}
+        <div class="tab-pool-console">
+            <div v-if="mobileGroupNavOpen" class="tab-pool-mobile-backdrop" @click="mobileGroupNavOpen = false"></div>
+
+            <aside
+                :class="['tab-pool-group-nav', { 'is-mobile-open': mobileGroupNavOpen, 'is-collapsed': groupNavCollapsed, 'is-compact': groupNavCompact, 'is-resizing': groupNavResizing }]"
+                :style="groupNavStyle"
+            >
+                <div class="tab-pool-group-brand">
+                    <span class="tab-pool-brand-icon" aria-hidden="true">▱</span>
+                    <span class="tab-pool-brand-copy">
+                        <strong>标签页池</strong>
+                        <small>Tab Pool Console</small>
+                    </span>
+                    <button type="button" class="tab-pool-nav-collapse" @click="toggleGroupNavCollapsed" :title="groupNavCollapsed ? '展开路由组栏' : '折叠路由组栏'">
+                        <span v-html="$icons.chevronDown"></span>
                     </button>
+                    <button type="button" class="tab-pool-mobile-close" @click="mobileGroupNavOpen = false" title="关闭路由组导航" v-html="$icons.xMark"></button>
                 </div>
-            </div>
-            
-            <!-- 状态信息 -->
-            <div class="mb-4 flex items-center gap-4 text-sm">
-                <span class="dark:text-gray-300">
-                    共 <strong class="text-blue-600 dark:text-blue-400">{{ tabs.length }}</strong> 个标签页
-                </span>
-                <span v-if="lastUpdate" class="text-gray-500 dark:text-gray-400">
-                    上次更新: {{ lastUpdate }}
-                </span>
-                <span v-if="error" class="text-red-500">
-                    ⚠️ {{ error }}
-                </span>
-            </div>
-            
-            <!-- 使用说明 -->
-            <div class="mb-6 p-4 bg-blue-50 dark:bg-blue-900/30 rounded-lg border border-blue-200 dark:border-blue-800">
-                <h3 class="font-semibold text-blue-800 dark:text-blue-300 mb-2">💡 使用方式</h3>
-                <ul class="text-sm text-blue-700 dark:text-blue-200 space-y-1">
-                    <li>• <strong>默认路由</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/v1/chat/completions</code> - 自动选择空闲标签页</li>
-                    <li v-if="isRouteMethodEnabled('domain')">• <strong>指定站点域名</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/url/gemini.com/v1/chat/completions</code> - 自动匹配该站点的标签页</li>
-                    <li v-if="isRouteMethodEnabled('fixed_tab')">• <strong>指定标签页</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/tab/{编号}/v1/chat/completions</code> - 使用特定标签页</li>
-                    <li v-if="isRouteMethodEnabled('exact_url')">• <strong>标签页 URL 路由</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/tab-url/{token}/v1/chat/completions</code> - 只匹配当前已打开的 URL，相同 URL 会轮询，不会回退到别的 URL</li>
-                    <li v-if="isRouteMethodEnabled('exact_url_preset')">• <strong>URL 绑定预设</strong>：<code class="bg-blue-100 dark:bg-blue-800 px-1 rounded">/tab-url/{token}/{预设}/v1/chat/completions</code> - 先严格匹配已打开 URL，再严格使用对应站点预设</li>
-                    <li>• 标签页编号在脚本运行期间保持不变，关闭标签页不会影响其他编号</li>
-                </ul>
-            </div>
-            
-            <!-- 标签页列表 -->
-            <div v-if="tabs.length === 0 && !loading" 
-                 class="text-center py-12 text-gray-500 dark:text-gray-400">
-                <div class="text-4xl mb-4">📭</div>
-                <p>暂无可用标签页</p>
-                <p class="text-sm mt-2">请在浏览器中打开 AI 网站</p>
-            </div>
-            
-            <div v-else class="space-y-3">
-                <div v-for="tab in tabs" :key="tab.persistent_index"
-                     class="p-4 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 hover:shadow-md transition-shadow">
-                    <div class="flex items-start justify-between">
-                        <!-- 左侧信息 -->
-                        <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-3 mb-2">
-                                <!-- 编号徽章 -->
-                                <span class="inline-flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 font-bold text-lg">
-                                    {{ tab.persistent_index }}
-                                </span>
-                                
-                                <!-- 状态指示器 -->
-                                <span class="flex items-center gap-1.5">
-                                    <span :class="['w-2.5 h-2.5 rounded-full', statusColor(tab.status)]"></span>
-                                    <span class="text-sm font-medium dark:text-white">{{ statusText(tab.status) }}</span>
-                                </span>
-                                
-                                <!-- 会话 ID -->
-                                <span class="text-xs text-gray-500 dark:text-gray-400 font-mono">
-                                    {{ tab.id }}
-                                </span>
-                                <span v-if="tab.is_isolated_context"
-                                      class="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs">
-                                    独立 Cookie
-                                </span>
-                                <span v-if="tab.route_excluded"
-                                      class="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 text-xs">
-                                    域名路由已排除
-                                </span>
-                            </div>
-                            
-                            <div class="flex flex-wrap items-center gap-2 mb-1 text-sm">
-                                <span class="text-gray-500 dark:text-gray-400">🏷️</span>
-                                <span class="font-medium text-gray-800 dark:text-gray-100">{{ getDomainLabel(tab) }}</span>
-                                <a v-if="tab.domain_url"
-                                   :href="tab.domain_url"
-                                   target="_blank"
-                                   rel="noreferrer"
-                                   class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-mono">
-                                    {{ tab.domain_url }}
-                                </a>
-                            </div>
 
-                            <!-- URL -->
-                            <div class="text-sm text-gray-600 dark:text-gray-300 truncate mb-2" :title="tab.url">
-                                🌐 {{ truncateUrl(tab.url, 72) }}
-                            </div>
-                            
-                            <!-- 路由端点 -->
-                            <div class="space-y-2">
-                                <div v-if="isRouteMethodEnabled('domain') && getDomainRoutePrefix(tab)" class="flex flex-wrap items-center gap-2">
-                                    <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">站点域名路由</span>
-                                    <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
-                                        {{ getDomainRoutePrefix(tab) }}/v1/chat/completions
-                                    </code>
-                                    <button @click="copyEndpoint(getDomainRoutePrefix(tab), '已复制站点域名路由')"
-                                            class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400">
-                                        📋 复制
-                                    </button>
-                                </div>
-                                <div v-if="isRouteMethodEnabled('fixed_tab')" class="flex flex-wrap items-center gap-2">
-                                    <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">固定标签页路由</span>
-                                    <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
-                                        {{ getFixedTabRoutePrefix(tab) }}/v1/chat/completions
-                                    </code>
-                                    <button @click="copyEndpoint(getFixedTabRoutePrefix(tab), '已复制固定标签页路由')"
-                                            class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400">
-                                        📋 复制
-                                    </button>
-                                </div>
-                                <div v-if="isRouteMethodEnabled('exact_url') && getExactUrlRoutePrefix(tab)" class="flex flex-wrap items-center gap-2">
-                                    <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">标签页 URL 路由</span>
-                                    <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
-                                        {{ getExactUrlRoutePrefix(tab) }}/v1/chat/completions
-                                    </code>
-                                    <button @click="copyEndpoint(getExactUrlRoutePrefix(tab), '已复制标签页 URL 路由')"
-                                            class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400">
-                                        📋 复制
-                                    </button>
-                                </div>
-                                
-                                <!-- 预设专属路由 -->
-                                <template v-if="tab.available_presets && tab.available_presets.length > 0">
-                                    <div v-if="isRouteMethodEnabled('domain') && getPresetDomainRoutePrefix(tab)" class="flex flex-wrap items-center gap-2">
-                                        <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">预设域名路由</span>
-                                        <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
-                                            {{ buildPresetEndpointPath(getPresetDomainRoutePrefix(tab), getDisplayedPreset(tab)) }}
-                                        </code>
-                                        <button @click="copyPresetEndpoint(getPresetDomainRoutePrefix(tab), getDisplayedPreset(tab), '已复制预设域名路由')"
-                                                class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400">
-                                            📋 复制
-                                        </button>
-                                    </div>
-                                    <div v-if="isRouteMethodEnabled('exact_url_preset') && getExactUrlRoutePrefix(tab)" class="flex flex-wrap items-center gap-2">
-                                        <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">URL 绑定预设路由</span>
-                                        <code class="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-700 dark:text-gray-300">
-                                            {{ buildPresetEndpointPath(getExactUrlRoutePrefix(tab), getDisplayedPreset(tab)) }}
-                                        </code>
-                                        <button @click="copyPresetEndpoint(getExactUrlRoutePrefix(tab), getDisplayedPreset(tab), '已复制 URL 绑定预设路由')"
-                                                class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400">
-                                            📋 复制
-                                        </button>
-                                    </div>
-                                </template>
-                            </div>
+                <nav class="tab-pool-group-list" aria-label="标签页路由组">
+                    <button
+                        type="button"
+                        :class="['tab-pool-group-item', { active: selectedRouteGroupId === 'all' }]"
+                        @click="selectAllTabs"
+                    >
+                        <span class="tab-pool-group-symbol" aria-hidden="true">⌗</span>
+                        <span class="tab-pool-group-copy">
+                            <strong>全部标签页</strong>
+                            <small>{{ idleTabCount }}/{{ tabs.length }} 空闲</small>
+                        </span>
+                        <span class="tab-pool-count-badge">{{ idleTabCount }}/{{ tabs.length }}</span>
+                    </button>
 
-                            <!-- 🆕 预设选择器 -->
-                            <div v-if="tab.available_presets && tab.available_presets.length > 0"
-                                 class="flex items-center gap-2 mt-2">
-                                <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">🎛️ 预设:</span>
-                                <select :value="getCurrentPreset(tab)"
-                                        @change="changePreset(tab, $event.target.value)"
-                                        :disabled="presetUpdating[tab.persistent_index]"
-                                        class="text-xs border dark:border-gray-600 px-2 py-1 rounded bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-blue-400 focus:border-transparent disabled:opacity-50 min-w-[100px]">
-                                    <option :value="getDefaultPresetOptionValue()">
-                                        {{ getDefaultPresetLabel(tab) }}
-                                    </option>
-                                    <option v-for="preset in tab.available_presets" :key="preset" :value="preset">
-                                        {{ preset }}
-                                    </option>
-                                </select>
-                                <span v-if="presetUpdating[tab.persistent_index]" class="text-xs text-blue-500 dark:text-blue-400">
-                                    切换中...
-                                </span>
-                            </div>
-                            <div v-if="tab.available_presets && tab.available_presets.length > 0" class="mt-1">
-                                <span class="text-xs text-gray-400 dark:text-gray-500">{{ getPresetStatusText(tab) }}</span>
-                            </div>
-                            <div v-else-if="tab.current_domain" class="mt-2">
-                                <span class="text-xs text-gray-400 dark:text-gray-500">🎛️ 预设: {{ getDisplayedPreset(tab) }}（仅有一个）</span>
-                            </div>
-                        </div>
-
-                        <!-- 右侧统计 -->
-                        <div class="flex flex-col items-end text-right text-xs text-gray-500 dark:text-gray-400 ml-4 flex-shrink-0">
-                            <div>请求数: {{ tab.request_count }}</div>
-                            <button
-                                    type="button"
-                                    @click="openModelNameModal(tab)"
-                                    @mouseenter="showModelNameTooltip($event)"
-                                    @mousemove="positionModelNameTooltip($event)"
-                                    @mouseleave="hideModelNameTooltip"
-                                    @focus="showModelNameTooltip($event)"
-                                    @blur="hideModelNameTooltip"
-                                    class="mt-2 ml-auto inline-flex min-w-[5.5rem] max-w-[10rem] flex-col items-end self-end rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1 text-right text-gray-700 dark:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700/60 transition-colors">
-                                <span class="block text-[10px] leading-tight text-gray-400 dark:text-gray-500">模型名</span>
-                                <span class="block max-w-full truncate font-medium">{{ truncateModelName(getExposedModelName(tab)) }}</span>
-                            </button>
-                            <div class="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
-                                {{ getModelNameSourceText(tab) }}
-                            </div>
-                            <div v-if="tab.busy_duration" class="text-yellow-600 dark:text-yellow-400">
-                                已忙碌: {{ tab.busy_duration }}s
-                            </div>
-                            <div v-if="getCommandLoopText(tab)" class="text-orange-600 dark:text-orange-400 truncate max-w-40" :title="getCommandLoopText(tab)">
-                                {{ getCommandLoopText(tab) }}
-                            </div>
-                            <div v-if="tab.current_task" class="text-blue-600 dark:text-blue-400 truncate max-w-32">
-                                任务: {{ tab.current_task }}
-                            </div>
-                            <div v-if="tab.command_task || tab.current_command || tab.current_command_id" class="text-purple-600 dark:text-purple-400 truncate max-w-40" :title="tab.current_command || tab.current_command_id || tab.command_task">
-                                命令: {{ tab.current_command || tab.current_command_id || tab.command_task }}
-                            </div>
-                            <button v-if="tab.url"
-                                    @click="toggleTabExcluded(tab)"
-                                    :disabled="excludedUrlsUpdating"
-                                    class="mt-2 px-2 py-1 rounded border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 disabled:opacity-50 text-xs">
-                                {{ tab.route_excluded ? '解除域名排除' : '排除域名路由' }}
-                            </button>
-                            <button v-if="tab.status === 'busy' || tab.current_task || tab.command_task || tab.current_command"
-                                    @click="openTerminateModal(tab)"
-                                    class="mt-2 px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700 text-xs">
-                                终止并解锁
-                            </button>
-                        </div>
+                    <div class="tab-pool-group-heading">
+                        <span>路由组 · {{ routeGroups.length }}</span>
+                        <button type="button" @click="createRouteGroup" title="新建路由组" v-html="$icons.plusCircle"></button>
                     </div>
+
+                    <button
+                        v-for="(group, groupIndex) in routeGroups"
+                        :key="group.id"
+                        type="button"
+                        :class="['tab-pool-group-item', { active: selectedRouteGroupId === group.id }]"
+                        @click="selectRouteGroup(group, groupIndex)"
+                    >
+                        <span class="tab-pool-group-symbol" aria-hidden="true">◇</span>
+                        <span class="tab-pool-group-copy">
+                            <strong>{{ group.name || group.id }}</strong>
+                            <code>{{ group.id }}</code>
+                            <small>
+                                <i :class="getRouteGroupStats(group).idle > 0 ? 'is-idle' : 'is-waiting'"></i>
+                                {{ getRouteGroupStats(group).idle }}/{{ getRouteGroupStats(group).total }} 空闲 · {{ getAllocationModeLabel(group.allocation_mode) }}
+                            </small>
+                        </span>
+                    </button>
+
+                    <div v-if="routeGroups.length === 0" class="tab-pool-group-empty">
+                        尚未创建路由组
+                    </div>
+                </nav>
+
+                <div class="tab-pool-global-controls">
+                    <label>
+                        <span>全局分配模式</span>
+                        <select
+                            :value="allocationMode"
+                            @change="updateAllocationMode($event.target.value)"
+                            :disabled="allocationModeUpdating"
+                        >
+                            <option v-for="mode in allocationModeOptions" :key="mode.value" :value="mode.value">{{ mode.label }}</option>
+                        </select>
+                    </label>
+                    <label class="tab-pool-switch-row">
+                        <span>自动刷新</span>
+                        <input type="checkbox" v-model="autoRefresh">
+                        <i aria-hidden="true"></i>
+                    </label>
                 </div>
-            </div>
-            
-            <div
-                v-if="modelNameTooltip.visible"
-                :style="modelNameTooltipStyle"
-                class="fixed z-[70] w-[360px] max-w-[calc(100vw-24px)] pointer-events-none rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-xs leading-relaxed text-gray-700 dark:text-gray-200 shadow-xl text-left"
-            >
-                {{ modelNameTooltip.text }}
-            </div>
+                <div
+                    class="tab-pool-group-resizer"
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="调整路由组栏宽度"
+                    :aria-valuenow="Math.round(groupNavWidth)"
+                    aria-valuemin="220"
+                    aria-valuemax="340"
+                    tabindex="0"
+                    @pointerdown="startGroupNavResize"
+                    @keydown="handleGroupNavResizeKeydown"
+                    @dblclick="resetGroupNavWidth"
+                ></div>
+            </aside>
 
-            <div
-                v-if="terminateModal.visible"
-                class="fixed inset-0 z-[65] flex items-center justify-center bg-black/45 px-4 py-6"
-            >
-                <div class="w-full max-w-md rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-2xl">
-                    <div class="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-700 px-5 py-4">
-                        <div>
-                            <div class="text-base font-semibold text-gray-900 dark:text-white">终止标签页任务</div>
-                            <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                                标签页 #{{ terminateModal.tab && terminateModal.tab.persistent_index }}
-                            </div>
-                        </div>
-                        <button
-                            type="button"
-                            @click="closeTerminateModal()"
-                            :disabled="terminateModal.submitting"
-                            class="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
-                        >
-                            关闭
-                        </button>
+            <main class="tab-pool-main">
+                <header class="tab-pool-topbar">
+                    <button type="button" class="tab-pool-mobile-menu" @click="mobileGroupNavOpen = true" aria-label="打开路由组导航" title="打开路由组导航">☰</button>
+                    <div class="tab-pool-view-title">
+                        <small class="tab-pool-breadcrumb">Console / Pool / Live</small>
+                        <span class="tab-pool-title-line">
+                            <h2>{{ selectedViewTitle }}</h2>
+                            <span v-if="selectedRouteGroup" class="tab-pool-pill tab-pool-pill-violet">/group/{{ selectedRouteGroup.id }}</span>
+                            <span v-else class="tab-pool-pill tab-pool-pill-green">{{ idleTabCount }}/{{ tabs.length }} 空闲</span>
+                        </span>
                     </div>
-                    <div class="space-y-3 px-5 py-4 text-sm text-gray-700 dark:text-gray-200">
-                        <div class="rounded-md bg-gray-50 dark:bg-gray-900/60 px-3 py-2 text-xs leading-6">
-                            <div>当前任务: {{ (terminateModal.tab && (terminateModal.tab.current_task || terminateModal.tab.command_task)) || '无 task_id' }}</div>
-                            <div v-if="terminateModal.tab && (terminateModal.tab.current_command || terminateModal.tab.current_command_id)">
-                                当前命令: {{ terminateModal.tab.current_command || terminateModal.tab.current_command_id }}
-                            </div>
-                            <div v-if="terminateModal.tab && getCommandLoopText(terminateModal.tab)">
-                                当前循环: {{ getCommandLoopText(terminateModal.tab) }}
-                            </div>
-                        </div>
-                        <p class="text-xs leading-5 text-gray-500 dark:text-gray-400">
-                            终止本次循环只会给脚本发送单轮取消信号；终止整个任务会取消请求并释放标签页。
-                        </p>
-                    </div>
-                    <div class="flex flex-wrap justify-end gap-2 border-t border-gray-100 dark:border-gray-700 px-5 py-4">
-                        <button
-                            type="button"
-                            @click="closeTerminateModal()"
-                            :disabled="terminateModal.submitting"
-                            class="rounded-md border border-gray-200 dark:border-gray-700 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
-                        >
-                            取消
-                        </button>
-                        <button
-                            type="button"
-                            @click="terminateTask(terminateModal.tab, 'loop')"
-                            :disabled="terminateModal.submitting || !(terminateModal.tab && terminateModal.tab.command_loop && terminateModal.tab.command_loop.active)"
-                            class="rounded-md bg-orange-600 px-3 py-1.5 text-sm text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                            终止本次循环
-                        </button>
-                        <button
-                            type="button"
-                            @click="terminateTask(terminateModal.tab, 'task')"
-                            :disabled="terminateModal.submitting"
-                            class="rounded-md bg-red-600 px-3 py-1.5 text-sm text-white hover:bg-red-700 disabled:opacity-50"
-                        >
-                            终止整个任务
-                        </button>
-                    </div>
-                </div>
-            </div>
-
-            <div
-                v-if="modelNameModal.visible"
-                class="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 px-4 py-6"
-            >
-                <div class="w-full max-w-md rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-2xl">
-                    <div class="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-700 px-5 py-4">
-                        <div>
-                            <div class="text-base font-semibold text-gray-900 dark:text-white">修改模型显示名称</div>
-                            <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                                标签页 #{{ modelNameModal.tab && modelNameModal.tab.persistent_index }}
-                            </div>
-                        </div>
-                        <button
-                            type="button"
-                            @click="closeModelNameModal()"
-                            :disabled="modelNameModal.saving"
-                            class="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
-                        >
-                            关闭
-                        </button>
-                    </div>
-                    <div class="space-y-4 px-5 py-4">
-                        <div>
-                            <label class="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">当前暴露的模型名称</label>
-                            <input
-                                v-model="modelNameModal.draft"
-                                type="text"
-                                maxlength="200"
-                                class="w-full rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-3 py-2 text-sm text-gray-800 dark:text-gray-100 focus:border-transparent focus:ring-2 focus:ring-blue-400"
-                                placeholder="例如 lmarena-creative"
-                                @keydown.enter.prevent="submitModelName('tab')"
-                            >
-                        </div>
-                        <div class="rounded-md bg-blue-50 dark:bg-blue-900/25 px-3 py-2 text-xs leading-relaxed text-blue-700 dark:text-blue-200">
-                            临时应用只绑定当前标签页；关闭或销毁该标签页后，需要重新命名。
-                        </div>
-                    </div>
-                    <div class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 dark:border-gray-700 px-5 py-4">
-                        <button
-                            type="button"
-                            @click="submitModelName('tab', true)"
-                            :disabled="modelNameModal.saving"
-                            class="rounded border border-gray-200 dark:border-gray-700 px-3 py-1.5 text-xs text-gray-600 dark:text-gray-300 hover:text-red-600 dark:hover:text-red-300 disabled:opacity-50"
-                        >
-                            恢复默认
-                        </button>
-                        <div class="flex flex-wrap items-center justify-end gap-2">
+                    <div class="tab-pool-top-actions">
+                        <label class="tab-pool-search">
+                            <input v-model="tabSearchQuery" type="search" aria-label="搜索标签页、模型或会话" placeholder="搜索标签页、模型或会话" autocomplete="off">
+                            <span v-if="tabSearchQuery">{{ displayedTabs.length }}</span>
+                        </label>
+                        <button type="button" @click="helpExpanded = !helpExpanded" :class="{ active: helpExpanded }" title="使用说明">使用说明</button>
+                        <div class="tab-pool-settings-wrap">
                             <button
                                 type="button"
-                                @click="openModelNameSaveOptions"
-                                :disabled="modelNameModal.saving"
-                                class="rounded border border-blue-200 dark:border-blue-800 px-3 py-1.5 text-xs text-blue-700 dark:text-blue-200 hover:bg-blue-50 dark:hover:bg-blue-900/30 disabled:opacity-50"
-                            >
-                                保存...
+                                data-route-settings-trigger
+                                @click="showRouteSettings = !showRouteSettings"
+                                :class="{ active: showRouteSettings }"
+                                title="标签页池设置"
+                                v-html="$icons.cog"
+                            ></button>
+                            <div v-if="showRouteSettings" data-route-settings-panel class="tab-pool-settings-popover">
+                                <div class="tab-pool-popover-title">
+                                    <span><strong>标签页池设置</strong><small>控制路由显示与异常处理策略</small></span>
+                                    <button type="button" @click="showRouteSettings = false" title="关闭" v-html="$icons.xMark"></button>
+                                </div>
+                                <div class="tab-pool-setting-list">
+                                    <label v-for="method in routeMethodOptions" :key="method.value">
+                                        <span>{{ method.label }}</span>
+                                        <input type="checkbox" :checked="isRouteMethodEnabled(method.value)" :disabled="routeMethodUpdating" @change="toggleRouteMethod(method.value)">
+                                    </label>
+                                </div>
+                                <div class="tab-pool-setting-block">
+                                    <div><strong>域名路由排除 URL</strong><small>{{ excludedUrls.length }} 条</small></div>
+                                    <textarea :value="excludedUrlsDraft" @input="handleExcludedUrlsDraftInput" :disabled="excludedUrlsUpdating" rows="5" placeholder="https://chatgpt.com/c/..."></textarea>
+                                    <div class="tab-pool-setting-actions">
+                                        <button type="button" @click="resetExcludedUrlsDraft" :disabled="excludedUrlsUpdating || !excludedUrlsDraftDirty">重置</button>
+                                        <button type="button" class="primary" @click="saveExcludedUrls()" :disabled="excludedUrlsUpdating">{{ excludedUrlsUpdating ? '保存中...' : '保存排除列表' }}</button>
+                                    </div>
+                                </div>
+                                <label class="tab-pool-preserve-setting">
+                                    <span><strong>错误/超时保留标签页</strong><small>异常时只记录错误，不自动关闭浏览器标签页。</small></span>
+                                    <input type="checkbox" :checked="preserveErrorTabs" :disabled="preserveErrorTabsUpdating" @change="updatePreserveErrorTabs($event.target.checked)">
+                                </label>
+                            </div>
+                        </div>
+                        <button type="button" class="tab-pool-refresh" @click="fetchTabs" :disabled="loading" title="立即刷新">
+                            <span :class="{ spinning: loading }" v-html="$icons.arrowPath"></span>
+                            <span>{{ loading ? '刷新中...' : '立即刷新' }}</span>
+                        </button>
+                    </div>
+                </header>
+
+                <div class="tab-pool-scroll">
+                    <div class="tab-pool-content">
+                        <div v-if="error" class="tab-pool-error">{{ error }}</div>
+
+                        <section v-show="helpExpanded" class="tab-pool-help">
+                            <button type="button" @click="helpExpanded = !helpExpanded" :aria-expanded="helpExpanded">
+                                <span><strong>使用方式</strong><small>查看全部可用路由格式</small></span>
+                                <span :class="['help-chevron', { open: helpExpanded }]" v-html="$icons.chevronDown"></span>
                             </button>
-                            <button
-                                type="button"
-                                @click="submitModelName('tab')"
-                                :disabled="modelNameModal.saving"
-                                class="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
-                            >
-                                {{ modelNameModal.saving ? '应用中...' : '临时应用' }}
-                            </button>
+                            <ul v-show="helpExpanded">
+                                <li><strong>默认路由</strong><code>/v1/chat/completions</code><span>从全局标签页池自动选择。</span></li>
+                                <li v-if="isRouteMethodEnabled('domain')"><strong>域名路由</strong><code>/url/{domain}/v1/chat/completions</code><span>匹配指定站点域名。</span></li>
+                                <li v-if="isRouteMethodEnabled('route_group')"><strong>标签页路由组</strong><code>/group/{组ID}/v1/chat/completions</code><span>只在组内原子选择空闲标签页。</span></li>
+                                <li v-if="isRouteMethodEnabled('fixed_tab')"><strong>固定标签页</strong><code>/tab/{编号}/v1/chat/completions</code><span>精确使用指定标签页。</span></li>
+                                <li v-if="isRouteMethodEnabled('exact_url')"><strong>精确 URL</strong><code>/tab-url/{token}/v1/chat/completions</code><span>只匹配当前已打开的 URL。</span></li>
+                            </ul>
+                        </section>
+
+                        <section v-if="routeGroupModal.visible" :class="['tab-pool-group-editor', { 'is-collapsed': editorCollapsed }]">
+                            <div class="group-editor-head">
+                                <button type="button" class="group-editor-disclosure" @click="toggleGroupEditor" :aria-expanded="!editorCollapsed">
+                                    <span>
+                                        <strong>{{ routeGroupModal.editIndex >= 0 ? (routeGroupModal.name || routeGroupModal.id) : '新建路由组' }}</strong>
+                                        <code v-if="routeGroupModal.id">{{ routeGroupModal.id }}</code>
+                                        <small>固定预设会覆盖请求体中的 preset_name；保存后立即热更新调度器。</small>
+                                    </span>
+                                    <span :class="['group-editor-chevron', { open: !editorCollapsed }]" v-html="$icons.chevronDown"></span>
+                                </button>
+                                <button v-if="routeGroupModal.editIndex >= 0" type="button" class="danger" @click="deleteRouteGroup(routeGroups[routeGroupModal.editIndex], routeGroupModal.editIndex)" v-html="$icons.trash" title="删除路由组"></button>
+                            </div>
+                            <div v-show="!editorCollapsed" class="group-editor-grid">
+                                <div class="group-editor-fields">
+                                    <label><span>组 ID</span><input v-model.trim="routeGroupModal.id" :disabled="routeGroupModal.editIndex >= 0" placeholder="arena-image"></label>
+                                    <label><span>显示名称</span><input v-model.trim="routeGroupModal.name" placeholder="Arena 生图"></label>
+                                    <label><span>站点域名</span><input v-model.trim="routeGroupModal.route_domain" placeholder="arena.ai"></label>
+                                    <label><span>固定预设</span><select v-model="routeGroupModal.preset_name"><option value="">不固定预设</option><option v-for="preset in getRouteGroupPresetOptions(routeGroupModal)" :key="preset" :value="preset">{{ preset }}</option></select></label>
+                                    <label class="wide"><span>组内分配模式</span><select v-model="routeGroupModal.allocation_mode"><option v-for="mode in allocationModeOptions" :key="mode.value" :value="mode.value">{{ mode.label }}</option></select></label>
+                                    <div v-if="routeGroupModal.id" class="group-editor-endpoint wide">
+                                        <code>/group/{{ routeGroupModal.id }}/v1/chat/completions</code>
+                                        <button type="button" @click="copyEndpoint('/group/' + routeGroupModal.id, '已复制路由组端点')" title="复制端点" v-html="$icons.copy"></button>
+                                    </div>
+                                </div>
+                                <div class="group-editor-members">
+                                    <div class="member-list-heading">
+                                        <strong>标签页成员</strong>
+                                        <span>
+                                            <small>{{ routeGroupModal.members.length }} 个成员 · {{ getRouteGroupOnlineMemberCount(routeGroupModal) }} 个在线</small>
+                                            <button v-if="getRouteGroupOfflineMembers(routeGroupModal).length" type="button" @click="removeOfflineRouteGroupMembers">清理未在线</button>
+                                        </span>
+                                    </div>
+                                    <div class="member-list">
+                                        <div v-for="tab in tabs" :key="tab.persistent_index" :class="['member-list-item', { selected: isRouteGroupMemberSelected(tab) }]">
+                                            <label>
+                                                <input type="checkbox" :checked="isRouteGroupMemberSelected(tab)" @change="toggleRouteGroupMember(tab)">
+                                                <i :class="statusColor(tab.status)"></i>
+                                                <span><strong>#{{ tab.persistent_index }} · {{ getDomainLabel(tab) }}</strong><small>{{ tab.url }}</small></span>
+                                                <em>{{ statusText(tab.status) }}</em>
+                                            </label>
+                                            <button v-if="isRouteGroupMemberSelected(tab)" type="button" class="member-remove" @click="removeRouteGroupTab(tab)" title="移出路由组" v-html="$icons.xMark"></button>
+                                        </div>
+                                        <div v-for="(member, memberIndex) in getRouteGroupOfflineMembers(routeGroupModal)" :key="'offline-' + routeGroupMemberKey(member) + '-' + memberIndex" class="member-list-item selected offline">
+                                            <span class="member-offline-dot"></span>
+                                            <span><strong>#{{ member.tab_index || '?' }} · 未在线</strong><small>{{ member.url || member.url_token }}</small></span>
+                                            <em>未在线</em>
+                                            <button type="button" class="member-remove" @click="removeRouteGroupMember(member)" title="移出路由组" v-html="$icons.xMark"></button>
+                                        </div>
+                                    </div>
+                                    <div class="group-editor-actions">
+                                        <button type="button" @click="selectAllTabs">取消</button>
+                                        <button type="button" class="primary" @click="saveRouteGroup" :disabled="routeGroupModal.saving">{{ routeGroupModal.saving ? '保存中...' : '保存路由组' }}</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <div class="tab-pool-list-heading">
+                            <h3>{{ selectedRouteGroup ? '组内标签页' : '全部标签页' }}</h3>
+                            <span>{{ displayedTabs.length }} 个标签页 · {{ displayedIdleCount }} 个空闲</span>
+                        </div>
+
+                        <div v-if="loading && tabs.length === 0" class="tab-pool-empty">正在加载标签页...</div>
+                        <div v-else-if="displayedTabs.length === 0" class="tab-pool-empty">
+                            <strong>{{ tabSearchQuery ? '没有匹配的标签页' : (selectedRouteGroup ? '该路由组暂无成员' : '当前没有标签页') }}</strong>
+                            <span>{{ tabSearchQuery ? '请尝试其他域名、模型名或会话 ID' : (selectedRouteGroup ? '在上方勾选标签页并保存即可加入' : '请先在浏览器中打开受支持的站点') }}</span>
+                        </div>
+
+                        <div v-else class="tab-pool-resource-board">
+                            <div class="tab-pool-board-labels"><span>序号</span><span>连接与路由</span><span>运行配置</span></div>
+                            <div class="tab-pool-card-list">
+                            <article v-for="tab in displayedTabs" :key="tab.persistent_index" class="tab-pool-card">
+                                <div :class="['tab-number', tab.status]">{{ tab.persistent_index }}</div>
+                                <div class="tab-card-main">
+                                    <div class="tab-card-status">
+                                        <i :class="['status-dot', tab.status]"></i>
+                                        <strong>{{ statusText(tab.status) }} · {{ getDomainLabel(tab) }}</strong>
+                                        <span v-if="tab.route_excluded" class="tab-pool-pill tab-pool-pill-amber">域名路由已排除</span>
+                                        <span v-for="groupId in getTabRouteGroupIds(tab)" :key="groupId" class="tab-pool-pill tab-pool-pill-blue">组: {{ groupId }}</span>
+                                        <span v-if="tab.is_isolated_context" class="tab-pool-pill tab-pool-pill-green">独立 Cookie</span>
+                                    </div>
+                                    <p class="tab-card-url" :title="tab.url">{{ tab.url || '(空)' }}</p>
+                                    <div class="tab-route-list">
+                                        <div v-for="groupId in getTabRouteGroupIds(tab)" :key="'route-' + groupId" class="tab-route-row">
+                                            <span>路由组</span><code>/group/{{ groupId }}/v1/chat/completions</code><button type="button" @click="copyEndpoint('/group/' + groupId, '已复制路由组端点')" title="复制路由组端点" v-html="$icons.copy"></button>
+                                        </div>
+                                        <div v-if="isRouteMethodEnabled('domain') && getDomainRoutePrefix(tab)" class="tab-route-row">
+                                            <span>站点域名</span><code>{{ getDomainRoutePrefix(tab) }}/v1/chat/completions</code><button type="button" @click="copyEndpoint(getDomainRoutePrefix(tab), '已复制站点域名路由')" title="复制站点域名路由" v-html="$icons.copy"></button>
+                                        </div>
+                                        <div v-if="tab.available_presets && tab.available_presets.length > 0 && isRouteMethodEnabled('domain') && getPresetDomainRoutePrefix(tab)" class="tab-route-row">
+                                            <span>预设域名</span><code>{{ buildPresetEndpointPath(getPresetDomainRoutePrefix(tab), getDisplayedPreset(tab)) }}</code><button type="button" @click="copyPresetEndpoint(getPresetDomainRoutePrefix(tab), getDisplayedPreset(tab), '已复制预设域名路由')" title="复制预设域名路由" v-html="$icons.copy"></button>
+                                        </div>
+                                        <div v-if="isRouteMethodEnabled('fixed_tab')" class="tab-route-row">
+                                            <span>固定标签页</span><code>{{ getFixedTabRoutePrefix(tab) }}/v1/chat/completions</code><button type="button" @click="copyEndpoint(getFixedTabRoutePrefix(tab), '已复制固定标签页路由')" title="复制固定标签页路由" v-html="$icons.copy"></button>
+                                        </div>
+                                        <div v-if="isRouteMethodEnabled('exact_url') && getExactUrlRoutePrefix(tab)" class="tab-route-row">
+                                            <span>精确 URL</span><code>{{ getExactUrlRoutePrefix(tab) }}/v1/chat/completions</code><button type="button" @click="copyEndpoint(getExactUrlRoutePrefix(tab), '已复制标签页 URL 路由')" title="复制精确 URL 路由" v-html="$icons.copy"></button>
+                                        </div>
+                                        <div v-if="tab.available_presets && tab.available_presets.length > 0 && isRouteMethodEnabled('exact_url_preset') && getExactUrlRoutePrefix(tab)" class="tab-route-row">
+                                            <span>URL 绑定预设</span><code>{{ buildPresetEndpointPath(getExactUrlRoutePrefix(tab), getDisplayedPreset(tab)) }}</code><button type="button" @click="copyPresetEndpoint(getExactUrlRoutePrefix(tab), getDisplayedPreset(tab), '已复制 URL 绑定预设路由')" title="复制 URL 绑定预设路由" v-html="$icons.copy"></button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <aside class="tab-card-side">
+                                    <div><span>请求次数</span><strong>{{ tab.request_count || 0 }}</strong></div>
+                                    <div class="tab-execution-time" :class="{ active: tab.status === 'busy' }"><span>执行时长</span><strong>{{ formatExecutionDuration(tab) }}</strong></div>
+                                    <div><span>会话 ID</span><code>{{ tab.id || tab.session_id || '-' }}</code></div>
+                                    <button type="button" class="model-name-control" @click="openModelNameModal(tab)" @mouseenter="showModelNameTooltip($event)" @mousemove="positionModelNameTooltip($event)" @mouseleave="hideModelNameTooltip" @focus="showModelNameTooltip($event)" @blur="hideModelNameTooltip">
+                                        <span>模型名称</span><strong>{{ truncateModelName(getExposedModelName(tab)) }}</strong><small>{{ getModelNameSourceText(tab) }}</small>
+                                    </button>
+                                    <label v-if="tab.available_presets && tab.available_presets.length > 0" class="tab-preset-control">
+                                        <span>标签页预设</span>
+                                        <select :value="getCurrentPreset(tab)" @change="changePreset(tab, $event.target.value)" :disabled="presetUpdating[tab.persistent_index]">
+                                            <option :value="getDefaultPresetOptionValue()">{{ getDefaultPresetLabel(tab) }}</option>
+                                            <option v-for="preset in tab.available_presets" :key="preset" :value="preset">{{ preset }}</option>
+                                        </select>
+                                    </label>
+                                    <div v-else class="tab-single-preset"><span>标签页预设</span><strong>{{ getDisplayedPreset(tab) }}</strong></div>
+                                    <p v-if="getCommandLoopText(tab)" class="tab-task-line">{{ getCommandLoopText(tab) }}</p>
+                                    <p v-if="tab.current_task" class="tab-task-line">任务: {{ tab.current_task }}</p>
+                                    <div class="tab-card-actions">
+                                        <button v-if="tab.url" type="button" @click="toggleTabExcluded(tab)" :disabled="excludedUrlsUpdating">{{ tab.route_excluded ? '解除排除' : '排除域名路由' }}</button>
+                                        <button v-if="tab.status === 'busy' || tab.current_task || tab.command_task || tab.current_command" type="button" class="danger" @click="openTerminateModal(tab)">终止并解锁</button>
+                                    </div>
+                                </aside>
+                            </article>
+                            </div>
                         </div>
                     </div>
                 </div>
+            </main>
+
+            <div v-if="modelNameTooltip.visible" :style="modelNameTooltipStyle" class="tab-pool-tooltip">{{ modelNameTooltip.text }}</div>
+
+            <div v-if="terminateModal.visible" class="tab-pool-modal-backdrop">
+                <div class="tab-pool-modal">
+                    <div class="tab-pool-modal-head"><span><strong>终止标签页任务</strong><small>标签页 #{{ terminateModal.tab && terminateModal.tab.persistent_index }}</small></span><button type="button" @click="closeTerminateModal()" :disabled="terminateModal.submitting" v-html="$icons.xMark" title="关闭"></button></div>
+                    <div class="tab-pool-modal-body"><p>当前任务: {{ (terminateModal.tab && (terminateModal.tab.current_task || terminateModal.tab.command_task)) || '无 task_id' }}</p><small>终止本次循环只发送单轮取消信号；终止整个任务会取消请求并释放标签页。</small></div>
+                    <div class="tab-pool-modal-actions"><button type="button" @click="closeTerminateModal()" :disabled="terminateModal.submitting">取消</button><button type="button" class="warning" @click="terminateTask(terminateModal.tab, 'loop')" :disabled="terminateModal.submitting || !(terminateModal.tab && terminateModal.tab.command_loop && terminateModal.tab.command_loop.active)">终止本次循环</button><button type="button" class="danger" @click="terminateTask(terminateModal.tab, 'task')" :disabled="terminateModal.submitting">终止整个任务</button></div>
+                </div>
             </div>
 
-            <div
-                v-if="modelNameModal.visible && modelNameModal.showSaveOptions"
-                class="fixed inset-0 z-[65] flex items-center justify-center bg-black/35 px-4 py-6"
-            >
-                <div class="w-full max-w-lg rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-2xl">
-                    <div class="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-700 px-5 py-4">
-                        <div>
-                            <div class="text-base font-semibold text-gray-900 dark:text-white">保存模型显示名称</div>
-                            <div class="mt-1 max-w-sm truncate text-xs text-gray-500 dark:text-gray-400">
-                                {{ modelNameModal.draft }}
-                            </div>
-                        </div>
-                        <button
-                            type="button"
-                            @click="modelNameModal.showSaveOptions = false"
-                            :disabled="modelNameModal.saving"
-                            class="text-sm text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
-                        >
-                            返回
-                        </button>
+            <div v-if="modelNameModal.visible" class="tab-pool-modal-backdrop">
+                <div class="tab-pool-modal">
+                    <div class="tab-pool-modal-head"><span><strong>修改模型显示名称</strong><small>标签页 #{{ modelNameModal.tab && modelNameModal.tab.persistent_index }}</small></span><button type="button" @click="closeModelNameModal()" :disabled="modelNameModal.saving" v-html="$icons.xMark" title="关闭"></button></div>
+                    <div v-if="!modelNameModal.showSaveOptions" class="tab-pool-modal-body">
+                        <label><span>当前暴露的模型名称</span><input v-model="modelNameModal.draft" type="text" maxlength="200" placeholder="例如 lmarena-creative" @keydown.enter.prevent="submitModelName('tab')"></label>
+                        <small>临时应用只绑定当前标签页；关闭或销毁该标签页后，需要重新命名。</small>
                     </div>
-                    <div class="space-y-3 px-5 py-4">
-                        <button
-                            type="button"
-                            @click="submitModelName('site')"
-                            @mouseenter="showModelNameTooltip($event, '按站点保存后，该站点之后打开的标签页都会默认暴露为这个模型名称；更精确的 URL 保存或临时命名会优先生效。')"
-                            @mousemove="positionModelNameTooltip($event)"
-                            @mouseleave="hideModelNameTooltip"
-                            :disabled="modelNameModal.saving"
-                            class="w-full rounded-md border border-gray-200 dark:border-gray-700 px-3 py-3 text-left hover:border-blue-300 dark:hover:border-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-50"
-                        >
-                            <span class="block text-sm font-semibold text-gray-900 dark:text-white">按站点保存</span>
-                            <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">之后同一站点的标签页会默认使用这个模型名。</span>
-                        </button>
-                        <button
-                            type="button"
-                            @click="submitModelName('url')"
-                            @mouseenter="showModelNameTooltip($event, '按网页 URL 保存后，只有当前完整 URL 再次打开时会持久使用这个模型名称，适合 arena.ai 的单个会话页面。')"
-                            @mousemove="positionModelNameTooltip($event)"
-                            @mouseleave="hideModelNameTooltip"
-                            :disabled="modelNameModal.saving"
-                            class="w-full rounded-md border border-gray-200 dark:border-gray-700 px-3 py-3 text-left hover:border-blue-300 dark:hover:border-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-50"
-                        >
-                            <span class="block text-sm font-semibold text-gray-900 dark:text-white">按网页 URL 保存</span>
-                            <span class="mt-1 block text-xs text-gray-500 dark:text-gray-400">仅当前完整网页地址会持久使用这个模型名。</span>
-                        </button>
+                    <div v-else class="tab-pool-modal-body tab-pool-save-options">
+                        <button type="button" @click="submitModelName('site')" :disabled="modelNameModal.saving"><strong>按站点保存</strong><small>之后同一站点的标签页默认使用这个模型名。</small></button>
+                        <button type="button" @click="submitModelName('url')" :disabled="modelNameModal.saving"><strong>按网页 URL 保存</strong><small>仅当前完整网页地址持久使用这个模型名。</small></button>
+                    </div>
+                    <div class="tab-pool-modal-actions split">
+                        <button type="button" class="danger-text" @click="submitModelName('tab', true)" :disabled="modelNameModal.saving">恢复默认</button>
+                        <span><button v-if="modelNameModal.showSaveOptions" type="button" @click="modelNameModal.showSaveOptions = false" :disabled="modelNameModal.saving">返回</button><button v-else type="button" @click="openModelNameSaveOptions" :disabled="modelNameModal.saving">保存...</button><button v-if="!modelNameModal.showSaveOptions" type="button" class="primary" @click="submitModelName('tab')" :disabled="modelNameModal.saving">{{ modelNameModal.saving ? '应用中...' : '临时应用' }}</button></span>
                     </div>
                 </div>
             </div>

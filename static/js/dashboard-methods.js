@@ -600,7 +600,8 @@
                     body: JSON.stringify({
                         selector: this.testSelectorInput,
                         timeout: this.testTimeout,
-                        highlight: this.testHighlight
+                        highlight: this.testHighlight,
+                        route_domain: this.currentDomain || ''
                     })
                 })
 
@@ -667,7 +668,8 @@
                         method: 'POST',
                         body: JSON.stringify({
                             selector: selector,
-                            timeout: 2
+                            timeout: 2,
+                            route_domain: this.currentDomain || ''
                         })
                     })
 
@@ -714,27 +716,50 @@
         async updateImageConfig(newConfig) {
             if (!this.currentDomain || !this.currentConfig) return;
 
+            const domain = this.currentDomain
             const pc = this.getActivePresetConfig()
-            const previousImageConfig = pc
-                ? JSON.parse(JSON.stringify(pc.image_extraction || {}))
-                : null
+            const presetName = this.getActivePresetName()
+            const nextConfig = JSON.parse(JSON.stringify(newConfig || {}))
+            const saveSeq = Number(this.imageConfigSaveSeq || 0) + 1
+            this.imageConfigSaveSeq = saveSeq
 
-            if (pc) pc.image_extraction = newConfig;
+            if (pc) pc.image_extraction = nextConfig;
+
+            const previousSave = this.imageConfigSaveQueue || Promise.resolve()
+            const saveRequest = previousSave
+                .catch(() => undefined)
+                .then(() => {
+                    const payload = { ...nextConfig, preset_name: presetName }
+                    return this.apiRequest(`/api/sites/${encodeURIComponent(domain)}/image-config`, {
+                        method: 'PUT',
+                        body: JSON.stringify(payload)
+                    })
+                })
+            this.imageConfigSaveQueue = saveRequest
 
             try {
-                const presetName = this.getActivePresetName()
-                const payload = { ...newConfig, preset_name: presetName }
-                await this.apiRequest(`/api/sites/${this.currentDomain}/image-config`, {
-                    method: 'PUT',
-                    body: JSON.stringify(payload)
-                });
-                this.notify('多模态提取配置已保存', 'success');
-            } catch (error) {
-                if (pc) {
-                    pc.image_extraction = previousImageConfig || {}
+                await saveRequest
+                if (
+                    saveSeq === this.imageConfigSaveSeq
+                    && domain === this.currentDomain
+                    && presetName === this.getActivePresetName()
+                ) {
+                    this.notify('多模态提取配置已保存', 'success')
                 }
-                console.error('保存图片配置失败:', error);
-                this.notify('保存多模态提取配置失败: ' + error.message, 'error');
+            } catch (error) {
+                if (
+                    saveSeq === this.imageConfigSaveSeq
+                    && domain === this.currentDomain
+                    && presetName === this.getActivePresetName()
+                ) {
+                    console.error('保存图片配置失败:', error)
+                    this.notify('保存多模态提取配置失败: ' + error.message, 'error')
+                    await this.reloadConfig()
+                }
+            } finally {
+                if (this.imageConfigSaveQueue === saveRequest) {
+                    this.imageConfigSaveQueue = null
+                }
             }
         },
 
@@ -2418,7 +2443,7 @@
 
             const selectors = presetConfig.selectors || {}
             const workflow = presetConfig.workflow || []
-            const hasSelectorActions = workflow.some(step => ['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action))
+            const hasSelectorActions = workflow.some(step => ['FILL_INPUT', 'SELECT_MODEL', 'CLICK', 'STREAM_WAIT'].includes(step.action))
             if (hasSelectorActions && Object.keys(selectors).length === 0) {
                 this.notify('至少需要一个选择器', 'warning')
                 return false
@@ -2432,7 +2457,7 @@
                     return false
                 }
 
-                if (['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action)) {
+                if (['FILL_INPUT', 'SELECT_MODEL', 'CLICK', 'STREAM_WAIT'].includes(step.action)) {
                     if (!step.target) {
                         this.notify('步骤 ' + (i + 1) + ': 请选择目标选择器', 'error')
                         return false
@@ -2626,7 +2651,10 @@
         },
 
         onActionChange(step) {
-            if (['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action)) {
+            if (step.action === 'SELECT_MODEL') {
+                if (!step.target) step.target = 'model_select_btn'
+                step.value = { timeout: Number(step.value?.timeout ?? 3) }
+            } else if (['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action)) {
                 step.value = null
                 if (!step.target) step.target = ''
             } else if (step.action === 'PAGE_FETCH') {

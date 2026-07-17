@@ -251,6 +251,7 @@ def record_arena_rule_candidates(
         return {"recorded": [], "matched": 0}
 
     recorded: List[Dict[str, Any]] = []
+    candidates: List[tuple[str, Dict[str, Any], int, int, str, Dict[str, Any]]] = []
     profile_identity: Optional[Dict[str, Any]] = None
     identity_unresolved = False
 
@@ -270,28 +271,55 @@ def record_arena_rule_candidates(
         return profile_identity
 
     with _LOCK:
+        existing_hits = {
+            str(item.get("rule_id") or "")
+            for item in _load_results()["records"]
+            if isinstance(item, dict)
+            and item.get("command_id") == command_id
+            and item.get("url") == url
+        }
+
+    # Detector requests can take up to 20 seconds. Keep them outside the
+    # process-wide persistence lock so reads, clears, and unrelated commands
+    # remain responsive while a detector is slow or offline.
+    for rule_index, rule in enumerate(rules):
+        if not isinstance(rule, dict) or rule.get("enabled", True) is False:
+            continue
+        rule_id = str(rule.get("id") or f"rule-{rule_index + 1}")
+        if rule_id in existing_hits:
+            continue
+        for side_index, response_text in enumerate(response_sides):
+            text = str(response_text or "").strip()
+            matched, _ = _matches_rule(text, rule)
+            if not matched:
+                continue
+            accepted, detector = _detector_accepts(prompt, text, rule, values)
+            if accepted:
+                candidates.append((rule_id, rule, rule_index, side_index, text, detector))
+                break
+
+    if candidates:
+        identity = _resolve_profile()
+        if not str(identity.get("name") or "").strip():
+            identity_unresolved = True
+
+    with _LOCK:
         payload = _load_results()
         records = payload["records"]
-        for rule_index, rule in enumerate(rules):
-            if not isinstance(rule, dict) or rule.get("enabled", True) is False:
-                continue
-            rule_id = str(rule.get("id") or f"rule-{rule_index + 1}")
-            if any(item.get("command_id") == command_id and item.get("rule_id") == rule_id and item.get("url") == url for item in records):
-                continue
-            for side_index, response_text in enumerate(response_sides):
-                text = str(response_text or "").strip()
-                matched, _ = _matches_rule(text, rule)
-                if not matched:
-                    continue
-                accepted, detector = _detector_accepts(prompt, text, rule, values)
-                if not accepted:
+        if not identity_unresolved:
+            for rule_id, rule, rule_index, side_index, text, detector in candidates:
+                # Another worker may have persisted the same hit while the
+                # detector was running, so deduplicate again under the lock.
+                if any(
+                    item.get("command_id") == command_id
+                    and item.get("rule_id") == rule_id
+                    and item.get("url") == url
+                    for item in records
+                    if isinstance(item, dict)
+                ):
                     continue
                 model = str(rule.get("model_name") or rule.get("name") or f"model-{rule_index + 1}").strip()
-                identity = _resolve_profile()
                 profile = str(identity.get("name") or "").strip()
-                if not profile:
-                    identity_unresolved = True
-                    continue
                 title = _next_title(records, profile, model, str(rule.get("title_template") or ""))
                 drawer = _write_link_drawer(
                     _resolve_drawer_file(values.get("link_drawer_path")),
@@ -319,7 +347,6 @@ def record_arena_rule_candidates(
                 }
                 records.append(record)
                 recorded.append(record)
-                break
         if recorded:
             payload["records"] = records[-_MAX_RECORDS:]
             _atomic_write_json(RESULTS_FILE, payload)

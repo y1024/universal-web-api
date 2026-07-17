@@ -65,6 +65,8 @@ class CommandEngine(CommandEngineRuntimeMixin, CommandEngineResultsMixin, Comman
         self._command_runtime_stats: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._commands_lock = threading.RLock()
+        self._scheduler_lifecycle_lock = threading.RLock()
+        self._shutdown_requested = False
 
         # 触发状态：{(command_id, tab_id): {"req": int, "err": int, ...}}
         self._trigger_states: Dict[tuple, Dict[str, Any]] = {}
@@ -150,7 +152,10 @@ class CommandEngine(CommandEngineRuntimeMixin, CommandEngineResultsMixin, Comman
 
     @staticmethod
     def _should_auto_start_scheduler() -> bool:
-        return str(os.getenv("CMD_ENGINE_AUTO_START", "true")).strip().lower() in {
+        # The application lifespan explicitly owns scheduler startup/shutdown.
+        # Starting here makes a plain module import (including pytest test
+        # collection) leak a background thread with no matching shutdown.
+        return str(os.getenv("CMD_ENGINE_AUTO_START", "false")).strip().lower() in {
             "1",
             "true",
             "yes",
@@ -755,6 +760,7 @@ return (function() {
             return
         if self._is_page_check_backing_off(session):
             return
+        setattr(session, "_pc_observer_empty_cleanup_done", False)
         # Skip if already installed with the same keywords AND observer is still alive
         with self._lock:
             installed = self._observer_keywords_by_session.get(sid)
@@ -801,6 +807,41 @@ return (function() {
                 return
             self._record_page_check_js_failure(session, e, "observer_install")
             self._mark_session_closed_if_disconnected(session, e, "page_check_observer_install")
+
+    def _clear_page_check_observer(self, session: 'TabSession') -> None:
+        if self._is_session_closed(session):
+            return
+        sid = str(getattr(session, "id", "") or "")
+        if not sid:
+            return
+        with self._lock:
+            installed = self._observer_keywords_by_session.pop(sid, None)
+        if installed is None and bool(getattr(session, "_pc_observer_empty_cleanup_done", False)):
+            return
+        if self._is_page_check_backing_off(session):
+            return
+
+        cleanup_js = """
+        return (() => {
+            if (window.__pcObserver && typeof window.__pcObserver.disconnect === 'function') {
+                window.__pcObserver.disconnect();
+            }
+            window.__pcObserver = null;
+            window.__pcKeywords = [];
+            window.__pcHits = {};
+            window.__pcSnapshot = '';
+            return true;
+        })();
+        """
+        try:
+            self._run_page_check_js(session, cleanup_js)
+            self._record_page_check_js_success(session)
+            setattr(session, "_pc_observer_empty_cleanup_done", True)
+        except Exception as e:
+            if self._is_session_closed(session):
+                return
+            self._record_page_check_js_failure(session, e, "observer_cleanup")
+            self._mark_session_closed_if_disconnected(session, e, "page_check_observer_cleanup")
             logger.debug(f"[CMD] 页面检查观察器注入失败: {e}")
 
     def _refresh_tab_pool_if_due(self, pool: Any):
@@ -829,29 +870,39 @@ return (function() {
         self._try_wake_tab(session, reason="periodic_keepalive")
 
     def _start_periodic_scheduler(self):
-        if self._periodic_thread and self._periodic_thread.is_alive():
-            return
-        self._periodic_stop_event.clear()
-        self._periodic_thread = threading.Thread(
-            target=self._periodic_loop,
-            daemon=True,
-            name="cmd-periodic-checker",
-        )
-        self._periodic_thread.start()
+        with self._scheduler_lifecycle_lock:
+            if self._shutdown_requested:
+                return False
+            if self._periodic_thread and self._periodic_thread.is_alive():
+                return True
+            self._periodic_stop_event.clear()
+            self._periodic_thread = threading.Thread(
+                target=self._periodic_loop,
+                daemon=True,
+                name="cmd-periodic-checker",
+            )
+            self._periodic_thread.start()
         logger.debug("[CMD] 周期调度器已启动")
+        return True
 
     def is_scheduler_running(self) -> bool:
-        thread = self._periodic_thread
-        return bool(thread and thread.is_alive())
+        with self._scheduler_lifecycle_lock:
+            thread = self._periodic_thread
+            return bool(
+                not self._shutdown_requested
+                and thread
+                and thread.is_alive()
+            )
 
     def ensure_scheduler_running(self):
         """Best-effort watchdog: start periodic checker if it is not running."""
-        if not self.is_scheduler_running():
-            self._start_periodic_scheduler()
+        return self._start_periodic_scheduler()
 
     def shutdown(self):
-        self._periodic_stop_event.set()
-        thread = self._periodic_thread
+        with self._scheduler_lifecycle_lock:
+            self._shutdown_requested = True
+            self._periodic_stop_event.set()
+            thread = self._periodic_thread
         if thread and thread.is_alive():
             thread.join(timeout=1.0)
         try:
@@ -867,6 +918,21 @@ return (function() {
                 self._run_periodic_checks()
             except Exception as e:
                 logger.debug(f"[CMD] 周期调度循环异常（忽略）: {e}")
+
+    def _get_periodic_trigger_timing(self, trigger: Dict, session_id: str) -> tuple[float, float]:
+        interval = max(1.0, self._coerce_float(trigger.get("periodic_interval_sec", 8), 8.0))
+        jitter = max(0.0, self._coerce_float(trigger.get("periodic_jitter_sec", 2), 2.0))
+
+        trigger_type = str(trigger.get("type", "")).strip().lower()
+        has_keyword_expression = bool(str(trigger.get("value", "") or "").strip())
+        if trigger_type == "page_check" and has_keyword_expression:
+            with self._lock:
+                has_observer = session_id in self._observer_keywords_by_session
+            if has_observer:
+                interval = min(interval, 1.5)
+                jitter = 0.0
+
+        return interval, jitter
 
     def _run_periodic_checks(self):
         try:
@@ -932,6 +998,8 @@ return (function() {
                 pc_keywords = self._collect_page_check_keywords(commands, session)
                 if pc_keywords:
                     self._ensure_page_check_observer(session, pc_keywords)
+                else:
+                    self._clear_page_check_observer(session)
             except Exception:
                 pass
 
@@ -958,17 +1026,7 @@ return (function() {
                 key = (cmd_id, session.id)
                 active_keys.add(key)
 
-                interval = max(1.0, self._coerce_float(trigger.get("periodic_interval_sec", 8), 8.0))
-                jitter = max(0.0, self._coerce_float(trigger.get("periodic_jitter_sec", 2), 2.0))
-
-                # page_check commands with observer use shorter interval (observer makes check cheap)
-                if trigger_type == "page_check":
-                    sid = str(getattr(session, "id", "") or "")
-                    with self._lock:
-                        has_observer = sid in self._observer_keywords_by_session
-                    if has_observer:
-                        interval = min(interval, 1.5)
-                        jitter = 0.0
+                interval, jitter = self._get_periodic_trigger_timing(trigger, session_id)
 
                 with self._lock:
                     next_at = float(self._periodic_next_run.get(key, 0.0))

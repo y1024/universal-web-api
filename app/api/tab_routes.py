@@ -41,6 +41,10 @@ from app.services.request_lifecycle import (
     run_tracked_blocking_call,
     wait_worker_queue_item,
 )
+from app.services.arena_direct_models import (
+    build_openai_model_entries,
+    list_arena_direct_models,
+)
 from app.services.tool_calling import (
     build_tool_completion_response,
     complete_tool_calling_roundtrip_async,
@@ -70,6 +74,11 @@ from app.utils.site_url import (
     normalize_route_domain,
     route_domain_matches,
     tab_url_matches,
+)
+from app.utils.tab_route_groups import (
+    normalize_route_group_id,
+    normalize_route_groups,
+    route_groups_by_id,
 )
 
 logger = get_logger("API.TAB")
@@ -122,6 +131,31 @@ def _build_route_models_payload(
         "object": "list",
         "data": [entry],
     }
+
+
+def _build_route_model_entries_payload(
+    entries: List[Dict[str, Any]],
+    *,
+    anthropic_version: Optional[str] = None,
+) -> Dict[str, Any]:
+    if anthropic_version:
+        data = [
+            {
+                "type": "model",
+                "id": str(item.get("id") or ""),
+                "display_name": str(item.get("display_name") or item.get("id") or ""),
+                "created_at": _format_rfc3339_timestamp(item.get("created")),
+            }
+            for item in entries
+            if str(item.get("id") or "").strip()
+        ]
+        return {
+            "data": data,
+            "has_more": False,
+            "first_id": data[0]["id"] if data else None,
+            "last_id": data[-1]["id"] if data else None,
+        }
+    return {"object": "list", "data": entries}
 
 
 def _unwrap_fastapi_param_value(value: Any) -> Any:
@@ -227,11 +261,12 @@ TAB_POOL_ALLOCATION_OPTIONS = [
 ]
 TAB_ROUTE_METHOD_OPTIONS = [
     {"value": "domain", "label": "站点域名路由"},
+    {"value": "route_group", "label": "标签页路由组"},
     {"value": "fixed_tab", "label": "固定标签页路由"},
     {"value": "exact_url", "label": "标签页 URL 路由"},
     {"value": "exact_url_preset", "label": "URL 绑定预设路由"},
 ]
-DEFAULT_TAB_ROUTE_METHODS = {"domain", "fixed_tab", "exact_url", "exact_url_preset"}
+DEFAULT_TAB_ROUTE_METHODS = {"domain", "route_group", "fixed_tab", "exact_url", "exact_url_preset"}
 TAB_SELECTOR_OPTIONS = {"first_idle", "round_robin", "random"}
 _route_round_robin_cursor: Dict[str, int] = {}
 _route_round_robin_lock = threading.Lock()
@@ -693,6 +728,26 @@ def _get_excluded_urls_from_config(config: Optional[Dict[str, Any]] = None) -> L
     return _normalize_excluded_urls(tab_pool_config.get("excluded_urls"))
 
 
+def _get_route_groups_from_config(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    payload = config if isinstance(config, dict) else _read_browser_config()
+    tab_pool_config = payload.get("tab_pool") if isinstance(payload, dict) else {}
+    if not isinstance(tab_pool_config, dict):
+        tab_pool_config = {}
+    return normalize_route_groups(tab_pool_config.get("route_groups"))
+
+
+def _get_tab_pool_route_groups(tab_pool: Any, config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    try:
+        if hasattr(tab_pool, "get_route_groups_snapshot"):
+            return tab_pool.get_route_groups_snapshot()
+        route_groups = getattr(tab_pool, "route_groups", None)
+        if route_groups is not None:
+            return normalize_route_groups(route_groups)
+    except Exception:
+        pass
+    return _get_route_groups_from_config(config)
+
+
 def _get_tab_pool_excluded_urls(tab_pool: Any, config: Optional[Dict[str, Any]] = None) -> List[str]:
     try:
         excluded_urls = getattr(tab_pool, "excluded_urls", None)
@@ -950,11 +1005,21 @@ def _build_tab_resolution_headers(
     model_name: str = "",
     selector: str = "",
     preset_name: str = "",
+    route_group: str = "",
 ) -> Dict[str, str]:
     headers: Dict[str, str] = {}
     requested_route_domain = str(route_domain or "").strip()
     requested_exact_url = str(exact_url or "").strip()
     requested_model_name = _normalize_model_name(model_name)
+    requested_route_group = normalize_route_group_id(route_group)
+
+    if requested_route_group:
+        headers["X-Requested-Route-Group"] = requested_route_group
+        headers["X-Resolved-Route-Group"] = requested_route_group
+        if requested_route_domain:
+            headers["X-Resolved-Route-Domain"] = (
+                normalize_route_domain(requested_route_domain) or requested_route_domain
+            )
 
     if requested_route_domain:
         headers["X-Requested-Route-Domain"] = (
@@ -1000,6 +1065,18 @@ def _build_tab_resolution_headers(
         headers["X-Resolved-Model-Name"] = exposed_model_name
 
     return _encode_response_headers(headers)
+
+
+def _resolve_route_group(browser: Any, group_id: str) -> Dict[str, Any]:
+    normalized_id = normalize_route_group_id(group_id)
+    if not normalized_id:
+        raise HTTPException(status_code=400, detail="标签页路由组 ID 无效")
+
+    groups = browser.tab_pool.get_route_groups_snapshot()
+    group = route_groups_by_id(groups).get(normalized_id)
+    if not group:
+        raise HTTPException(status_code=404, detail=f"标签页路由组 '{normalized_id}' 不存在")
+    return group
 
 
 def _build_stream_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -1199,6 +1276,7 @@ class TabPoolConfigRequest(BaseModel):
     enabled_route_methods: Optional[List[str]] = Field(default=None)
     excluded_urls: Optional[List[str]] = Field(default=None)
     preserve_error_tabs: Optional[bool] = Field(default=None)
+    route_groups: Optional[List[Dict[str, Any]]] = Field(default=None)
 
 
 class TabModelNameRequest(BaseModel):
@@ -1242,6 +1320,7 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
         enabled_route_methods = _get_enabled_route_methods_from_config(browser_config)
         excluded_urls = _get_tab_pool_excluded_urls(browser.tab_pool, browser_config)
         preserve_error_tabs = _get_tab_pool_preserve_error_tabs(browser.tab_pool, browser_config)
+        route_groups = _get_tab_pool_route_groups(browser.tab_pool, browser_config)
         for tab_info in tabs:
             exclusion_url = _get_tab_item_exclusion_url(tab_info, excluded_urls)
             tab_info["route_excluded"] = bool(exclusion_url)
@@ -1268,6 +1347,7 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
             "excluded_urls": excluded_urls,
             "preserve_error_tabs": preserve_error_tabs,
+            "route_groups": route_groups,
         }
     except Exception as e:
         logger.error(f"获取标签页列表失败: {e}")
@@ -1281,6 +1361,7 @@ async def get_tab_pool_tabs(authenticated: bool = Depends(verify_auth)):
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
             "excluded_urls": [],
             "preserve_error_tabs": False,
+            "route_groups": [],
         }
 
 
@@ -1381,6 +1462,8 @@ async def update_tab_pool_config(
     excluded_urls = _normalize_excluded_urls(body.excluded_urls)
     request_includes_preserve_error_tabs = body.preserve_error_tabs is not None
     preserve_error_tabs = _coerce_bool(body.preserve_error_tabs, False)
+    request_includes_route_groups = body.route_groups is not None
+    route_groups = normalize_route_groups(body.route_groups)
 
     try:
         with _browser_config_lock:
@@ -1394,8 +1477,11 @@ async def update_tab_pool_config(
                 tab_pool_config["excluded_urls"] = excluded_urls
             if request_includes_preserve_error_tabs:
                 tab_pool_config["preserve_error_tabs"] = preserve_error_tabs
+            if request_includes_route_groups:
+                tab_pool_config["route_groups"] = route_groups
             current_excluded_urls = _normalize_excluded_urls(tab_pool_config.get("excluded_urls"))
             current_preserve_error_tabs = _coerce_bool(tab_pool_config.get("preserve_error_tabs"), False)
+            current_route_groups = normalize_route_groups(tab_pool_config.get("route_groups"))
             config["tab_pool"] = tab_pool_config
             _write_browser_config_unlocked(config)
 
@@ -1415,6 +1501,8 @@ async def update_tab_pool_config(
             }
             if request_includes_excluded_urls:
                 runtime_kwargs["excluded_urls"] = excluded_urls
+            if request_includes_route_groups:
+                runtime_kwargs["route_groups"] = route_groups
             browser.tab_pool.apply_runtime_config(**runtime_kwargs)
             pool_synced = True
         except Exception as sync_error:
@@ -1429,6 +1517,7 @@ async def update_tab_pool_config(
             "route_method_options": TAB_ROUTE_METHOD_OPTIONS,
             "excluded_urls": current_excluded_urls,
             "preserve_error_tabs": current_preserve_error_tabs,
+            "route_groups": current_route_groups,
             "pool_synced": pool_synced,
         }
     except HTTPException:
@@ -1503,6 +1592,26 @@ async def list_models_with_route_domain(
         tab_index=tab_index,
         selector=normalized_selector,
     )
+
+    if route_domain_matches(route_key, "arena.ai"):
+        arena_entries = build_openai_model_entries(
+            list_arena_direct_models(browser),
+            created=MODEL_LIST_CREATED,
+        )
+        if arena_entries:
+            payload = _build_route_model_entries_payload(
+                arena_entries,
+                anthropic_version=anthropic_version,
+            )
+            response = JSONResponse(content=payload)
+            response.headers.update(
+                _build_tab_resolution_headers(
+                    tab_info,
+                    route_domain=route_key,
+                    selector=normalized_selector,
+                )
+            )
+            return response
 
     payload = _build_route_models_payload(
         model_id=_build_claude_route_model_id(route_key),
@@ -1646,6 +1755,64 @@ async def list_models_with_exact_tab_url_and_preset(
     return response
 
 
+@router.get("/group/{group_id}/v1/models")
+async def list_models_with_route_group(
+    group_id: str,
+    authenticated: bool = Depends(verify_service_auth),
+):
+    browser = get_browser(auto_connect=False)
+    group = _resolve_route_group(browser, group_id)
+    payload = {
+        "object": "list",
+        "data": [{
+            "id": group["id"],
+            "object": "model",
+            "created": MODEL_LIST_CREATED,
+            "owned_by": "universal-web-api",
+        }],
+    }
+    response = JSONResponse(content=payload)
+    response.headers.update(_build_tab_resolution_headers(
+        None,
+        route_domain=group.get("route_domain") or "",
+        selector=group.get("allocation_mode") or "round_robin",
+        route_group=group["id"],
+    ))
+    return response
+
+
+@router.get("/group/{group_id}/{preset_name}/v1/models")
+async def list_models_with_route_group_and_preset(
+    group_id: str,
+    preset_name: str,
+    authenticated: bool = Depends(verify_service_auth),
+):
+    browser = get_browser(auto_connect=False)
+    group = _resolve_route_group(browser, group_id)
+    route_domain = str(group.get("route_domain") or "").strip()
+    if not route_domain:
+        raise HTTPException(status_code=400, detail="路由组未配置站点域名，不能绑定预设")
+    preset_resolution = _resolve_strict_domain_preset(route_domain, preset_name)
+    payload = {
+        "object": "list",
+        "data": [{
+            "id": group["id"],
+            "object": "model",
+            "created": MODEL_LIST_CREATED,
+            "owned_by": "universal-web-api",
+        }],
+    }
+    response = JSONResponse(content=payload)
+    response.headers.update(_build_tab_resolution_headers(
+        None,
+        route_domain=route_domain,
+        selector=group.get("allocation_mode") or "round_robin",
+        preset_name=preset_resolution["preset_name"],
+        route_group=group["id"],
+    ))
+    return response
+
+
 async def _chat_with_resolved_tab(
     request: Request,
     body: ChatRequest,
@@ -1753,6 +1920,7 @@ async def _chat_with_route_domain(
     ctx: RequestContext,
     *,
     route_domain: str,
+    route_group_id: Optional[str] = None,
     allocation_mode: Optional[str] = None,
     resolved_headers: Optional[Dict[str, str]] = None,
 ):
@@ -1771,6 +1939,7 @@ async def _chat_with_route_domain(
                     body,
                     ctx,
                     route_domain,
+                    route_group_id=route_group_id,
                     allocation_mode=allocation_mode,
                 ),
                 media_type="text/event-stream",
@@ -1781,6 +1950,7 @@ async def _chat_with_route_domain(
             body,
             ctx,
             route_domain,
+            route_group_id=route_group_id,
             allocation_mode=allocation_mode,
         )
         response.headers.update(headers)
@@ -1793,6 +1963,7 @@ async def _chat_with_route_domain(
                 body,
                 ctx,
                 route_domain,
+                route_group_id=route_group_id,
                 allocation_mode=allocation_mode,
             ),
             media_type="text/event-stream",
@@ -1804,6 +1975,7 @@ async def _chat_with_route_domain(
         body,
         ctx,
         route_domain,
+        route_group_id=route_group_id,
         allocation_mode=allocation_mode,
     )
     response.headers.update(headers)
@@ -2049,6 +2221,92 @@ async def chat_with_route_domain_and_preset(
     )
 
 
+@router.post("/group/{group_id}/v1/chat/completions")
+async def chat_with_route_group(
+    group_id: str,
+    request: Request,
+    body: ChatRequest,
+    preset_name: Optional[str] = Query(default=None),
+    authenticated: bool = Depends(verify_service_auth),
+):
+    browser = get_browser(auto_connect=False)
+    group = _resolve_route_group(browser, group_id)
+    route_domain = str(group.get("route_domain") or "").strip()
+    resolved_preset_name = str(
+        preset_name or group.get("preset_name") or body.preset_name or ""
+    ).strip() or None
+    if resolved_preset_name:
+        if not route_domain:
+            raise HTTPException(status_code=400, detail="路由组未配置站点域名，不能绑定预设")
+        resolved_preset_name = _resolve_strict_domain_preset(
+            route_domain,
+            resolved_preset_name,
+        )["preset_name"]
+    if resolved_preset_name != body.preset_name:
+        body = body.model_copy(update={"preset_name": resolved_preset_name})
+
+    ctx = request_manager.create_request()
+    try:
+        raw_input_len = sum(
+            len(str(msg.get("content") or ""))
+            for msg in body.messages if isinstance(msg, dict)
+        )
+        logger.info(
+            f"[DIAG] 接收到的原始请求 messages 总字符长度: {raw_input_len} 字符, "
+            f"消息数: {len(body.messages)}"
+        )
+    except Exception as e:
+        logger.debug(f"[DIAG] 估算原始请求长度失败: {e}")
+
+    request_manager.record_request_input(
+        ctx,
+        body.model_dump(),
+        endpoint=f"/group/{group['id']}/v1/chat/completions",
+        route_domain=route_domain,
+        route_group=group["id"],
+        preset_name=resolved_preset_name,
+    )
+    resolved_headers = _build_tab_resolution_headers(
+        None,
+        route_domain=route_domain,
+        selector=group.get("allocation_mode") or "round_robin",
+        preset_name=resolved_preset_name or "",
+        route_group=group["id"],
+    )
+    with logger.context(ctx.request_id):
+        logger.info(
+            f"开始 (标签页路由组 {group['id']} -> 组内动态标签页, "
+            f"selector={group.get('allocation_mode') or 'round_robin'}, "
+            f"preset={resolved_preset_name or '<follow-tab/default>'})"
+        )
+        return await _chat_with_route_domain(
+            request,
+            body,
+            ctx,
+            route_domain=route_domain,
+            route_group_id=group["id"],
+            allocation_mode=group.get("allocation_mode") or "round_robin",
+            resolved_headers=resolved_headers,
+        )
+
+
+@router.post("/group/{group_id}/{preset_name}/v1/chat/completions")
+async def chat_with_route_group_and_preset(
+    group_id: str,
+    preset_name: str,
+    request: Request,
+    body: ChatRequest,
+    authenticated: bool = Depends(verify_service_auth),
+):
+    return await chat_with_route_group(
+        group_id=group_id,
+        request=request,
+        body=body,
+        preset_name=preset_name,
+        authenticated=authenticated,
+    )
+
+
 @router.post("/tab-url/{url_token}/v1/chat/completions")
 async def chat_with_exact_tab_url(
     url_token: str,
@@ -2214,6 +2472,7 @@ async def _stream_with_tab_index(
                     task_id=ctx.request_id,
                     preset_name=body.preset_name,
                     stop_checker=ctx.should_stop,
+                    requested_model=body.model,
                 )
 
                 for chunk in gen:
@@ -2467,6 +2726,7 @@ async def _stream_with_route_domain(
     body: ChatRequest,
     ctx: RequestContext,
     route_domain: str,
+    route_group_id: Optional[str] = None,
     allocation_mode: Optional[str] = None,
 ):
     """使用指定域名路由的流式响应"""
@@ -2491,15 +2751,28 @@ async def _stream_with_route_domain(
         def worker():
             gen = None
             try:
-                gen = browser.execute_workflow_for_route_domain(
-                    route_domain,
-                    body.messages,
-                    stream=True,
-                    task_id=ctx.request_id,
-                    preset_name=body.preset_name,
-                    stop_checker=ctx.should_stop,
-                    allocation_mode=allocation_mode,
-                )
+                if route_group_id:
+                    gen = browser.execute_workflow_for_route_group(
+                        route_group_id,
+                        body.messages,
+                        stream=True,
+                        task_id=ctx.request_id,
+                        preset_name=body.preset_name,
+                        stop_checker=ctx.should_stop,
+                        allocation_mode=allocation_mode,
+                        requested_model=body.model,
+                    )
+                else:
+                    gen = browser.execute_workflow_for_route_domain(
+                        route_domain,
+                        body.messages,
+                        stream=True,
+                        task_id=ctx.request_id,
+                        preset_name=body.preset_name,
+                        stop_checker=ctx.should_stop,
+                        allocation_mode=allocation_mode,
+                        requested_model=body.model,
+                    )
 
                 for chunk in gen:
                     if ctx.should_stop():
@@ -2510,7 +2783,11 @@ async def _stream_with_route_domain(
                             logger.info(f"工作线程检测到取消: {cancel_reason}")
                         break
                     if not _put_route_worker_queue_item(chunk_queue, ctx, chunk):
-                        logger.debug("工作线程停止入队，结束流式生产(route_domain)")
+                        logger.debug(
+                            "工作线程停止入队，结束流式生产("
+                            f"{'route_group=' + route_group_id if route_group_id else 'route_domain'}"
+                            ")"
+                        )
                         break
 
             except Exception as e:
@@ -2542,7 +2819,7 @@ async def _stream_with_route_domain(
                 ctx,
                 request_started_at,
                 max_execute_time_sec,
-                label=f"route_domain={route_domain}",
+                label=(f"route_group={route_group_id}" if route_group_id else f"route_domain={route_domain}"),
             ):
                 request_manager.capture_error(ctx, "请求执行超过最大绝对超时", code="absolute_request_timeout")
                 ctx.mark_failed("absolute_request_timeout")
@@ -2588,7 +2865,8 @@ async def _stream_with_route_domain(
                 last_sse_emit_at = time.monotonic()
                 error_message = _extract_stream_error_message(emit_chunk or outgoing_chunk)
                 if error_message:
-                    logger.error(f"流式响应返回错误事件(route_domain={route_domain}): {error_message}")
+                    route_label = f"route_group={route_group_id}" if route_group_id else f"route_domain={route_domain}"
+                    logger.error(f"流式响应返回错误事件({route_label}): {error_message}")
                     request_manager.capture_error(ctx, error_message, code="stream_error")
                     ctx.mark_failed(error_message)
                     done_chunk = _pack_done()
@@ -2620,7 +2898,8 @@ async def _stream_with_route_domain(
                 fast_returned_on_audio = True
                 ctx.request_cancel("audio_media_fast_return")
                 ctx.mark_completed()
-                logger.info(f"流式朗读响应已取得音频，提前结束(route_domain={route_domain})")
+                route_label = f"route_group={route_group_id}" if route_group_id else f"route_domain={route_domain}"
+                logger.info(f"流式朗读响应已取得音频，提前结束({route_label})")
                 done_emitted = True
                 for fast_return_chunk in _pack_audio_fast_return_chunks(body):
                     request_manager.capture_response_chunk(ctx, fast_return_chunk)
@@ -2692,6 +2971,7 @@ async def _non_stream_with_route_domain(
     body: ChatRequest,
     ctx: RequestContext,
     route_domain: str,
+    route_group_id: Optional[str] = None,
     allocation_mode: Optional[str] = None,
 ) -> JSONResponse:
     """使用指定域名路由的非流式响应"""
@@ -2706,6 +2986,7 @@ async def _non_stream_with_route_domain(
         body,
         ctx,
         route_domain,
+        route_group_id=route_group_id,
         allocation_mode=allocation_mode,
     ):
         if isinstance(chunk, str):
@@ -2789,6 +3070,7 @@ async def _stream_with_exact_url(
                     preset_name=body.preset_name,
                     stop_checker=ctx.should_stop,
                     resolved_tab_index=resolved_tab_index,
+                    requested_model=body.model,
                 )
 
                 for chunk in gen:
@@ -3051,6 +3333,7 @@ def _execute_browser_non_stream_for_tab(
     request_id: str,
     preset_name: Optional[str] = None,
     stop_checker=None,
+    requested_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = None
     for chunk in browser.execute_workflow_for_tab_index(
@@ -3061,6 +3344,7 @@ def _execute_browser_non_stream_for_tab(
         preset_name=preset_name,
         stop_checker=stop_checker,
         allow_media_postprocess=get_tool_calling_allow_media_postprocess(),
+        requested_model=requested_model,
     ):
         payload = chunk
 
@@ -3082,10 +3366,18 @@ def _execute_browser_non_stream_for_route_domain(
     preset_name: Optional[str] = None,
     stop_checker=None,
     allocation_mode: Optional[str] = None,
+    route_group_id: Optional[str] = None,
+    requested_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = None
-    for chunk in browser.execute_workflow_for_route_domain(
-        route_domain,
+    execute = (
+        browser.execute_workflow_for_route_group
+        if route_group_id
+        else browser.execute_workflow_for_route_domain
+    )
+    route_key = route_group_id or route_domain
+    for chunk in execute(
+        route_key,
         messages,
         stream=False,
         task_id=request_id,
@@ -3093,6 +3385,7 @@ def _execute_browser_non_stream_for_route_domain(
         stop_checker=stop_checker,
         allocation_mode=allocation_mode,
         allow_media_postprocess=get_tool_calling_allow_media_postprocess(),
+        requested_model=requested_model,
     ):
         payload = chunk
 
@@ -3114,6 +3407,7 @@ def _execute_browser_non_stream_for_exact_url(
     preset_name: Optional[str] = None,
     stop_checker=None,
     resolved_tab_index: Optional[int] = None,
+    requested_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = None
     for chunk in browser.execute_workflow_for_exact_url(
@@ -3125,6 +3419,7 @@ def _execute_browser_non_stream_for_exact_url(
         stop_checker=stop_checker,
         resolved_tab_index=resolved_tab_index,
         allow_media_postprocess=get_tool_calling_allow_media_postprocess(),
+        requested_model=requested_model,
     ):
         payload = chunk
 
@@ -3220,6 +3515,7 @@ async def _run_tool_calling_async_for_tab(
                 request_id=request_id,
                 preset_name=body.preset_name,
                 stop_checker=stop_checker,
+                requested_model=body.model,
             )
         )
         if isinstance(tracked_worker_state.get("ctx"), RequestContext):
@@ -3264,6 +3560,7 @@ async def _run_tool_calling_async_for_route_domain(
     stop_checker=None,
     worker_state: Optional[Dict[str, Any]] = None,
     allocation_mode: Optional[str] = None,
+    route_group_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     legacy_function_call = bool(body.functions) and not bool(body.tools)
     tools, tool_choice = normalize_tool_request(
@@ -3293,6 +3590,8 @@ async def _run_tool_calling_async_for_route_domain(
                 preset_name=body.preset_name,
                 stop_checker=stop_checker,
                 allocation_mode=allocation_mode,
+                route_group_id=route_group_id,
+                requested_model=body.model,
             )
         )
         if isinstance(tracked_worker_state.get("ctx"), RequestContext):
@@ -3366,6 +3665,7 @@ async def _run_tool_calling_async_for_exact_url(
                 preset_name=body.preset_name,
                 stop_checker=stop_checker,
                 resolved_tab_index=resolved_tab_index,
+                requested_model=body.model,
             )
         )
         if isinstance(tracked_worker_state.get("ctx"), RequestContext):
@@ -3470,6 +3770,7 @@ async def _complete_tool_calling_with_route_domain(
     ctx: RequestContext,
     route_domain: str,
     allocation_mode: Optional[str] = None,
+    route_group_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     disconnect_task = None
     worker_state: Dict[str, Any] = {"thread": None, "label": None, "ctx": ctx}
@@ -3489,6 +3790,7 @@ async def _complete_tool_calling_with_route_domain(
             ctx.should_stop,
             worker_state=worker_state,
             allocation_mode=allocation_mode,
+            route_group_id=route_group_id,
         )
         request_manager.capture_response_payload(ctx, response)
 
@@ -3510,7 +3812,8 @@ async def _complete_tool_calling_with_route_domain(
         ctx.request_cancel("coroutine_cancelled")
         raise
     except Exception as e:
-        logger.error(f"tool_calling_failed(route_domain={route_domain}): {e}")
+        route_label = f"route_group={route_group_id}" if route_group_id else f"route_domain={route_domain}"
+        logger.error(f"tool_calling_failed({route_label}): {e}")
         request_manager.capture_error(ctx, e, code="tool_calling_failed")
         ctx.mark_failed(str(e))
         raise
@@ -3624,6 +3927,7 @@ async def _non_stream_tool_calling_with_route_domain(
     ctx: RequestContext,
     route_domain: str,
     allocation_mode: Optional[str] = None,
+    route_group_id: Optional[str] = None,
 ) -> JSONResponse:
     try:
         response = await _complete_tool_calling_with_route_domain(
@@ -3632,6 +3936,7 @@ async def _non_stream_tool_calling_with_route_domain(
             ctx,
             route_domain,
             allocation_mode=allocation_mode,
+            route_group_id=route_group_id,
         )
         return JSONResponse(content=response)
     except Exception as e:
@@ -3731,6 +4036,7 @@ async def _stream_tool_calling_with_route_domain(
     ctx: RequestContext,
     route_domain: str,
     allocation_mode: Optional[str] = None,
+    route_group_id: Optional[str] = None,
 ):
     try:
         response = await _complete_tool_calling_with_route_domain(
@@ -3739,6 +4045,7 @@ async def _stream_tool_calling_with_route_domain(
             ctx,
             route_domain,
             allocation_mode=allocation_mode,
+            route_group_id=route_group_id,
         )
         message = response.get("choices", [{}])[0].get("message", {}) or {}
         legacy_function_call = bool(body.functions) and not bool(body.tools)
@@ -3849,6 +4156,8 @@ class TerminateTabRequest(BaseModel):
     reason: str = Field(default="manual_terminate_from_tab_pool", max_length=120)
     clear_page: bool = Field(default=True)
     scope: str = Field(default="task", max_length=20)
+    expected_session_id: str = Field(default="", max_length=200)
+    expected_task_id: str = Field(default="", max_length=200)
 
 
 @router.put("/api/tab-pool/tabs/{tab_index}/preset")
@@ -3890,15 +4199,26 @@ async def terminate_tab_task(
 
     try:
         browser = get_browser(auto_connect=False)
-        result = browser.tab_pool.terminate_by_index(
+        result = await asyncio.to_thread(
+            browser.tab_pool.terminate_by_index,
             tab_index,
             reason=(body.reason or "manual_terminate_from_tab_pool"),
             clear_page=bool(body.clear_page),
             scope=(body.scope or "task"),
+            expected_session_id=body.expected_session_id,
+            expected_task_id=body.expected_task_id,
         )
         if not result.get("ok"):
             if result.get("error") == "tab_not_found":
                 raise HTTPException(status_code=404, detail=f"标签页 #{tab_index} 不存在")
+            if result.get("error") in {
+                "session_ownership_changed",
+                "task_ownership_changed",
+            }:
+                raise HTTPException(
+                    status_code=409,
+                    detail="标签页任务已经变化，请刷新后重试",
+                )
             raise HTTPException(status_code=400, detail=result.get("error", "terminate_failed"))
         return result
     except HTTPException:
