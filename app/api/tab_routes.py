@@ -43,6 +43,7 @@ from app.services.request_lifecycle import (
 )
 from app.services.arena_direct_models import (
     build_openai_model_entries,
+    get_arena_direct_catalog_for_tab,
     list_arena_direct_models,
 )
 from app.services.tool_calling import (
@@ -1567,6 +1568,7 @@ async def list_models_with_tab(
     }
 
 
+@router.get("/url/{route_domain}/models")
 @router.get("/url/{route_domain}/v1/v1/models")
 @router.get("/url/{route_domain}/v1/models")
 async def list_models_with_route_domain(
@@ -1594,8 +1596,14 @@ async def list_models_with_route_domain(
     )
 
     if route_domain_matches(route_key, "arena.ai"):
+        from app.services.config_engine import config_engine
+
+        catalog_preset = get_arena_direct_catalog_for_tab(config_engine, tab_info)
         arena_entries = build_openai_model_entries(
-            list_arena_direct_models(browser),
+            list_arena_direct_models(
+                browser,
+                catalog_config=(catalog_preset or {}).get("catalog"),
+            ) if catalog_preset else [],
             created=MODEL_LIST_CREATED,
         )
         if arena_entries:
@@ -1629,6 +1637,7 @@ async def list_models_with_route_domain(
     return response
 
 
+@router.get("/url/{route_domain}/{preset_name}/models")
 @router.get("/url/{route_domain}/{preset_name}/v1/v1/models")
 @router.get("/url/{route_domain}/{preset_name}/v1/models")
 async def list_models_with_route_domain_and_preset(
@@ -1657,11 +1666,30 @@ async def list_models_with_route_domain_and_preset(
         selector=normalized_selector,
     )
 
-    payload = _build_route_models_payload(
-        model_id=_build_claude_route_model_id(f"{route_key}-{preset_resolution['preset_name']}"),
-        display_name=f"Claude Code route: {route_key} / {preset_resolution['preset_name']}",
-        anthropic_version=anthropic_version,
+    from app.services.config_engine import config_engine
+
+    catalog_preset = get_arena_direct_catalog_for_tab(
+        config_engine,
+        tab_info,
+        preset_name=preset_resolution["preset_name"],
     )
+    if catalog_preset:
+        payload = _build_route_model_entries_payload(
+            build_openai_model_entries(
+                list_arena_direct_models(
+                    browser,
+                    catalog_config=catalog_preset["catalog"],
+                ),
+                created=MODEL_LIST_CREATED,
+            ),
+            anthropic_version=anthropic_version,
+        )
+    else:
+        payload = _build_route_models_payload(
+            model_id=_build_claude_route_model_id(f"{route_key}-{preset_resolution['preset_name']}"),
+            display_name=f"Claude Code route: {route_key} / {preset_resolution['preset_name']}",
+            anthropic_version=anthropic_version,
+        )
     response = JSONResponse(content=payload)
     response.headers.update(
         _build_tab_resolution_headers(

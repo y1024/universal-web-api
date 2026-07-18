@@ -944,6 +944,12 @@ window.ConfigTab = {
             }
         },
 
+        updateModelCatalog(value) {
+            const pc = this.presetConfig;
+            if (!pc) return;
+            pc.model_catalog = this.cloneConfigSection(value || {});
+        },
+
         sanitizeInputStabilityWaitTimeout(value) {
             const parsed = Number(value);
             if (!Number.isFinite(parsed)) {
@@ -2022,10 +2028,12 @@ window.ConfigTab = {
                 <workflow-panel v-if="presetConfig"
                     :workflow="presetConfig.workflow || []"
                     :selectors="presetConfig.selectors || {}"
+                    :model-catalog="presetConfig.model_catalog || {}"
                     :current-domain="currentDomain"
                     :selected-preset="selectedPreset"
                     :collapsed="workflowCollapsed"
                     @update:collapsed="workflowCollapsed = $event"
+                    @update:model-catalog="updateModelCatalog"
                     @add-step="$emit('add-step')"
                     @remove-step="$emit('remove-step', $event)"
                     @move-step="(index, dir) => $emit('move-step', index, dir)"

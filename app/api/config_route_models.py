@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app.models.schemas import ADVANCED_FIELDS, PRESET_ADVANCED_FIELDS, SITE_ADVANCED_FIELDS
+from app.services.arena_direct_models import normalize_model_catalog_config
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -154,6 +155,12 @@ def _normalize_preset_config_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 status_code=400,
                 detail=f"预设 advanced 不能包含站点级字段: {joined}",
             )
+
+    model_catalog = normalized.get("model_catalog")
+    if model_catalog is not None:
+        if not isinstance(model_catalog, dict) or isinstance(model_catalog, list):
+            raise HTTPException(status_code=400, detail="model_catalog 必须是对象")
+        normalized["model_catalog"] = normalize_model_catalog_config(model_catalog)
 
     normalized["stealth"] = bool(normalized.get("stealth", False))
     return normalized

@@ -23,11 +23,12 @@ window.WorkflowPanel = {
     props: {
         workflow: { type: Array, required: true },
         selectors: { type: Object, required: true },
+        modelCatalog: { type: Object, default: () => ({}) },
         currentDomain: { type: String, default: null },
         selectedPreset: { type: String, default: '主预设' },
         collapsed: { type: Boolean, default: true }
     },
-    emits: ['update:collapsed', 'add-step', 'remove-step', 'move-step', 'action-change', 'show-templates'],
+    emits: ['update:collapsed', 'update:modelCatalog', 'add-step', 'remove-step', 'move-step', 'action-change', 'show-templates'],
     data() {
         return {
             editorInjecting: false,
@@ -67,6 +68,28 @@ window.WorkflowPanel = {
     methods: {
         toggle() {
             this.$emit('update:collapsed', !this.collapsed);
+        },
+
+        normalizeCatalogKeywords(value) {
+            const items = Array.isArray(value)
+                ? value
+                : String(value || '').split(/[\n,]+/);
+            return [...new Set(items.map(item => String(item || '').trim()).filter(Boolean))];
+        },
+
+        catalogKeywordsText(key) {
+            return this.normalizeCatalogKeywords(this.modelCatalog && this.modelCatalog[key]).join('\n');
+        },
+
+        updateModelCatalog(patch) {
+            this.$emit('update:modelCatalog', {
+                enabled: false,
+                source: 'arena_direct',
+                include_keywords: [],
+                exclude_keywords: [],
+                ...(this.modelCatalog || {}),
+                ...(patch || {})
+            });
         },
 
         async authJsonRequest(url, options = {}) {
@@ -398,7 +421,44 @@ window.WorkflowPanel = {
                 </div>
             </div>
 
-            <div v-show="!collapsed" class="p-4 space-y-3 max-h-96 overflow-auto">
+            <div v-show="!collapsed" class="p-4 space-y-4 max-h-[44rem] overflow-auto">
+                <div class="border-b border-gray-200 dark:border-gray-700 pb-4 space-y-3">
+                    <div class="flex items-center justify-between gap-4">
+                        <div>
+                            <div class="text-sm font-semibold text-gray-900 dark:text-white">页面模型目录</div>
+                            <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">启用后，此预设负责读取页面模型、过滤列表，并在请求时切换模型。</div>
+                        </div>
+                        <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                            <input type="checkbox"
+                                   class="rounded"
+                                   :checked="!!modelCatalog.enabled"
+                                   @change="updateModelCatalog({ enabled: $event.target.checked })">
+                            <span>启用目录</span>
+                        </label>
+                    </div>
+
+                    <div v-if="modelCatalog.enabled" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label class="block min-w-0">
+                            <span class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">仅保留关键词（可选，每行一个）</span>
+                            <textarea :value="catalogKeywordsText('include_keywords')"
+                                      @input="updateModelCatalog({ include_keywords: normalizeCatalogKeywords($event.target.value) })"
+                                      rows="4"
+                                      spellcheck="false"
+                                      class="w-full rounded-md border dark:border-gray-600 px-3 py-2 font-mono text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-y focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                      placeholder="glm\nclaude"></textarea>
+                        </label>
+                        <label class="block min-w-0">
+                            <span class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">排除关键词（每行一个）</span>
+                            <textarea :value="catalogKeywordsText('exclude_keywords')"
+                                      @input="updateModelCatalog({ exclude_keywords: normalizeCatalogKeywords($event.target.value) })"
+                                      rows="4"
+                                      spellcheck="false"
+                                      class="w-full rounded-md border dark:border-gray-600 px-3 py-2 font-mono text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-y focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                      placeholder="image\npreview\nlegacy"></textarea>
+                        </label>
+                    </div>
+                </div>
+
                 <div v-for="(step, index) in workflow" :key="index"
                      :class="[
                          'border rounded-lg p-3 transition-colors',

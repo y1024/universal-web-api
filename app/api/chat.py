@@ -69,9 +69,13 @@ from app.api.deps import (
 )
 from app.services.arena_direct_models import (
     build_openai_model_entries,
+    get_arena_direct_catalog_for_tab,
+    get_arena_direct_model_public_id,
     list_arena_direct_models,
+    match_arena_direct_model,
 )
 from app.utils.model_routing import collect_route_domain_models, inspect_model_route
+from app.utils.site_url import route_domain_matches
 
 logger = get_logger("API.CHAT")
 
@@ -1972,11 +1976,52 @@ async def chat_completions(
             body.messages = _apply_response_format(body.messages, body.response_format)
             setattr(body, "_response_format_applied", True)
 
+    catalog_tab_index: Optional[int] = None
     try:
         browser = get_browser(auto_connect=False)
         tabs = browser.tab_pool.get_tabs_with_index()
         route_info = inspect_model_route(body.model, tabs)
         route_domain = str(route_info.get("route_domain") or "")
+        if route_info.get("match_type") == "none":
+            from app.services.config_engine import config_engine
+
+            catalog_tab = None
+            catalog_preset = None
+            for tab in tabs:
+                candidate = get_arena_direct_catalog_for_tab(
+                    config_engine,
+                    tab,
+                    preset_name=body.preset_name,
+                )
+                if candidate:
+                    catalog_tab = tab
+                    catalog_preset = candidate
+                    break
+            requested_key = str(body.model or "").strip().casefold()
+            catalog_models = list_arena_direct_models(
+                browser,
+                catalog_config=(catalog_preset or {}).get("catalog"),
+            ) if catalog_preset and requested_key else []
+            catalog_match = match_arena_direct_model(catalog_models, requested_key)
+            if catalog_match and catalog_tab:
+                route_domain = "arena.ai"
+                catalog_tab_index = int(catalog_tab.get("persistent_index") or 0) or None
+                public_model_id = get_arena_direct_model_public_id(catalog_match)
+                catalog_model_ids = [
+                    str(item.get("id") or "")
+                    for item in build_openai_model_entries(
+                        catalog_models,
+                        created=MODEL_LIST_CREATED,
+                    )
+                ]
+                route_info.update({
+                    "route_domain": route_domain,
+                    "route_type": "model_catalog",
+                    "model_name": public_model_id,
+                    "matched_id": public_model_id,
+                    "match_type": "catalog",
+                    "available_model_ids": catalog_model_ids,
+                })
     except Exception as e:
         logger.debug(f"模型路由解析失败（已忽略）: {e}")
         route_info = {
@@ -2024,7 +2069,7 @@ async def chat_completions(
             route_domain=route_domain,
             request=request,
             body=route_body,
-            tab_index=None,
+            tab_index=(catalog_tab_index if route_info.get("match_type") == "catalog" else None),
             selector=None,
             preset_name=body.preset_name,
             authenticated=authenticated,
@@ -2770,21 +2815,41 @@ def _collect_model_entries() -> List[Dict[str, Any]]:
     try:
         browser = get_browser(auto_connect=False)
         tabs = browser.tab_pool.get_tabs_with_index()
+        from app.services.config_engine import config_engine
+
+        catalog_preset = None
+        for tab in tabs:
+            candidate = get_arena_direct_catalog_for_tab(config_engine, tab)
+            if candidate:
+                catalog_preset = candidate
+                break
         for item in collect_route_domain_models(tabs):
+            item_route_domains = list(item.get("route_domains") or [])
+            if item.get("route_domain"):
+                item_route_domains.append(item.get("route_domain"))
+            if catalog_preset and item.get("is_route_alias") and any(
+                route_domain_matches("arena.ai", domain)
+                for domain in item_route_domains
+            ):
+                continue
             _append_entry(
                 item.get("id"),
                 owned_by=item.get("route_domain") or "universal-web-api",
                 display_name=item.get("display_name") or item.get("id"),
             )
-        for item in build_openai_model_entries(
-            list_arena_direct_models(browser),
-            created=MODEL_LIST_CREATED,
-        ):
-            _append_entry(
-                item.get("id"),
-                owned_by=item.get("owned_by") or "arena.ai",
-                display_name=item.get("display_name") or item.get("id"),
-            )
+        if catalog_preset:
+            for item in build_openai_model_entries(
+                list_arena_direct_models(
+                    browser,
+                    catalog_config=catalog_preset["catalog"],
+                ),
+                created=MODEL_LIST_CREATED,
+            ):
+                _append_entry(
+                    item.get("id"),
+                    owned_by=item.get("owned_by") or "arena.ai",
+                    display_name=item.get("display_name") or item.get("id"),
+                )
     except Exception as e:
         logger.debug(f"构建模型列表失败（已忽略）: {e}")
 

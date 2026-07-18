@@ -17,7 +17,6 @@ from urllib.parse import unquote, urlparse
 from app.core.config import BrowserConstants, ElementNotFoundError, WorkflowError, logger
 from app.core.page_lifecycle import BACKGROUND_WAKE_CDP_TIMEOUT
 from app.services.arena_direct_models import (
-    is_arena_direct_model_id,
     resolve_arena_direct_model,
 )
 from app.utils.human_mouse import cdp_precise_click, human_scroll_path, idle_drift, smooth_move_mouse
@@ -753,6 +752,50 @@ class WorkflowExecutorActionMixin:
                 return (int(loc[0] + size[0] / 2), int(loc[1] + size[1] / 2))
         except Exception:
             pass
+
+        # React/Radix portals can expose a valid backend node while
+        # DrissionPage's rect wrapper is temporarily unavailable. Resolve the
+        # same node through CDP; this remains a browser-native, non-JS path.
+        backend_id = getattr(ele, '_backend_id', None)
+        if backend_id is not None:
+            try:
+                result = self.tab.run_cdp(
+                    "DOM.getBoxModel",
+                    backendNodeId=int(backend_id),
+                    _timeout=BACKGROUND_WAKE_CDP_TIMEOUT,
+                ) or {}
+                model = result.get("model") if isinstance(result, dict) else None
+                if isinstance(model, dict):
+                    for quad_key in ("content", "padding", "border", "margin"):
+                        quad = model.get(quad_key)
+                        if not isinstance(quad, (list, tuple)) or len(quad) < 8:
+                            continue
+                        points = []
+                        for index in range(0, min(len(quad), 8), 2):
+                            x = float(quad[index])
+                            y = float(quad[index + 1])
+                            if not math.isfinite(x) or not math.isfinite(y):
+                                points = []
+                                break
+                            points.append((x, y))
+                        if len(points) != 4:
+                            continue
+                        width = max(point[0] for point in points) - min(point[0] for point in points)
+                        height = max(point[1] for point in points) - min(point[1] for point in points)
+                        if width <= 0 or height <= 0:
+                            continue
+                        center_x = int(round(sum(point[0] for point in points) / 4))
+                        center_y = int(round(sum(point[1] for point in points) / 4))
+                        logger.debug(
+                            "[STEALTH_CLICK] DrissionPage rect 不可用，已通过 CDP BoxModel 获取坐标: "
+                            f"backend={backend_id}, quad={quad_key}, point=({center_x},{center_y})"
+                        )
+                        return (center_x, center_y)
+            except Exception as exc:
+                logger.debug(
+                    "[STEALTH_CLICK] CDP BoxModel 坐标获取失败: "
+                    f"backend={backend_id}, error={self._compact_log_value(exc, 160)}"
+                )
         
         return None
     
@@ -1188,6 +1231,17 @@ class WorkflowExecutorActionMixin:
         except Exception:
             return []
 
+    def _first_positioned_element(self, elements: Any, predicate=None):
+        for ele in elements or []:
+            try:
+                if predicate is not None and not predicate(ele):
+                    continue
+                if self._get_element_viewport_pos(ele) is not None:
+                    return ele
+            except Exception:
+                continue
+        return None
+
     @staticmethod
     def _model_label_matches(label: Any, model: dict) -> bool:
         normalized = str(label or "").strip().casefold()
@@ -1228,14 +1282,17 @@ class WorkflowExecutorActionMixin:
         optional: bool,
     ) -> None:
         requested_model = str((context or {}).get("model") or "").strip()
-        if not is_arena_direct_model_id(requested_model):
+        if not requested_model:
             logger.debug(
-                "[SELECT_MODEL] 请求未指定 Arena Direct 模型，保持页面当前选择: "
-                f"model={self._compact_log_value(requested_model, 100)}"
+                "[SELECT_MODEL] 请求未指定模型，保持页面当前选择"
             )
             return
 
-        model = resolve_arena_direct_model(self.tab, requested_model)
+        model = resolve_arena_direct_model(
+            self.tab,
+            requested_model,
+            catalog_config=(context or {}).get("model_catalog"),
+        )
         if not model:
             if optional:
                 logger.warning(
@@ -1259,15 +1316,15 @@ class WorkflowExecutorActionMixin:
                     return
 
                 triggers = self._find_visible_elements(trigger_selector)
-                trigger = next((ele for ele in triggers if str(getattr(ele, "text", "") or "").strip()), None)
+                trigger = self._first_positioned_element(
+                    triggers,
+                    lambda ele: bool(str(getattr(ele, "text", "") or "").strip()),
+                )
                 if trigger is None:
                     mode_buttons = self._find_visible_elements('button[role="combobox"]')
-                    mode_button = next(
-                        (
-                            ele for ele in mode_buttons
-                            if str(getattr(ele, "text", "") or "").strip()
-                        ),
-                        None,
+                    mode_button = self._first_positioned_element(
+                        mode_buttons,
+                        lambda ele: bool(str(getattr(ele, "text", "") or "").strip()),
                     )
                     if mode_button is None:
                         raise ElementNotFoundError("Arena 模式选择按钮未找到")
@@ -1286,7 +1343,10 @@ class WorkflowExecutorActionMixin:
                         while time.time() < mode_deadline and not self._check_cancelled():
                             for candidate in self._find_visible_elements('[role="option"]'):
                                 label = str(getattr(candidate, "text", "") or "").strip()
-                                if label.casefold().startswith("direct"):
+                                if (
+                                    label.casefold().startswith("direct")
+                                    and self._get_element_viewport_pos(candidate) is not None
+                                ):
                                     direct_option = candidate
                                     break
                             if direct_option is not None:
@@ -1305,12 +1365,9 @@ class WorkflowExecutorActionMixin:
                     trigger_deadline = time.time() + timeout
                     while time.time() < trigger_deadline and not self._check_cancelled():
                         triggers = self._find_visible_elements(trigger_selector)
-                        trigger = next(
-                            (
-                                ele for ele in triggers
-                                if str(getattr(ele, "text", "") or "").strip()
-                            ),
-                            None,
+                        trigger = self._first_positioned_element(
+                            triggers,
+                            lambda ele: bool(str(getattr(ele, "text", "") or "").strip()),
                         )
                         if trigger is not None:
                             break
@@ -1337,14 +1394,22 @@ class WorkflowExecutorActionMixin:
                 search_input = None
                 while time.time() < deadline and not self._check_cancelled():
                     inputs = self._find_visible_elements('input[placeholder="Search models"]')
-                    if inputs:
-                        search_input = inputs[0]
+                    search_input = self._first_positioned_element(inputs)
+                    if search_input is not None:
                         break
                     time.sleep(0.05)
                 if search_input is None:
                     raise ElementNotFoundError("Arena Direct 模型搜索框未出现")
 
-                self._text_handler.fill_via_clipboard_no_click(search_input, model["name"])
+                # Arena filters this field by the visible label/public name;
+                # the internal name is retained for the exact data-value match.
+                search_text = str(
+                    model.get("display_name")
+                    or model.get("public_name")
+                    or model.get("name")
+                    or ""
+                ).strip()
+                self._text_handler.fill_via_clipboard_no_click(search_input, search_text)
 
                 option = None
                 while time.time() < deadline and not self._check_cancelled():
@@ -1353,7 +1418,10 @@ class WorkflowExecutorActionMixin:
                             data_value = str(candidate.attr("data-value") or "").strip()
                         except Exception:
                             data_value = ""
-                        if data_value.casefold() == model["name"].casefold():
+                        if (
+                            data_value.casefold() == model["name"].casefold()
+                            and self._get_element_viewport_pos(candidate) is not None
+                        ):
                             option = candidate
                             break
                     if option is not None:
@@ -1374,12 +1442,9 @@ class WorkflowExecutorActionMixin:
                 verify_deadline = time.time() + min(timeout, 2.0)
                 while time.time() < verify_deadline and not self._check_cancelled():
                     selected_triggers = self._find_visible_elements(trigger_selector)
-                    selected = next(
-                        (
-                            ele for ele in selected_triggers
-                            if self._model_label_matches(getattr(ele, "text", ""), model)
-                        ),
-                        None,
+                    selected = self._first_positioned_element(
+                        selected_triggers,
+                        lambda ele: self._model_label_matches(getattr(ele, "text", ""), model),
                     )
                     if selected is not None:
                         logger.info(

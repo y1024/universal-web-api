@@ -112,7 +112,13 @@ def collect_route_domain_models(tabs: List[Dict[str, Any]]) -> List[Dict[str, An
     alias_map: Dict[str, str] = {}
     ambiguous_aliases = set()
 
-    def _ensure_model(model_id: str, route_domain: str = "", *, allow_prefix: bool = True) -> None:
+    def _ensure_model(
+        model_id: str,
+        route_domain: str = "",
+        *,
+        allow_prefix: bool = True,
+        is_route_alias: bool = False,
+    ) -> None:
         normalized_model = _normalize_model_id(model_id)
         if not normalized_model:
             return
@@ -124,11 +130,14 @@ def collect_route_domain_models(tabs: List[Dict[str, Any]]) -> List[Dict[str, An
                 "route_type": "model_name",
                 "route_domains": set(),
                 "allow_prefix": bool(allow_prefix),
+                "is_route_alias": bool(is_route_alias),
             }
         if route_domain:
             model_map[normalized_model]["route_domains"].add(route_domain)
         if not allow_prefix:
             model_map[normalized_model]["allow_prefix"] = False
+        if not is_route_alias:
+            model_map[normalized_model]["is_route_alias"] = False
 
     for tab in tabs or []:
         route_domain = _resolve_route_domain(tab)
@@ -137,7 +146,12 @@ def collect_route_domain_models(tabs: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
 
         overridden = _is_model_name_overridden(tab)
-        _ensure_model(exposed_model_id, route_domain, allow_prefix=not overridden)
+        _ensure_model(
+            exposed_model_id,
+            route_domain,
+            allow_prefix=not overridden,
+            is_route_alias=not overridden,
+        )
 
         if overridden or not route_domain:
             continue
@@ -167,6 +181,7 @@ def collect_route_domain_models(tabs: List[Dict[str, Any]]) -> List[Dict[str, An
             "route_type": "model_name",
             "route_domains": set(target.get("route_domains") or set()),
             "allow_prefix": True,
+            "is_route_alias": True,
         }
 
     result: List[Dict[str, Any]] = []
@@ -181,6 +196,7 @@ def collect_route_domain_models(tabs: List[Dict[str, Any]]) -> List[Dict[str, An
             "route_domain": route_domains[0] if len(route_domains) == 1 else "",
             "route_domains": route_domains,
             "allow_prefix": bool(item.get("allow_prefix", True)),
+            "is_route_alias": bool(item.get("is_route_alias", False)),
         })
 
     return result

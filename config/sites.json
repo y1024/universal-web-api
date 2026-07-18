@@ -2886,6 +2886,12 @@
   "arena.ai": {
     "presets": {
       "主预设-直连模式": {
+        "model_catalog": {
+          "enabled": true,
+          "source": "arena_direct",
+          "include_keywords": [],
+          "exclude_keywords": []
+        },
         "selectors": {
           "input_box": "textarea[name=\"message\"]",
           "model_select_btn": "button[aria-haspopup=\"dialog\"]:has(span.flex-1.truncate.text-left)",

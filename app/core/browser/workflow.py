@@ -20,7 +20,10 @@ from app.core.page_lifecycle import BACKGROUND_WAKE_CDP_TIMEOUT
 from app.core.workflow import WorkflowExecutor
 from app.core.tab_pool import TabSession
 from app.models.schemas import get_modality_run_policy, is_modality_enabled
-from app.services.arena_direct_models import is_arena_direct_model_id
+from app.services.arena_direct_models import (
+    get_model_catalog_preset,
+    resolve_arena_direct_model,
+)
 
 if TYPE_CHECKING:
     from .main import BrowserCore
@@ -1375,8 +1378,14 @@ class BrowserWorkflowMixin:
         
         config_engine = self._get_config_engine()
         effective_preset_name = preset_name if preset_name is not None else session.preset_name
-        if domain == "arena.ai" and is_arena_direct_model_id(requested_model):
-            effective_preset_name = "主预设-直连模式"
+        if preset_name is None:
+            catalog_preset = get_model_catalog_preset(config_engine, domain)
+            if catalog_preset and resolve_arena_direct_model(
+                tab,
+                requested_model,
+                catalog_config=catalog_preset["catalog"],
+            ):
+                effective_preset_name = catalog_preset["preset_name"]
         resolved_preset_name = effective_preset_name or config_engine.get_default_preset(domain) or "主预设"
         site_config = config_engine.get_site_config(domain, tab.html, preset_name=effective_preset_name)
         if not site_config:
@@ -1593,6 +1602,7 @@ class BrowserWorkflowMixin:
             "prompt": prompt_text,
             "images": user_images,
             "model": str(requested_model or "").strip(),
+            "model_catalog": site_config.get("model_catalog", {}),
         }
         
         extractor = config_engine.get_site_extractor(domain, preset_name=effective_preset_name)

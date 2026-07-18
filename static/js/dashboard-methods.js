@@ -2377,7 +2377,7 @@
             const PRESET_FIELDS = [
                 'selectors', 'workflow', 'stealth', 'stream_config',
                 'image_extraction', 'file_paste', 'prompt_padding',
-                'extractor_id', 'extractor_verified'
+                'extractor_id', 'extractor_verified', 'model_catalog'
             ]
             for (const [k, v] of Object.entries(raw || {})) {
                 if (v.presets) {
